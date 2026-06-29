@@ -1,0 +1,349 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { PageHeader } from "@/components/app-shell";
+import { CheckCircle2, Sparkles, ArrowLeft, ArrowRight, BarChart3, Shield } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cn } from "@/lib/utils";
+import { formUpload } from "@/lib/api";
+import { useDataset } from "@/lib/app-context";
+import { Button } from "@/components/ui/button";
+
+export const Route = createFileRoute("/models")({
+  head: () => ({ meta: [{ title: "Model Selection — Aegis Credit" }] }),
+  component: ModelSelection,
+});
+
+interface ModelRecommendation {
+  name: string;
+  score: number;
+  description: string;
+  why: string;
+  best_for?: string[];
+  icon?: string;
+}
+
+interface ModelCard extends ModelRecommendation {
+  selected?: boolean;
+}
+
+function ModelSelection() {
+  const { profile, file, recommendations, setRecommendations, setSelectedModel, selectedModel } = useDataset();
+  const [trainingStats, setTrainingStats] = useState<{train_n: number; train_features: number; imbalance_ratio: number} | null>(null);
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [modelsToCompare, setModelsToCompare] = useState<string[]>([]);
+  const fetchRef = useRef(false);
+
+  // Compute dataset summary metrics
+  const datasetSummary = useMemo(() => {
+    // Prefer training stats returned by the backend (train split after FE)
+    if (trainingStats) {
+      return { sampleCount: trainingStats.train_n, featureCount: trainingStats.train_features, imbalanceRatio: trainingStats.imbalance_ratio };
+    }
+    if (!profile) return null;
+    const shape = profile.shape ?? [0, 0];
+    const sampleCount = shape[0] ?? 0;
+    const featureCount = shape[1] ?? 0;
+    let imbalanceRatio = 1.0;
+    
+    if (profile.class_distribution && typeof profile.class_distribution === "object") {
+      const values = Object.values(profile.class_distribution) as number[];
+      if (values.length >= 2) {
+        const sorted = values.sort((a, b) => b - a);
+        imbalanceRatio = sorted[0] / (sorted[1] || 1);
+      }
+    }
+    
+    return { sampleCount, featureCount, imbalanceRatio };
+  }, [profile, trainingStats]);
+
+  const transformedModels = useMemo(() => {
+    if (!recommendations || !Array.isArray(recommendations) || recommendations.length === 0) return [];
+    return recommendations.map((rec, idx) => ({
+      ...rec,
+      selected: rec.name === selectedModel?.name || (!selectedModel && idx === 0),
+    }));
+  }, [recommendations, selectedModel]);
+
+  useEffect(() => {
+    if (!profile || !file) return;
+    // Reset guard when dataset changes so we fetch for new dataset
+    fetchRef.current = false;
+    if (recommendations && recommendations.length > 0) return; // already loaded
+    if (fetchRef.current) return; // already in-flight or fetched
+
+    let isMounted = true;
+    const loadRecommendations = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("target_col", profile.target_col || "loan_status");
+
+        console.log("Models: POST /models/recommend", { target_col: profile.target_col });
+        const response = await formUpload("/models/recommend", form);
+        console.log("Models: response", response);
+        if (!isMounted) return;
+        // Use backend-provided training stats when available
+        if (response?.training) {
+          setTrainingStats(response.training as any);
+        }
+
+        const recs = response?.recommendations ?? response?.recommendations_list ?? response?.data ?? null;
+        if (recs && Array.isArray(recs)) {
+          const transformed = recs.map((rec: any) => ({
+            name: rec.name,
+            score: typeof rec.score === "number" ? rec.score : 5,
+            description: rec.description ?? "",
+            why: rec.why ?? rec.description ?? "",
+            best_for: rec.best_for ?? [],
+            icon: rec.icon,
+          }));
+
+          setRecommendations(transformed);
+          if (!selectedModel && transformed.length > 0) {
+            setSelectedModel(transformed[0]);
+          }
+        } else {
+          setError("No recommendations returned by backend.");
+        }
+      } catch (err: any) {
+        console.error("Models: failed to load recommendations", err);
+        if (!isMounted) return;
+        setError(err?.body?.detail ?? err?.message ?? "Failed to load model recommendations.");
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchRef.current = true;
+    loadRecommendations();
+    return () => {
+      isMounted = false;
+    };
+    // Intentionally exclude selectedModel and recommendations to avoid re-fetch on selection/result changes
+  }, [file, profile, setRecommendations, setSelectedModel]);
+
+  const handleSelectModel = useCallback((model: ModelCard) => {
+    setSelectedModel(model);
+  }, [setSelectedModel]);
+
+  const toggleModelToCompare = useCallback((modelName: string) => {
+    setModelsToCompare((prev) => {
+      if (prev.includes(modelName)) {
+        return prev.filter((m) => m !== modelName);
+      } else {
+        return [...prev, modelName];
+      }
+    });
+  }, []);
+
+  if (!profile) {
+    return (
+      <div className="space-y-8">
+        <PageHeader title="Model Selection" description="Recommendation cards ranked by score, with regulator-friendly trade-offs." />
+        <div className="rounded-xl border border-border bg-card p-6 text-center">
+          <h3 className="text-lg font-semibold">No dataset available</h3>
+          <p className="mt-2 text-sm text-muted-foreground">Upload and preprocess a dataset before model selection.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-8">
+      <PageHeader
+        title="Model Selection"
+        description="Recommendation cards ranked by score, with regulator-friendly trade-offs."
+      />
+
+      {/* Dataset Summary */}
+      {datasetSummary && (
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">Sample count</div>
+            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.sampleCount.toLocaleString()}</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">Feature count</div>
+            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.featureCount}</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">Class imbalance</div>
+            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.imbalanceRatio.toFixed(2)}x</div>
+          </div>
+        </section>
+      )}
+
+      {loading && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          Loading model recommendations...
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {transformedModels.length === 0 && !loading && !error && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          No model recommendations available.
+        </div>
+      )}
+
+      {transformedModels.length > 0 && (
+        <>
+          {/* Models to Compare Section */}
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center gap-3 mb-4">
+              <BarChart3 className="h-5 w-5 text-primary" />
+              <h2 className="text-base font-semibold">Models to Compare</h2>
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">
+              Select additional models to include in comparative evaluation. The champion (selected above) is always included.
+            </p>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {transformedModels.map((model) => (
+                <label
+                  key={model.name}
+                  className="flex items-center gap-2 rounded-lg border border-border bg-background p-3 cursor-pointer hover:border-primary/40 transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={modelsToCompare.includes(model.name)}
+                    onChange={() => toggleModelToCompare(model.name)}
+                    className="rounded border-border"
+                  />
+                  <span className="text-sm font-medium">{model.name}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+
+          {/* Recommendation Cards */}
+          <section>
+            <h2 className="text-base font-semibold mb-4">Recommended Models</h2>
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {transformedModels.map((m) => (
+                <div
+                  key={m.name}
+                  className={cn(
+                    "relative rounded-2xl border bg-card p-6 shadow-elegant transition-all hover:-translate-y-1 cursor-pointer",
+                    m.selected ? "border-primary/60 ring-2 ring-primary/20" : "border-border hover:border-primary/40",
+                  )}
+                  onClick={() => handleSelectModel(m)}
+                >
+                  {m.selected && (
+                    <span className="absolute -top-2.5 right-4 inline-flex items-center gap-1 rounded-full gradient-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-elegant">
+                      <Sparkles className="h-3 w-3" /> Selected
+                    </span>
+                  )}
+                  <div className="flex items-baseline justify-between gap-4">
+                    <div>
+                      <h3 className="text-base font-semibold">{m.name}</h3>
+                      {m.icon && <div className="text-sm text-muted-foreground">{m.icon}</div>}
+                    </div>
+                    <span className="text-2xl font-semibold tabular-nums">{m.score.toFixed(1)}</span>
+                  </div>
+                  <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Recommendation score</div>
+
+                  <dl className="mt-4 space-y-2.5 text-sm">
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
+                      <dd className="mt-0.5 text-foreground/90">{m.best_for?.length ? m.best_for.join(", ") : m.description}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
+                      <dd className="mt-0.5 text-foreground/90 text-xs">{m.why}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Recommendation</dt>
+                      <dd className="mt-0.5 flex items-center gap-1.5 text-foreground/90">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
+                        {m.selected ? "Champion (selected)" : "Challenger"}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSelectModel(m);
+                    }}
+                    className={cn(
+                      "mt-5 w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                      m.selected
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-background hover:border-primary/40 hover:bg-primary-soft",
+                    )}
+                  >
+                    {m.selected ? "Selected" : "Select model"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Credit Risk Evaluation Strategy */}
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center gap-3 mb-4">
+              <Shield className="h-5 w-5 text-primary" />
+              <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Champion Model</h3>
+                <p className="text-sm text-muted-foreground">
+                  {selectedModel ? (
+                    <>
+                      <strong>{selectedModel.name}</strong> has been selected as the primary model for risk assessment. 
+                      This model will be trained on your dataset and used for generating predictions and risk scores.
+                    </>
+                  ) : (
+                    "Select a champion model above to proceed with training and evaluation."
+                  )}
+                </p>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Comparative Evaluation</h3>
+                <p className="text-sm text-muted-foreground">
+                  {modelsToCompare.length > 0 ? (
+                    <>
+                      You have selected <strong>{modelsToCompare.length} challenger model(s)</strong> for comparison: {modelsToCompare.join(", ")}. 
+                      These will be evaluated alongside the champion model to validate robustness.
+                    </>
+                  ) : (
+                    "Optionally select challenger models above for comparative evaluation against the champion."
+                  )}
+                </p>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Next Steps</h3>
+                <p className="text-sm text-muted-foreground">
+                  Proceed to training to fit the champion model on your {datasetSummary?.sampleCount.toLocaleString()} samples.
+                  Model evaluation will follow, including performance metrics, feature importance, and SHAP-based explainability.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          {/* Navigation */}
+          <div className="flex gap-3 pt-4">
+            <Button variant="outline" onClick={() => navigate({ to: "/preprocessing" })} className="gap-2">
+              <ArrowLeft className="h-4 w-4" />
+              Back to Preprocessing
+            </Button>
+            <Button onClick={() => navigate({ to: "/training" })} className="gap-2 ml-auto" disabled={!selectedModel}>
+              Proceed to Training
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

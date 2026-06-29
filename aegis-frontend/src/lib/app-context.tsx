@@ -1,0 +1,232 @@
+import React from "react";
+
+type DatasetProfile = Record<string, any>;
+type ModelRecommendation = Record<string, any>;
+
+type TrainingConfig = {
+  test_size: number;
+  val_size: number;
+  random_seed: number;
+  use_cv: boolean;
+  cv_folds: number;
+  use_hyperopt: boolean;
+  use_class_weight: boolean;
+  scale_pos_weight: number;
+  use_feature_engineering: boolean;
+  manual_params: Record<string, any>;
+};
+
+type ComparisonResult = {
+  model_name: string;
+  roc_auc?: number;
+  recall?: number;
+  precision?: number;
+  f1?: number;
+  pr_auc?: number;
+  accuracy?: number;
+  training_time_s?: number;
+};
+
+type TrainingResult = {
+  task_type: string;
+  model_name: string;
+  real_feature_names: string[];
+  training_info: Record<string, any>;
+  split_stats: Record<string, any>;
+  feature_engineering_summary?: Record<string, any> | null;
+  evaluation_metrics?: Record<string, any> | null;
+  evaluation_data?: Record<string, any> | null;
+  model_artifact?: string;
+};
+
+type DatasetState = {
+  file?: File | null;
+  profile?: DatasetProfile | null;
+  recommendations?: ModelRecommendation[] | null;
+  selectedModel?: ModelRecommendation | null;
+  preprocessingResult?: Record<string, any> | null;
+  featureEngineeringResult?: Record<string, any> | null;
+  trainingConfig?: TrainingConfig | null;
+  trainingResult?: TrainingResult | null;
+  comparisonResults?: ComparisonResult[] | null;
+  selectedComparisonModel?: string | null;
+  setUploadResult: (file: File | null, profile: DatasetProfile | null) => void;
+  setProfile: (profile: DatasetProfile | null) => void;
+  setRecommendations: (recommendations: ModelRecommendation[] | null) => void;
+  setSelectedModel: (model: ModelRecommendation | null) => void;
+  setPreprocessingResult: (result: Record<string, any> | null) => void;
+  setFeatureEngineeringResult: (result: Record<string, any> | null) => void;
+  setTrainingConfig: (config: TrainingConfig | null) => void;
+  setTrainingResult: (result: TrainingResult | null) => void;
+  setComparisonResults: (results: ComparisonResult[] | null) => void;
+  setSelectedComparisonModel: (modelName: string | null) => void;
+};
+
+const DatasetContext = React.createContext<DatasetState | null>(null);
+
+export function DatasetProvider({ children }: { children: React.ReactNode }) {
+  const [file, setFile] = React.useState<File | null>(null);
+  const [profile, setProfile] = React.useState<DatasetProfile | null>(null);
+  const [recommendations, setRecommendations] = React.useState<ModelRecommendation[] | null>(null);
+  const [selectedModel, setSelectedModelState] = React.useState<ModelRecommendation | null>(null);
+  const [preprocessingResult, setPreprocessingResultState] = React.useState<Record<string, any> | null>(null);
+  const [featureEngineeringResult, setFeatureEngineeringResultState] = React.useState<Record<string, any> | null>(null);
+  const [trainingConfig, setTrainingConfigState] = React.useState<TrainingConfig | null>(null);
+  const [trainingResult, setTrainingResultState] = React.useState<TrainingResult | null>(null);
+  const [comparisonResults, setComparisonResultsState] = React.useState<ComparisonResult[] | null>(null);
+  const [selectedComparisonModel, setSelectedComparisonModelState] = React.useState<string | null>(null);
+  const [isHydrated, setIsHydrated] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") {
+      setIsHydrated(true);
+      return;
+    }
+
+    try {
+      const stored = window.localStorage.getItem("aegis_dataset_state");
+      if (!stored) {
+        setIsHydrated(true);
+        return;
+      }
+
+      const parsed = JSON.parse(stored) as {
+        trainingConfig?: TrainingConfig | null;
+        trainingResult?: TrainingResult | null;
+        comparisonResults?: ComparisonResult[] | null;
+        selectedComparisonModel?: string | null;
+      };
+
+      if (parsed.trainingConfig) {
+        setTrainingConfigState(parsed.trainingConfig);
+      }
+      if (parsed.trainingResult) {
+        setTrainingResultState(parsed.trainingResult);
+      }
+      if (parsed.comparisonResults) {
+        setComparisonResultsState(parsed.comparisonResults);
+      }
+      if (parsed.selectedComparisonModel) {
+        setSelectedComparisonModelState(parsed.selectedComparisonModel);
+      }
+    } catch {
+      // Ignore invalid stored state
+    } finally {
+      setIsHydrated(true);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || !isHydrated) return;
+
+    const persisted = {
+      trainingConfig,
+      trainingResult,
+      comparisonResults,
+      selectedComparisonModel,
+    };
+
+    window.localStorage.setItem("aegis_dataset_state", JSON.stringify(persisted));
+  }, [trainingConfig, trainingResult, comparisonResults, selectedComparisonModel, isHydrated]);
+
+  const setUploadResult = React.useCallback((f: File | null, p: DatasetProfile | null) => {
+    setFile(f);
+    setProfile(p);
+    setRecommendations(null);
+    setSelectedModelState(null);
+    setPreprocessingResultState(null);
+    setFeatureEngineeringResultState(null);
+    setTrainingConfigState(null);
+    setTrainingResultState(null);
+    setComparisonResultsState(null);
+    setSelectedComparisonModelState(null);
+  }, []);
+
+  const setProfileState = React.useCallback((p: DatasetProfile | null) => {
+    setProfile(p);
+  }, []);
+
+  const setSelectedModel = React.useCallback((model: ModelRecommendation | null) => {
+    setSelectedModelState(model);
+  }, []);
+
+  const setPreprocessingResult = React.useCallback((result: Record<string, any> | null) => {
+    setPreprocessingResultState(result);
+  }, []);
+
+  const setFeatureEngineeringResult = React.useCallback((result: Record<string, any> | null) => {
+    setFeatureEngineeringResultState(result);
+  }, []);
+
+  const setTrainingConfig = React.useCallback((config: TrainingConfig | null) => {
+    setTrainingConfigState(config);
+  }, []);
+
+  const setTrainingResult = React.useCallback((result: TrainingResult | null) => {
+    setTrainingResultState(result);
+  }, []);
+
+  const setComparisonResults = React.useCallback((results: ComparisonResult[] | null) => {
+    setComparisonResultsState(results);
+  }, []);
+
+  const setSelectedComparisonModel = React.useCallback((modelName: string | null) => {
+    setSelectedComparisonModelState(modelName);
+  }, []);
+
+  const value = React.useMemo(
+    () => ({
+      file,
+      profile,
+      recommendations,
+      selectedModel,
+      preprocessingResult,
+      featureEngineeringResult,
+      trainingConfig,
+      trainingResult,
+      comparisonResults,
+      selectedComparisonModel,
+      setUploadResult,
+      setProfile: setProfileState,
+      setRecommendations,
+      setSelectedModel,
+      setPreprocessingResult,
+      setFeatureEngineeringResult,
+      setTrainingConfig,
+      setTrainingResult,
+      setComparisonResults,
+      setSelectedComparisonModel,
+    }),
+    [
+      file,
+      profile,
+      recommendations,
+      selectedModel,
+      preprocessingResult,
+      featureEngineeringResult,
+      trainingConfig,
+      trainingResult,
+      comparisonResults,
+      selectedComparisonModel,
+      setUploadResult,
+      setRecommendations,
+      setSelectedModel,
+      setPreprocessingResult,
+      setFeatureEngineeringResult,
+      setTrainingConfig,
+      setTrainingResult,
+      setComparisonResults,
+      setSelectedComparisonModel,
+    ],
+  );
+
+  return <DatasetContext.Provider value={value}>{children}</DatasetContext.Provider>;
+}
+
+export function useDataset() {
+  const ctx = React.useContext(DatasetContext);
+  if (!ctx) throw new Error("useDataset must be used within DatasetProvider");
+  return ctx;
+}
+
+export default DatasetContext;

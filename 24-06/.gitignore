@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+*.pkl
+agent2_report.json
+rag_store/chroma_db/
+Rag/chroma_db/
+.claude/
+.streamlit/
+*.zip
