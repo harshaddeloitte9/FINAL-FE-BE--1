@@ -1,0 +1,1 @@
+import{a as e,n as t,t as n}from"./jsx-runtime-n5LQ9ujS.js";import{k as r}from"./BarChart-Cm-67YMh.js";var i=e(t(),1),a=n();function o(e){let[t,n]=(0,i.useState)(!1);return(0,i.useEffect)(()=>{n(!0)},[]),t?(0,a.jsx)(r,{...e}):null}export{o as t};

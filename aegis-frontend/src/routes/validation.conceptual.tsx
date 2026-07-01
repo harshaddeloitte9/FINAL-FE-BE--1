@@ -1,10 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
-import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { ArrowRight, CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
 import { featureImportance } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/validation/conceptual")({
-  head: () => ({ meta: [{ title: "Conceptual Soundness — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 3 — Conceptual Soundness — Aegis Credit" }] }),
   component: Conceptual,
 });
 
@@ -101,6 +101,16 @@ function Conceptual() {
           prior to sign-off.
         </p>
       </section>
+
+      <div className="text-right">
+        <Link
+          to="/validation/challenger"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+        >
+          Continue to Stage 4
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </div>
     </div>
   );
 }

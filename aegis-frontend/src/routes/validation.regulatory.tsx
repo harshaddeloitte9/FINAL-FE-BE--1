@@ -1,7 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { regulatoryChecks } from "@/lib/mock-data";
-import { CheckCircle2, AlertTriangle, XCircle, ChevronDown, Download } from "lucide-react";
+import { ArrowRight, CheckCircle2, AlertTriangle, XCircle, ChevronDown, Download } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -28,7 +28,7 @@ function Regulatory() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Regulatory Compliance"
+        title="Stage 7 — Regulatory Compliance Review"
         description="Automated review against IFRS 9, IFRS 7, and PRA SS1/23 with severity-weighted scoring and remediation."
         actions={
           <button className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium hover:border-primary/40">
@@ -125,6 +125,16 @@ function Regulatory() {
             <p className="mt-1 text-xs text-sidebar-foreground/70">Material — quarterly independent validation required.</p>
           </div>
         </aside>
+      </div>
+
+      <div className="text-right">
+        <Link
+          to="/validation/findings"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+        >
+          Continue to Stage 8
+          <ArrowRight className="h-4 w-4" />
+        </Link>
       </div>
     </div>
   );

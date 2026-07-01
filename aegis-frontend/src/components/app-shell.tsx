@@ -23,6 +23,7 @@ import {
   BarChart3,
   Activity,
   ClipboardCheck,
+  Calculator,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
@@ -30,7 +31,6 @@ import { cn } from "@/lib/utils";
 type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean };
 
 const developmentNav: NavItem[] = [
-  { to: "/development", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/data-upload", label: "Data Upload", icon: UploadCloud },
   { to: "/profiling", label: "Data Profiling", icon: Database },
   { to: "/preprocessing", label: "Preprocessing", icon: Wand2 },
@@ -39,20 +39,21 @@ const developmentNav: NavItem[] = [
   { to: "/training", label: "Model Training", icon: Cpu },
   { to: "/evaluation", label: "Model Evaluation", icon: LineChart },
   { to: "/explainability", label: "Explainability", icon: Sparkles },
+  { to: "/ecl-provisions", label: "ECL & Provisions", icon: Calculator },
   { to: "/assistant", label: "AI Assistant", icon: MessageSquare },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
 const validationNav: NavItem[] = [
   { to: "/validation", label: "Overview", icon: LayoutDashboard, exact: true },
-  { to: "/validation/intake", label: "Intake & Intended Use", icon: FileText },
-  { to: "/validation/data-quality", label: "Data Quality", icon: Database },
+  { to: "/validation/intake", label: "Intake & Governance", icon: FileText },
+  { to: "/validation/data-quality", label: "Data Validation", icon: Database },
   { to: "/validation/conceptual", label: "Conceptual Soundness", icon: BookOpen },
-  { to: "/validation/challenger", label: "Challenger Analysis", icon: GitCompareArrows },
-  { to: "/validation/performance", label: "Performance Validation", icon: BarChart3 },
+  { to: "/validation/challenger", label: "Replication & Benchmarking", icon: GitCompareArrows },
+  { to: "/validation/performance", label: "Performance Testing", icon: BarChart3 },
   { to: "/validation/stress", label: "Stress & Backtesting", icon: Activity },
-  { to: "/validation/regulatory", label: "Regulatory Compliance", icon: ShieldCheck },
-  { to: "/validation/findings", label: "Findings & Report", icon: ClipboardCheck },
+  { to: "/validation/regulatory", label: "Regulatory Compliance Review", icon: ShieldCheck },
+  { to: "/validation/findings", label: "Findings & Final Report", icon: ClipboardCheck },
 ];
 
 const developmentPaths = developmentNav.map((n) => n.to);
@@ -107,7 +108,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Link>
               <div className="mt-3 grid grid-cols-2 gap-1.5">
                 <Link
-                  to="/development"
+                  to="/data-upload"
                   className={cn(
                     "rounded-md px-2 py-1.5 text-center text-[10px] font-semibold uppercase tracking-wider transition-colors",
                     workspace === "development"
@@ -204,7 +205,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="ml-auto flex items-center gap-2">
             {isLanding && (
               <Link
-                to="/development"
+                to="/data-upload"
                 className="hidden items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium hover:border-primary/40 sm:inline-flex"
               >
                 Develop

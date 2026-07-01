@@ -30,7 +30,7 @@ function Landing() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <WorkspaceCard
-          to="/development"
+          to="/data-upload"
           accent="from-primary/15 to-transparent"
           icon={<Boxes className="h-6 w-6 text-primary" />}
           eyebrow="Workspace 01"

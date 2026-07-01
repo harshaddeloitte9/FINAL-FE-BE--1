@@ -31,7 +31,7 @@ function Findings() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Validation Findings & Final Report"
+        title="Stage 8 — Findings & Final Report"
         description="Consolidated findings, risks, and recommendation for management and the Model Risk Committee."
         actions={
           <>

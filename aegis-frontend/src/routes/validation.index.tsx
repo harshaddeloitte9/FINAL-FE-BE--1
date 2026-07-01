@@ -13,14 +13,14 @@ export const Route = createFileRoute("/validation/")({
 });
 
 const stages = [
-  { to: "/validation/intake", icon: FileText, title: "Model Intake & Intended Use", desc: "Metadata, business objective, target, assumptions." },
-  { to: "/validation/data-quality", icon: Database, title: "Data Quality & Representativeness", desc: "Missing, duplicates, outliers, leakage, sample fitness." },
-  { to: "/validation/conceptual", icon: BookOpen, title: "Conceptual Soundness", desc: "Feature relevance, assumptions, methodology, documentation." },
-  { to: "/validation/challenger", icon: GitCompareArrows, title: "Challenger Model Analysis", desc: "Champion vs challenger, side-by-side metrics, ranking." },
-  { to: "/validation/performance", icon: BarChart3, title: "Performance Validation", desc: "ROC-AUC, KS, Gini, calibration, threshold analysis." },
-  { to: "/validation/stress", icon: Activity, title: "Sensitivity, Stress & Backtesting", desc: "Scenarios, stability, stress sims, backtests." },
-  { to: "/validation/regulatory", icon: ShieldCheck, title: "Regulatory Compliance", desc: "IFRS 9, IFRS 7, SS1/23 — RAG status & remediation." },
-  { to: "/validation/findings", icon: ClipboardCheck, title: "Findings & Final Report", desc: "Executive summary, risks, recommendation, export pack." },
+  { stage: 1, to: "/validation/intake", icon: FileText, title: "Intake & Governance", desc: "Model metadata, artifacts, risk tier, and governance attestation." },
+  { stage: 2, to: "/validation/data-quality", icon: Database, title: "Data Validation", desc: "Automated dataset checks, leakage scan, and sample representativeness." },
+  { stage: 3, to: "/validation/conceptual", icon: BookOpen, title: "Conceptual Soundness", desc: "Feature relevance, methodology, assumptions, and documentation." },
+  { stage: 4, to: "/validation/challenger", icon: GitCompareArrows, title: "Replication & Benchmarking", desc: "Reproduce developer outputs and compare champion vs challengers." },
+  { stage: 5, to: "/validation/performance", icon: BarChart3, title: "Performance Testing", desc: "AUC, KS, calibration, threshold analysis, hold-out validation." },
+  { stage: 6, to: "/validation/stress", icon: Activity, title: "Stress & Backtesting", desc: "Scenario simulations, stability, backtests, and stress results." },
+  { stage: 7, to: "/validation/regulatory", icon: ShieldCheck, title: "Regulatory Compliance Review", desc: "IFRS 9 / IFRS 7 / SS1/23 review, rule coverage, and remediation." },
+  { stage: 8, to: "/validation/findings", icon: ClipboardCheck, title: "Findings & Final Report", desc: "Final observations, risk grading, recommendation, and sign-off." },
 ] as const;
 
 function ValidationHome() {
@@ -60,7 +60,7 @@ function ValidationHome() {
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono text-muted-foreground">0{i + 1}</span>
+                  <span className="text-[10px] font-mono text-muted-foreground">Stage {s.stage}</span>
                   <h3 className="text-sm font-semibold">{s.title}</h3>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">{s.desc}</p>

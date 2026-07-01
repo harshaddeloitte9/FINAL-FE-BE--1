@@ -1,11 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { ArrowRight, Trophy } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
-import { Trophy } from "lucide-react";
 
 export const Route = createFileRoute("/validation/challenger")({
-  head: () => ({ meta: [{ title: "Challenger Analysis — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Replication & Benchmarking — Aegis Credit" }] }),
   component: Challenger,
 });
 
@@ -30,13 +30,16 @@ function Challenger() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Challenger Model Analysis"
-        description="Side-by-side comparison of the champion model against approved challengers and baseline benchmarks."
+        title="Stage 4 — Replication & Benchmarking"
+        description="Replicate developer outputs and benchmark the champion model against approved challengers."
       />
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h3 className="text-sm font-semibold">Champion vs Challenger — metrics</h3>
+          <h3 className="text-sm font-semibold">Champion reproduction</h3>
+          <p className="mt-2 text-sm text-foreground/80">
+            The developer's XGBoost champion was reproduced using submitted code and the validation dataset, then benchmarked against alternatives.
+          </p>
           <div className="mt-4 h-72">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={compare}>
@@ -100,6 +103,16 @@ function Challenger() {
           </table>
         </div>
       </section>
+
+      <div className="text-right">
+        <Link
+          to="/validation/performance"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+        >
+          Continue to Stage 5
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { ArrowRight } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Legend } from "recharts";
 import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
 
@@ -31,7 +32,7 @@ function Stress() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Sensitivity, Stress Testing & Backtesting"
+        title="Stage 6 — Stress & Backtesting"
         description="Scenario simulations, model stability over time, and back-tested predictions vs realised outcomes."
       />
 
@@ -105,6 +106,14 @@ function Stress() {
           </div>
         ))}
       </section>
-    </div>
+      <div className="text-right">
+        <Link
+          to="/validation/regulatory"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+        >
+          Continue to Stage 7
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </div>    </div>
   );
 }

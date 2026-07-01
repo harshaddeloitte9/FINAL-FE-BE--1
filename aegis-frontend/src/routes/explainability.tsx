@@ -90,12 +90,16 @@ function Explainability() {
         </p>
       </section>
 
-      <div className="flex gap-3 pt-4">
+      <div className="flex flex-wrap gap-3 pt-4">
         <Button variant="outline" onClick={() => navigate({ to: "/evaluation" })} className="gap-2">
           <ArrowLeft className="h-4 w-4" />
           Back to Evaluation
         </Button>
-        <Button onClick={() => navigate({ to: "/development" })} className="gap-2 ml-auto">
+        <Button onClick={() => navigate({ to: "/ecl-provisions" })} className="gap-2">
+          Continue to ECL & Provisions
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+        <Button onClick={() => navigate({ to: "/development" })} className="ml-auto gap-2">
           Exit to Workspace
           <ArrowRight className="h-4 w-4" />
         </Button>

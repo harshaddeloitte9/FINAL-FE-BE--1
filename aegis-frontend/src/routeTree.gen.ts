@@ -18,6 +18,7 @@ import { Route as ModelsRouteImport } from './routes/models'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as ExplainabilityRouteImport } from './routes/explainability'
 import { Route as EvaluationRouteImport } from './routes/evaluation'
+import { Route as EclProvisionsRouteImport } from './routes/ecl-provisions'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
 import { Route as AssistantRouteImport } from './routes/assistant'
@@ -75,6 +76,11 @@ const ExplainabilityRoute = ExplainabilityRouteImport.update({
 const EvaluationRoute = EvaluationRouteImport.update({
   id: '/evaluation',
   path: '/evaluation',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EclProvisionsRoute = EclProvisionsRouteImport.update({
+  id: '/ecl-provisions',
+  path: '/ecl-provisions',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DevelopmentRoute = DevelopmentRouteImport.update({
@@ -148,6 +154,7 @@ export interface FileRoutesByFullPath {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
@@ -172,6 +179,7 @@ export interface FileRoutesByTo {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
@@ -222,6 +231,7 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
@@ -246,6 +256,7 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
@@ -269,6 +280,7 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
@@ -294,6 +306,7 @@ export interface RootRouteChildren {
   AssistantRoute: typeof AssistantRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
+  EclProvisionsRoute: typeof EclProvisionsRoute
   EvaluationRoute: typeof EvaluationRoute
   ExplainabilityRoute: typeof ExplainabilityRoute
   FeaturesRoute: typeof FeaturesRoute
@@ -368,6 +381,13 @@ declare module '@tanstack/react-router' {
       path: '/evaluation'
       fullPath: '/evaluation'
       preLoaderRoute: typeof EvaluationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ecl-provisions': {
+      id: '/ecl-provisions'
+      path: '/ecl-provisions'
+      fullPath: '/ecl-provisions'
+      preLoaderRoute: typeof EclProvisionsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/development': {
@@ -497,6 +517,7 @@ const rootRouteChildren: RootRouteChildren = {
   AssistantRoute: AssistantRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
+  EclProvisionsRoute: EclProvisionsRoute,
   EvaluationRoute: EvaluationRoute,
   ExplainabilityRoute: ExplainabilityRoute,
   FeaturesRoute: FeaturesRoute,

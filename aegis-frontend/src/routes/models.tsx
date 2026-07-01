@@ -156,7 +156,7 @@ function ModelSelection() {
     <div className="space-y-8">
       <PageHeader
         title="Model Selection"
-        description="Recommendation cards ranked by score, with regulator-friendly trade-offs."
+        description="Models ranked by suitability for your dataset — with explanations."
       />
 
       {/* Dataset Summary */}
@@ -197,20 +197,19 @@ function ModelSelection() {
 
       {transformedModels.length > 0 && (
         <>
-          {/* Models to Compare Section */}
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center gap-3 mb-4">
               <BarChart3 className="h-5 w-5 text-primary" />
               <h2 className="text-base font-semibold">Models to Compare</h2>
             </div>
-            <p className="text-sm text-muted-foreground mb-4">
+            <p className="mb-4 text-sm text-muted-foreground">
               Select additional models to include in comparative evaluation. The champion (selected above) is always included.
             </p>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               {transformedModels.map((model) => (
                 <label
                   key={model.name}
-                  className="flex items-center gap-2 rounded-lg border border-border bg-background p-3 cursor-pointer hover:border-primary/40 transition-colors"
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/40"
                 >
                   <input
                     type="checkbox"
@@ -224,84 +223,86 @@ function ModelSelection() {
             </div>
           </section>
 
-          {/* Recommendation Cards */}
           <section>
-            <h2 className="text-base font-semibold mb-4">Recommended Models</h2>
+            <h2 className="mb-4 text-base font-semibold">Recommended Models</h2>
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
-              {transformedModels.map((m) => (
-                <div
-                  key={m.name}
-                  className={cn(
-                    "relative rounded-2xl border bg-card p-6 shadow-elegant transition-all hover:-translate-y-1 cursor-pointer",
-                    m.selected ? "border-primary/60 ring-2 ring-primary/20" : "border-border hover:border-primary/40",
-                  )}
-                  onClick={() => handleSelectModel(m)}
-                >
-                  {m.selected && (
-                    <span className="absolute -top-2.5 right-4 inline-flex items-center gap-1 rounded-full gradient-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-elegant">
-                      <Sparkles className="h-3 w-3" /> Selected
-                    </span>
-                  )}
-                  <div className="flex items-baseline justify-between gap-4">
-                    <div>
-                      <h3 className="text-base font-semibold">{m.name}</h3>
-                      {m.icon && <div className="text-sm text-muted-foreground">{m.icon}</div>}
-                    </div>
-                    <span className="text-2xl font-semibold tabular-nums">{m.score.toFixed(1)}</span>
-                  </div>
-                  <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Recommendation score</div>
-
-                  <dl className="mt-4 space-y-2.5 text-sm">
-                    <div>
-                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
-                      <dd className="mt-0.5 text-foreground/90">{m.best_for?.length ? m.best_for.join(", ") : m.description}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
-                      <dd className="mt-0.5 text-foreground/90 text-xs">{m.why}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Recommendation</dt>
-                      <dd className="mt-0.5 flex items-center gap-1.5 text-foreground/90">
-                        <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
-                        {m.selected ? "Champion (selected)" : "Challenger"}
-                      </dd>
-                    </div>
-                  </dl>
-
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSelectModel(m);
-                    }}
+              {transformedModels.map((m, index) => {
+                const rankBadge = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][Math.min(index, 4)];
+                return (
+                  <div
+                    key={m.name}
                     className={cn(
-                      "mt-5 w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
-                      m.selected
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-border bg-background hover:border-primary/40 hover:bg-primary-soft",
+                      "relative flex cursor-pointer flex-col rounded-2xl border bg-card p-6 shadow-elegant transition-all hover:-translate-y-1",
+                      m.selected ? "border-primary/60 ring-2 ring-primary/20" : "border-border hover:border-primary/40",
                     )}
+                    onClick={() => handleSelectModel(m)}
                   >
-                    {m.selected ? "Selected" : "Select model"}
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{rankBadge}</span>
+                          <h3 className="text-base font-semibold">{m.name}</h3>
+                        </div>
+                        {m.icon && <div className="text-sm text-muted-foreground">{m.icon}</div>}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-2xl font-semibold tabular-nums">{m.score}/10</div>
+                        <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Score</div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 inline-flex w-fit items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary">
+                      {m.selected ? <Sparkles className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
+                      {m.selected ? "Champion (selected)" : "Challenger"}
+                    </div>
+
+                    <p className="mt-4 text-sm text-muted-foreground">{m.description || "Recommended for this dataset profile."}</p>
+
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
+                        <dd className="mt-1 text-foreground/90">{m.why || m.description}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
+                        <dd className="mt-1 text-foreground/90">
+                          {m.best_for?.length ? m.best_for.join(" · ") : "—"}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSelectModel(m);
+                      }}
+                      className={cn(
+                        "mt-5 w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                        m.selected
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background hover:border-primary/40 hover:bg-primary-soft",
+                      )}
+                    >
+                      {m.selected ? "Selected" : "Select model"}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
-          {/* Credit Risk Evaluation Strategy */}
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-3 mb-4">
+            <div className="mb-4 flex items-center gap-3">
               <Shield className="h-5 w-5 text-primary" />
               <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
             </div>
             <div className="space-y-4">
               <div>
-                <h3 className="text-sm font-semibold mb-2">Champion Model</h3>
+                <h3 className="mb-2 text-sm font-semibold">Champion Model</h3>
                 <p className="text-sm text-muted-foreground">
                   {selectedModel ? (
                     <>
-                      <strong>{selectedModel.name}</strong> has been selected as the primary model for risk assessment. 
-                      This model will be trained on your dataset and used for generating predictions and risk scores.
+                      <strong>{selectedModel.name}</strong> has been selected as the primary model for risk assessment. This model will be trained on your dataset and used for generating predictions and risk scores.
                     </>
                   ) : (
                     "Select a champion model above to proceed with training and evaluation."
@@ -309,12 +310,11 @@ function ModelSelection() {
                 </p>
               </div>
               <div>
-                <h3 className="text-sm font-semibold mb-2">Comparative Evaluation</h3>
+                <h3 className="mb-2 text-sm font-semibold">Comparative Evaluation</h3>
                 <p className="text-sm text-muted-foreground">
                   {modelsToCompare.length > 0 ? (
                     <>
-                      You have selected <strong>{modelsToCompare.length} challenger model(s)</strong> for comparison: {modelsToCompare.join(", ")}. 
-                      These will be evaluated alongside the champion model to validate robustness.
+                      You have selected <strong>{modelsToCompare.length} challenger model(s)</strong> for comparison: {modelsToCompare.join(", ")}. These will be evaluated alongside the champion model to validate robustness.
                     </>
                   ) : (
                     "Optionally select challenger models above for comparative evaluation against the champion."
@@ -322,16 +322,14 @@ function ModelSelection() {
                 </p>
               </div>
               <div>
-                <h3 className="text-sm font-semibold mb-2">Next Steps</h3>
+                <h3 className="mb-2 text-sm font-semibold">Next Steps</h3>
                 <p className="text-sm text-muted-foreground">
-                  Proceed to training to fit the champion model on your {datasetSummary?.sampleCount.toLocaleString()} samples.
-                  Model evaluation will follow, including performance metrics, feature importance, and SHAP-based explainability.
+                  Proceed to training to fit the champion model on your {datasetSummary?.sampleCount.toLocaleString()} samples. Model evaluation will follow, including performance metrics, feature importance, and SHAP-based explainability.
                 </p>
               </div>
             </div>
           </section>
 
-          {/* Navigation */}
           <div className="flex gap-3 pt-4">
             <Button variant="outline" onClick={() => navigate({ to: "/preprocessing" })} className="gap-2">
               <ArrowLeft className="h-4 w-4" />

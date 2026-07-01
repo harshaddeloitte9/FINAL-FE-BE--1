@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { ArrowRight } from "lucide-react";
 import { rocCurve, prCurve, scoreDistribution } from "@/lib/mock-data";
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar,
@@ -47,8 +48,8 @@ function Performance() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Performance Validation"
-        description="Comprehensive performance evaluation on the independent validation hold-out set."
+        title="Stage 5 — Performance Testing"
+        description="Comprehensive performance evaluation on the independent validation hold-out set before stress testing and regulatory review."
       />
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -147,6 +148,16 @@ function Performance() {
           </ResponsiveContainer>
         </Card>
       </section>
+
+      <div className="text-right">
+        <Link
+          to="/validation/stress"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+        >
+          Continue to Stage 6
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </div>
     </div>
   );
 }
