@@ -130,17 +130,22 @@ from feature_engineering import (
     compute_univariate_gini,
     detect_outstanding_balance_col, detect_loan_amount_col,
     detect_interest_rate_col, detect_years_elapsed_col, detect_term_col,
-    compute_outstanding_balance,
+    detect_payment_frequency_col,
+    compute_outstanding_balance, compute_ead_schedule, compute_ead,
+    PAYMENT_FREQUENCIES, DEFAULT_PAYMENT_FREQUENCY,
 )
 from model_selector import (
     recommend_models, CLASSIFICATION_MODELS, REGRESSION_MODELS
 )
 from train import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
+import lgd_ui
+import ead_ui
 from evaluate import (    compute_binary_metrics, compute_regression_metrics,
     compute_heteroscedasticity_check,
     plot_roc_curve, plot_pr_curve, plot_confusion_matrix,
-    plot_score_distribution, plot_threshold_analysis, plot_lift_chart
+    plot_score_distribution, plot_threshold_analysis, plot_lift_chart,
+    plot_actual_vs_predicted_over_time, compute_temporal_stability_summary
 )
 from explainability import (
     extract_feature_importance, compute_shap_values,
@@ -336,6 +341,9 @@ def init_session():
         "chk_independence": False,
         "chk_plan_approved": False,
         "chk_attestation": False,
+        "val_benchmark_metrics": None,
+        "val_benchmark_proba": None,
+        "val_benchmark_name": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -384,7 +392,7 @@ def _get_agent2():
         return None
     if st.session_state.get("agent2") is None:
         try:
-            st.session_state["agent2"] = _Agent2("rag_store/rules.json")
+            st.session_state["agent2"] = _Agent2("rag_store/val_mdd_rules.json")
         except Exception:
             return None
     return st.session_state.get("agent2")
@@ -546,19 +554,23 @@ def render_sidebar():
                 st.session_state.workspace = "landing"
                 st.rerun()
             st.markdown("### 🧭 Workflow Progress")
-            steps = [
-                ("1", "📂 Data Upload",         1),
-                ("2", "🔍 Data Profiling",      2),
-                ("3", "⚙️ Preprocessing",       3),
-                ("4", "🔬 Feature Engineering", 4),
-                ("5", "🤖 Model Selection",     5),
-                ("6", "🎯 Training",            6),
-                ("7", "📊 Evaluation",          7),
-                ("8", "💡 Explainability",      8),
-                ("9", "🏦 ECL & Provisions",    9),
-            ]
             current = st.session_state.current_step
-            for _, label, step_id in steps:
+            pd_steps = [
+                ("📂 Data Upload",         1),
+                ("🔍 Data Profiling",      2),
+                ("⚙️ Preprocessing",       3),
+                ("🔬 Feature Engineering", 4),
+                ("🤖 Model Selection",     5),
+                ("🎯 Training",            6),
+                ("📊 Evaluation",          7),
+                ("💡 Explainability",      8),
+            ]
+            st.markdown(
+                "<div style='color:#6366f1;font-size:0.78rem;font-weight:700;"
+                "letter-spacing:0.05em;padding:0.3rem 0;'>🎯 PD MODEL</div>",
+                unsafe_allow_html=True,
+            )
+            for label, step_id in pd_steps:
                 if step_id < current:
                     _icon, _color = "✅", "#10b981"
                 elif step_id == current:
@@ -566,16 +578,75 @@ def render_sidebar():
                 else:
                     _icon, _color = "⏳", "#475569"
                 st.markdown(
-                    f"<div style='color:{_color};padding:0.15rem 0;font-size:0.9rem;'>{_icon} {label}</div>",
+                    f"<div style='color:{_color};padding:0.1rem 0 0.1rem 0.5rem;font-size:0.88rem;'>{_icon} {label}</div>",
                     unsafe_allow_html=True,
                 )
+
+            # LGD sub-steps
+            _lgd_bundle = st.session_state.get("lgd_model_bundle")
+            _lgd_feats = st.session_state.get("lgd_features")
+            _lgd_pred = st.session_state.get("lgd_portfolio_pred")
+            _pd_done = st.session_state.get("trained_pipeline") is not None
+            _lgd_color = "#94a3b8" if not _pd_done else "#10b981" if _lgd_pred is not None else "#f59e0b"
+            st.markdown(
+                f"<div style='color:{_lgd_color};font-size:0.78rem;font-weight:700;"
+                f"letter-spacing:0.05em;padding:0.4rem 0 0.2rem 0;'>💧 LGD MODEL</div>",
+                unsafe_allow_html=True,
+            )
+            lgd_substeps = [
+                ("🔬 Feature Engineering", _lgd_feats is not None),
+                ("🎯 Training",            _lgd_bundle is not None),
+                ("📊 Evaluation",          _lgd_bundle is not None),
+                ("📥 Apply & Report",      _lgd_pred is not None),
+            ]
+            for _lbl, _done in lgd_substeps:
+                if not _pd_done:
+                    _li, _lc = "🔒", "#475569"
+                elif _done:
+                    _li, _lc = "✅", "#10b981"
+                else:
+                    _li, _lc = "⏳", "#94a3b8"
+                st.markdown(
+                    f"<div style='color:{_lc};padding:0.1rem 0 0.1rem 1rem;font-size:0.82rem;'>{_li} {_lbl}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # EAD sub-steps
+            _ccf_bundle = st.session_state.get("ccf_model_bundle")
+            _ead_vals = st.session_state.get("ead_values")
+            _lgd_done = _lgd_bundle is not None
+            _ead_color = "#94a3b8" if not _lgd_done else "#10b981" if _ead_vals is not None else "#f59e0b"
+            st.markdown(
+                f"<div style='color:{_ead_color};font-size:0.78rem;font-weight:700;"
+                f"letter-spacing:0.05em;padding:0.4rem 0 0.2rem 0;'>💳 EAD MODEL</div>",
+                unsafe_allow_html=True,
+            )
+            ead_substeps = [
+                ("📋 Product split",           _lgd_done),
+                ("🚀 CCF model (revolving)",   _ccf_bundle is not None),
+                ("🏦 Amortisation (term loan)", _lgd_done),
+                ("💰 Portfolio EAD computed",  _ead_vals is not None),
+            ]
+            for _lbl, _done in ead_substeps:
+                if not _lgd_done:
+                    _li, _lc = "🔒", "#475569"
+                elif _done:
+                    _li, _lc = "✅", "#10b981"
+                else:
+                    _li, _lc = "⏳", "#94a3b8"
+                st.markdown(
+                    f"<div style='color:{_lc};padding:0.1rem 0 0.1rem 1rem;font-size:0.82rem;'>{_li} {_lbl}</div>",
+                    unsafe_allow_html=True,
+                )
+
             st.divider()
             st.markdown("### ⚙️ Global Settings")
             st.session_state.decision_threshold = st.slider("Decision Threshold (Eval Step)", 0.1, 0.9, 0.5, 0.05)
 
         elif workspace == "validation":
             st.divider()
-            if st.button("← Back to Home", use_container_width=True, key="switch_to_landing_val"):
+            if st.button("← Back to Home", use_container_width=True,
+                         key="switch_to_landing_val"):
                 st.session_state.workspace = "landing"
                 st.rerun()
             st.markdown("### 🔎 Validation Stages")
@@ -598,7 +669,8 @@ def render_sidebar():
                 else:
                     _vs_icon, _vs_color = "⏳", "#475569"
                 st.markdown(
-                    f"<div style='color:{_vs_color};padding:0.15rem 0;font-size:0.9rem;'>"
+                    f"<div style='color:{_vs_color};padding:0.15rem 0;"
+                    f"font-size:0.9rem;'>"
                     f"{_vs_icon} {_vs_label}</div>",
                     unsafe_allow_html=True,
                 )
@@ -622,40 +694,112 @@ def render_upload():
     </div>
     """, unsafe_allow_html=True)
 
-    col1, col2 = st.columns([2, 1])
+    st.markdown("#### 🔌 Data Source")
+    data_source_type = st.radio(
+        "Select how you want to bring in data",
+        [
+            "📁 Upload File (CSV/XLSX)",
+            "🗄️ Database Connection",
+            "🌐 API Endpoint",
+            "☁️ Cloud Storage (S3/Azure Blob)",
+            "📂 SFTP / File Server",
+        ],
+        horizontal=False,
+        key="data_source_type",
+    )
 
-    with col1:
-        uploaded_file = st.file_uploader(
-            "Upload your dataset (CSV / XLSX)",
-            type=["csv", "xlsx"],
-            help="The system adapts automatically to any structured dataset schema.",
-        )
+    if data_source_type == "📁 Upload File (CSV/XLSX)":
+        col1, col2 = st.columns([2, 1])
 
-    with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        use_synthetic = st.button("🎲 Use Synthetic Dataset", use_container_width=True)
-        n_samples = st.number_input("Synthetic samples", min_value=500, max_value=50000, value=2000, step=500)
+        with col1:
+            uploaded_file = st.file_uploader(
+                "Upload your dataset (CSV / XLSX)",
+                type=["csv", "xlsx"],
+                help="The system adapts automatically to any structured dataset schema.",
+            )
 
-    if uploaded_file is not None:
-        try:
-            with st.spinner("Reading file..."):
-                if uploaded_file.name.endswith(".csv"):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file, engine="openpyxl")
+        with col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            use_synthetic = st.button("🎲 Use Synthetic Dataset", use_container_width=True)
+            n_samples = st.number_input("Synthetic samples", min_value=500, max_value=50000, value=2000, step=500)
+
+        if uploaded_file is not None:
+            try:
+                with st.spinner("Reading file..."):
+                    if uploaded_file.name.endswith(".csv"):
+                        df = pd.read_csv(uploaded_file)
+                    else:
+                        df = pd.read_excel(uploaded_file, engine="openpyxl")
+                st.session_state.df = df
+                st.session_state.data_source = uploaded_file.name
+                st.success(f"✅ Loaded **{uploaded_file.name}** — {df.shape[0]:,} rows × {df.shape[1]} columns")
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+                return
+
+        elif use_synthetic:
+            with st.spinner("Generating synthetic credit dataset..."):
+                df = generate_synthetic_credit_dataset(n_samples=int(n_samples))
             st.session_state.df = df
-            st.session_state.data_source = uploaded_file.name
-            st.success(f"✅ Loaded **{uploaded_file.name}** — {df.shape[0]:,} rows × {df.shape[1]} columns")
-        except Exception as e:
-            st.error(f"Error reading file: {e}")
-            return
+            st.session_state.data_source = "Synthetic Credit Dataset"
+            st.success(f"✅ Generated synthetic dataset — {df.shape[0]:,} rows × {df.shape[1]} columns")
 
-    elif use_synthetic:
-        with st.spinner("Generating synthetic credit dataset..."):
-            df = generate_synthetic_credit_dataset(n_samples=int(n_samples))
-        st.session_state.df = df
-        st.session_state.data_source = "Synthetic Credit Dataset"
-        st.success(f"✅ Generated synthetic dataset — {df.shape[0]:,} rows × {df.shape[1]} columns")
+    elif data_source_type == "🗄️ Database Connection":
+        st.info("🔧 Database connection setup")
+        col1, col2 = st.columns(2)
+        with col1:
+            db_type = st.selectbox("Database type",
+                ["PostgreSQL", "SQL Server", "Oracle", "MySQL"])
+            db_host = st.text_input("Host", placeholder="e.g. db.internal.deloitte.com")
+            db_name = st.text_input("Database name")
+        with col2:
+            db_port = st.text_input("Port", placeholder="e.g. 5432")
+            db_user = st.text_input("Username")
+            db_query = st.text_area("SQL Query",
+                placeholder="SELECT * FROM credit_portfolio WHERE ...",
+                height=100)
+        st.warning(
+            "🚧 Database connectivity is not yet implemented in this POC. "
+            "This UI demonstrates the intended workflow — connection logic "
+            "will be added once the target database and credentials are confirmed."
+        )
+        st.button("Connect & Pull Data", disabled=True, use_container_width=True)
+
+    elif data_source_type == "🌐 API Endpoint":
+        st.info("🔧 API connection setup")
+        api_url = st.text_input("API Endpoint URL",
+            placeholder="https://api.internal.deloitte.com/credit-data")
+        api_auth = st.selectbox("Authentication",
+            ["None", "API Key", "OAuth 2.0", "Bearer Token"])
+        if api_auth != "None":
+            st.text_input("Credential", type="password")
+        st.warning(
+            "🚧 API connectivity is not yet implemented in this POC. "
+            "This UI demonstrates the intended workflow."
+        )
+        st.button("Fetch Data", disabled=True, use_container_width=True)
+
+    elif data_source_type == "☁️ Cloud Storage (S3/Azure Blob)":
+        st.info("🔧 Cloud storage connection setup")
+        cloud_provider = st.selectbox("Provider", ["AWS S3", "Azure Blob Storage", "Google Cloud Storage"])
+        bucket_path = st.text_input("Bucket / Container path",
+            placeholder="e.g. s3://credit-risk-data/portfolio/")
+        st.warning(
+            "🚧 Cloud storage connectivity is not yet implemented in this POC. "
+            "This UI demonstrates the intended workflow."
+        )
+        st.button("Load from Cloud", disabled=True, use_container_width=True)
+
+    elif data_source_type == "📂 SFTP / File Server":
+        st.info("🔧 SFTP / File Server connection setup")
+        sftp_host = st.text_input("Server host", placeholder="e.g. sftp.internal.deloitte.com")
+        sftp_path = st.text_input("File path", placeholder="e.g. /exports/credit_portfolio_latest.csv")
+        st.warning(
+            "🚧 SFTP connectivity is not yet implemented in this POC. "
+            "This UI demonstrates the intended workflow — useful for "
+            "scheduled exports landing in a fixed location."
+        )
+        st.button("Pull from Server", disabled=True, use_container_width=True)
 
     if st.session_state.df is not None:
         df = st.session_state.df
@@ -770,6 +914,15 @@ def render_profiling():
             if col in target_candidates:
                 default_idx = i
                 break
+    else:
+        # Fallback: find first binary 0/1 column that isn't an ID
+        for i, col in enumerate(all_cols):
+            if "id" in col.lower():
+                continue
+            col_vals = df[col].dropna().unique()
+            if set(col_vals).issubset({0, 1, 0.0, 1.0}) and len(col_vals) == 2:
+                default_idx = i
+                break
 
     target_col = st.selectbox(
         "Select target variable",
@@ -781,6 +934,91 @@ def render_profiling():
 
     # Detect task type
     task_type = detect_task_type(df[target_col])
+
+    # ── Quantitative target: offer binning into risk bands ──────────────
+    if task_type == "regression":
+        st.markdown("#### 🎚️ Quantitative Target Detected")
+        st.info(
+            "This target is continuous (a regression problem). In credit risk, "
+            "continuous scores are often converted into discrete risk bands "
+            "(e.g. Grade A-E) instead of predicting an exact number. "
+            "Choose how you'd like to proceed below."
+        )
+
+        target_mode = st.radio(
+            "How should this target be modeled?",
+            ["Keep as continuous (Regression)", "Convert to risk bands (Classification)"],
+            key="target_mode_choice",
+        )
+
+        if target_mode == "Convert to risk bands (Classification)":
+            from utils import bin_continuous_target
+
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                n_bins = st.slider("Number of risk bands", 2, 10, 5, key="n_bins_slider")
+                bin_method = st.selectbox(
+                    "Binning method",
+                    ["quantile", "equal_width"],
+                    format_func=lambda x: "Equal Frequency (Quantile)" if x == "quantile" else "Equal Width",
+                    key="bin_method_select",
+                )
+            with bc2:
+                default_labels = ["A (Lowest Risk)", "B", "C", "D", "E (Highest Risk)"][:n_bins] \
+                    if n_bins <= 5 else [f"Band_{i+1}" for i in range(n_bins)]
+                use_custom_labels = st.checkbox("Customize band labels", value=False, key="custom_labels_chk")
+                if use_custom_labels:
+                    label_input = st.text_input(
+                        "Comma-separated labels (e.g. A,B,C,D,E)",
+                        value=",".join(default_labels),
+                        key="custom_labels_input",
+                    )
+                    band_labels = [l.strip() for l in label_input.split(",")]
+                    if len(band_labels) != n_bins:
+                        st.warning(f"⚠️ Provided {len(band_labels)} labels but need {n_bins}. Using defaults.")
+                        band_labels = default_labels
+                else:
+                    band_labels = default_labels
+
+            binned_series, bin_edges, bin_counts = bin_continuous_target(
+                df[target_col], n_bins=n_bins, method=bin_method, labels=band_labels
+            )
+
+            st.markdown("**Preview — Band Distribution:**")
+            bin_preview_df = pd.DataFrame(
+                list(bin_counts.items()), columns=["Band", "Count"]
+            )
+            st.dataframe(bin_preview_df, use_container_width=True)
+
+            fig_bins = px.bar(
+                bin_preview_df, x="Band", y="Count",
+                color="Band", title="Risk Band Distribution",
+            )
+            fig_bins.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e2e8f0"),
+            )
+            st.plotly_chart(fig_bins, use_container_width=True)
+
+            if st.button("✅ Apply Binning", type="primary", key="apply_binning_btn"):
+                binned_col_name = f"{target_col}_band"
+                df[binned_col_name] = binned_series
+                st.session_state.df = df
+                st.session_state.target_col = binned_col_name
+                target_col = binned_col_name
+                task_type = "multiclass"
+                st.session_state["_target_was_binned"] = True
+                st.session_state["_original_continuous_target"] = df[target_col].copy()
+                st.success(
+                    f"✅ Created '{binned_col_name}' with {n_bins} risk bands. "
+                    f"Task type switched to multiclass classification."
+                )
+                st.rerun()
+
+            # If already applied in a previous run, keep using the binned target
+            if st.session_state.get("_target_was_binned") and target_col.endswith("_band"):
+                task_type = "multiclass"
+
     st.session_state.task_type = task_type
 
     # Task type badge
@@ -821,22 +1059,7 @@ def render_profiling():
             else:
                 st.success("✅ Class distribution is reasonably balanced.")
 
-    # ── Agent 2 — data compliance ──
-    _a2 = _get_agent2()
-    if _a2 is not None:
-        _first = "agent2_flags_data" not in st.session_state
-        _run_agent2_stage("data", _a2.check_data, df, col_types,
-                          leakage_risk_cols=st.session_state.get("leakage_risk_cols"))
-        if _first:
-            _a2.check_rules_from_agent1("data", {
-                "n_rows": len(df),
-                "n_cols": len(df.columns),
-                "missing_pct": round(float(df.isna().mean().mean()), 4),
-                "target_col": target_col,
-            })
-            st.session_state["agent2_flags_data"] = _a2.get_stage_summary("data")["flags"]
-            st.session_state["agent2_report"] = _a2.get_full_report()
-        _render_compliance_banner("Data Profiling", st.session_state["agent2_flags_data"])
+
 
     # ── Target leakage detection ──────────────────────────────────────────────
     _leakage_cols: list = []
@@ -852,7 +1075,6 @@ def render_profiling():
             except Exception:
                 pass
     if _leakage_cols != st.session_state.get("_leakage_cols_prev", []):
-        st.session_state.pop("agent2_flags_data", None)
         st.session_state["_leakage_cols_prev"] = _leakage_cols
     st.session_state["leakage_risk_cols"] = _leakage_cols
     if _leakage_cols:
@@ -1226,91 +1448,11 @@ def render_feature_engineering():
 
     _excl_pd = fe_summary.get("excluded_orig_pd") or []
     if _excl_pd:
-        st.info("🔒 Hidden from model development (origination PD): "
+        st.info("🔒 Hidden from model development (origination PD / DPD leakage): "
                 + ", ".join(f"`{c}`" for c in _excl_pd)
                 + " — kept in the dataset for IFRS 9 SICR in the ECL step.")
 
-    # ── EAD source for ECL ──
-    st.divider()
-    st.markdown("#### 🏦 Exposure at Default (EAD) source for ECL")
-    _dff = st.session_state.df
-    _numc = [c for c in _dff.columns if pd.api.types.is_numeric_dtype(_dff[c])]
-    _ob_det = detect_outstanding_balance_col(_dff)
-
-    _has_ob = st.radio(
-        "Does your dataset contain an outstanding balance column?",
-        ["Yes — select it", "No — estimate it from loan amount, interest, elapsed time, term"],
-        index=0 if _ob_det else 1, key="ead_has_ob",
-    )
-
-    _ead_series, _ead_method, _ead_src = None, "", ""
-    if _has_ob.startswith("Yes") and _numc:
-        _ob_idx = _numc.index(_ob_det) if _ob_det in _numc else 0
-        _ob_col = st.selectbox("Outstanding balance column", _numc, index=_ob_idx, key="ead_ob_col")
-        _ead_series = pd.to_numeric(_dff[_ob_col], errors="coerce").clip(lower=0)
-        _ead_method = f"Outstanding balance column '{_ob_col}'"
-        _ead_src = _ob_col
-        st.caption(f"`{_ob_col}` is genuine bank-provided data — it stays a feature in the PD "
-                   "model and is also used directly as EAD in ECL.")
-    elif _numc:
-        NA = "— not available —"
-        _la_d = detect_loan_amount_col(_dff)
-        _ir_d = detect_interest_rate_col(_dff)
-        _ye_d, _ye_is_m = detect_years_elapsed_col(_dff)
-        _tm_d = detect_term_col(_dff)
-        _optf = lambda c: ([NA] + _numc).index(c) if c in _numc else 0
-
-        st.caption("Outstanding balance is estimated as an amortizing balance. All four inputs "
-                   "are required; if any is unavailable it is flagged (no fallback). The estimate "
-                   "is NOT a model feature — it is used only as EAD in ECL.")
-        o1, o2 = st.columns(2)
-        with o1:
-            _la = st.selectbox("Loan amount", [NA] + _numc, index=_optf(_la_d), key="ead_la")
-            _ir = st.selectbox("Interest rate", [NA] + _numc, index=_optf(_ir_d), key="ead_ir")
-        with o2:
-            _ye = st.selectbox("Elapsed time", [NA] + _numc, index=_optf(_ye_d), key="ead_ye")
-            _tm = st.selectbox("Total loan term", [NA] + _numc, index=_optf(_tm_d), key="ead_term")
-        u1, u2 = st.columns(2)
-        with u1:
-            _ye_months = st.checkbox("Elapsed time is in months", value=bool(_ye_is_m), key="ead_ye_months")
-        with u2:
-            _tm_months = st.checkbox("Loan term is in months",
-                                     value=("month" in str(_tm).lower()), key="ead_tm_months")
-
-        _missing = [lbl for lbl, val in [
-            ("loan amount", _la), ("interest rate", _ir),
-            ("elapsed time", _ye), ("total loan term", _tm)] if val == NA]
-        if _missing:
-            st.error("🚩 Outstanding balance cannot be estimated. Required column(s) not provided: "
-                     + ", ".join(_missing) + ". These are needed to compute EAD for ECL — please "
-                     "add them to the dataset.")
-        else:
-            _la_s = pd.to_numeric(_dff[_la], errors="coerce")
-            _ir_s = pd.to_numeric(_dff[_ir], errors="coerce")
-            _ye_s = pd.to_numeric(_dff[_ye], errors="coerce")
-            if _ye_months:
-                _ye_s = _ye_s / 12.0
-            _tm_s = pd.to_numeric(_dff[_tm], errors="coerce")
-            if _tm_months:
-                _tm_s = _tm_s / 12.0
-            _ead_series = compute_outstanding_balance(_la_s, _ir_s, _ye_s, term_years=_tm_s)
-            _ead_method = (f"Estimated amortizing outstanding balance from '{_la}', '{_ir}', "
-                           f"'{_ye}', term '{_tm}'")
-            _ead_src = "outstanding_balance (estimated)"
-            st.caption(f"Estimated EAD — mean {float(_ead_series.mean()):,.0f}, "
-                       f"median {float(_ead_series.median()):,.0f} (amortizing). "
-                       "Held out of the PD model; used only as EAD in ECL.")
-
-    if _ead_series is not None:
-        _ead_series = _ead_series.astype(float)
-        _ead_series.name = "ead"
-        st.session_state.ead_values = _ead_series
-        st.session_state.ead_source_col = _ead_src
-        st.session_state.ead_method = _ead_method
-        st.success(f"✅ EAD source set for ECL: {_ead_method}.")
-    else:
-        st.session_state.pop("ead_values", None)
-        st.info("EAD source not set yet — resolve the inputs above; ECL needs it.")
+    # Note: Exposure at Default (EAD) is now modelled in Model Development → 💳 EAD Model tab.
 
     # Before vs After
     st.markdown("#### 📊 Before vs After")
@@ -1341,21 +1483,7 @@ def render_feature_engineering():
             "Validation/test never produced their own IV, WOE, frequency or selection decisions."
         )
 
-    # ── Agent 2 — feature compliance ──
-    _a2 = _get_agent2()
-    if _a2 is not None:
-        _first = "agent2_flags_feature" not in st.session_state
-        _run_agent2_stage("feature", _a2.check_features, plan,
-                          all_columns=list(st.session_state.df.columns))
-        if _first:
-            _a2.check_rules_from_agent1("feature", {
-                "n_features": int(X_engineered.shape[1]),
-                "features_removed": fe_summary.get("features_removed", 0),
-                "features_added": fe_summary.get("features_added", 0),
-            })
-            st.session_state["agent2_flags_feature"] = _a2.get_stage_summary("feature")["flags"]
-            st.session_state["agent2_report"] = _a2.get_full_report()
-        _render_compliance_banner("Feature Engineering", st.session_state["agent2_flags_feature"])
+
 
     # ── Feature Decision Log download ─────────────────────────────────────────
     st.divider()
@@ -1992,35 +2120,7 @@ def render_training():
             st.code(traceback.format_exc())
             return
 
-    # ── Agent 2 — training compliance (shown once pipeline is ready) ──
-    if st.session_state.trained_pipeline is not None:
-        _a2 = _get_agent2()
-        if _a2 is not None:
-            _t_cfg = {
-                "model_name": st.session_state.get("final_model_name", selected_model_name),
-                "multiple_models_compared": st.session_state.get("model_comparison_results") is not None,
-                "use_cv": use_cv,
-                "use_smote": use_smote and task_type == "binary",
-            }
-            _first = "agent2_flags_training" not in st.session_state
-            _yt = st.session_state.get("y_train")
-            _vc = _yt.value_counts() if _yt is not None else None
-            _imb_ratio = float(_vc.max() / _vc.min()) if (_vc is not None and _vc.min() > 0) else None
-            _run_agent2_stage(
-                "training", _a2.check_training, _t_cfg,
-                training_info=st.session_state.get("training_info"),
-                test_auc=(st.session_state.get("eval_metrics") or {}).get("roc_auc"),
-                imbalance_ratio=_imb_ratio,
-                task_type=task_type,
-            )
-            if _first:
-                _a2.check_rules_from_agent1("training", {
-                    "model_name": st.session_state.get("final_model_name", selected_model_name),
-                    "use_cv": use_cv,
-                })
-                st.session_state["agent2_flags_training"] = _a2.get_stage_summary("training")["flags"]
-                st.session_state["agent2_report"] = _a2.get_full_report()
-            _render_compliance_banner("Training", st.session_state["agent2_flags_training"])
+
 
     col1, col2 = st.columns(2)
     with col1:
@@ -2081,62 +2181,7 @@ def render_evaluation():
     st.session_state.y_proba_test = y_proba
     st.session_state.heteroscedasticity_check = hetero_check
 
-    # ── Agent 2 — evaluation compliance + model risk tier ──
-    _a2 = _get_agent2()
-    if _a2 is not None and task_type == "binary":
-        _e_cfg = dict(
-            metrics=metrics,
-            training_info=st.session_state.get("training_info") or {},
-            threshold=threshold,
-            explainability_done=bool(st.session_state.get("shap_result")),
-            heteroscedasticity_result=hetero_check,
-            pd_output_present=False,
-            staging_logic_present=False,
-            sicr_flagged=False,
-            ecl_estimated=False,
-            concentration_analysis=False,
-            exposure_reported=False,
-            past_due_breakdown=False,
-            shap_available=bool(st.session_state.get("shap_result")),
-        )
-        _first_eval = "agent2_flags_evaluation" not in st.session_state
-        _run_agent2_stage("evaluation", _a2.check_evaluation, **_e_cfg)
-        if _first_eval:
-            _a2.check_rules_from_agent1("evaluation", {
-                "roc_auc": metrics.get("roc_auc"),
-                "recall": metrics.get("recall"),
-                "precision": metrics.get("precision"),
-                "pr_auc": metrics.get("pr_auc"),
-                "threshold": threshold,
-            })
-            st.session_state["agent2_flags_evaluation"] = _a2.get_stage_summary("evaluation")["flags"]
-        _render_compliance_banner("Evaluation", st.session_state["agent2_flags_evaluation"])
 
-        # Model risk tier (SS1/23 Principle 1.3) — compute once
-        if not st.session_state.get("model_tier"):
-            _y_train = st.session_state.get("y_train")
-            _y_val   = st.session_state.get("y_val")
-            _n_samp  = sum(len(s) for s in [_y_train, _y_val, y_test] if s is not None)
-            _imb = 1.0
-            if _y_train is not None:
-                _vc = _y_train.value_counts()
-                _imb = float(_vc.max() / _vc.min()) if _vc.min() > 0 else 1.0
-            _tier_cfg = {
-                "model_name": st.session_state.get("final_model_name", ""),
-                "n_samples": _n_samp,
-                "class_imbalance_ratio": _imb,
-                "use_cv": bool((st.session_state.get("training_info") or {}).get("cv_mean")),
-                "multiple_models_compared": st.session_state.get("model_comparison_results") is not None,
-                "explainability_done": bool(st.session_state.get("shap_result")),
-            }
-            st.session_state["model_tier"] = _a2.tier_model(
-                training_config=_tier_cfg,
-                metrics=metrics,
-                fe_summary=st.session_state.get("fe_summary"),
-            )
-        st.session_state["agent2_report"] = _a2.get_full_report()
-        if st.session_state.get("model_tier"):
-            _render_tier_card(st.session_state["model_tier"])
 
     if task_type == "binary":
         # Key metrics dashboard
@@ -2156,7 +2201,7 @@ def render_evaluation():
 
         tabs = st.tabs(["📈 ROC Curve", "🎯 PR Curve", "🔢 Confusion Matrix",
                          "📊 Score Distribution", "📉 Threshold Analysis", "📊 Lift Chart",
-                         "Residual Check"])
+                         "Residual Check", "🎯 Actual vs Predicted"])
 
         with tabs[0]:
             if y_proba is not None:
@@ -2200,6 +2245,79 @@ def render_evaluation():
             hc3.metric("Variance Ratio", hetero.get("variance_ratio", "N/A"))
             if hetero.get("bin_variance"):
                 st.dataframe(pd.DataFrame(hetero["bin_variance"]), use_container_width=True)
+
+        with tabs[7]:
+            st.markdown("#### 📅 Actual vs Predicted PD Over Time")
+            st.caption(
+                "Compares the model's average predicted PD against the actual "
+                "observed default rate across time periods. Large gaps (e.g. "
+                "during COVID) indicate the model underestimated or overestimated risk."
+            )
+
+            df_orig = st.session_state.df
+            date_cols = [c for c in df_orig.columns if pd.api.types.is_datetime64_any_dtype(df_orig[c])]
+            if not date_cols:
+                for c in df_orig.select_dtypes(include="object").columns:
+                    try:
+                        parsed = pd.to_datetime(df_orig[c], errors="coerce")
+                        if parsed.notna().mean() > 0.8:
+                            date_cols.append(c)
+                    except Exception:
+                        pass
+
+            if not date_cols:
+                st.warning(
+                    "⚠️ No date column detected in the dataset. Temporal stability "
+                    "analysis requires a loan origination or observation date column."
+                )
+            else:
+                date_col_sel = st.selectbox("Date column", date_cols, key="temporal_date_col")
+                freq_sel = st.radio(
+                    "Time period grouping", ["Monthly", "Quarterly", "Half-Yearly", "Yearly"],
+                    horizontal=True, key="temporal_freq", index=1,
+                )
+                freq_map = {
+                    "Monthly": "ME",
+                    "Quarterly": "QE",
+                    "Half-Yearly": "6ME",
+                    "Yearly": "YE",
+                }
+
+                try:
+                    test_idx = y_test.index
+                    dates_test = pd.to_datetime(df_orig.loc[test_idx, date_col_sel], errors="coerce")
+
+                    fig_temporal = plot_actual_vs_predicted_over_time(
+                        dates_test, y_test.values, y_proba[:, 1],
+                        freq=freq_map[freq_sel]
+                    )
+                    st.plotly_chart(fig_temporal, use_container_width=True)
+
+                    temporal_summary = compute_temporal_stability_summary(
+                        dates_test, y_test.values, y_proba[:, 1],
+                        freq=freq_map[freq_sel]
+                    )
+
+                    tc1, tc2, tc3 = st.columns(3)
+                    tc1.metric("Periods Flagged",
+                               f"{temporal_summary['n_periods_flagged']}/{temporal_summary['n_periods_total']}")
+                    tc2.metric("Mean Absolute Gap", f"{temporal_summary['mean_absolute_gap']:.2%}")
+                    if temporal_summary["max_underestimation_period"]:
+                        tc3.metric("Worst Underestimation",
+                                   temporal_summary["max_underestimation_period"],
+                                   delta=f"{temporal_summary['max_underestimation_gap']:.2%} gap")
+
+                    if temporal_summary["n_periods_flagged"] > 0:
+                        st.warning(
+                            f"⚠️ {temporal_summary['n_periods_flagged']} period(s) show a gap "
+                            f">5% between actual and predicted default rates. This may indicate "
+                            f"the model needs recalibration for stress periods or regime changes."
+                        )
+                    else:
+                        st.success("✅ Model PD estimates track actual default rates closely across all periods.")
+
+                except Exception as e:
+                    st.error(f"Could not compute temporal stability: {e}")
 
     else:
         # Regression metrics
@@ -2367,9 +2485,8 @@ def render_explainability():
             st.session_state.current_step = 7
             st.rerun()
     with col2:
-        if st.button("▶️ Proceed to ECL Calculation", type="primary", use_container_width=True):
-            st.session_state.current_step = 9
-            st.rerun()
+        st.success("✅ PD pipeline complete. The **💧 LGD Model** tab is now unlocked — "
+                   "switch to it (above) to build the LGD model, then the **💳 EAD Model** tab.")
 
 
 # ─────────────────────────────────────────────
@@ -2787,15 +2904,22 @@ def _load_val_rag_rules(stage_filter: str | None = None) -> list[dict]:
     import json
     from pathlib import Path
 
-    rules_path = Path(__file__).resolve().parent / "rag_store" / "val_mdd_rules.json"
+    # Deloitte-agent rules now drive the model-validation RAG layer too.
+    rules_path = Path(__file__).resolve().parent / "rag_store" / "rules.json"
     if not rules_path.exists():
         return []
+    # Map the legacy filter values onto the model-validation stage tags.
+    _stage_map = {"data": "data_validation", "conceptual": "conceptual_soundness"}
+    want = _stage_map.get(stage_filter, stage_filter)
     try:
         with rules_path.open(encoding="utf-8") as f:
             rules: list[dict] = json.load(f)
-        if stage_filter:
-            rules = [r for r in rules if r.get("stage") == stage_filter]
-        return rules
+        # The panel shows the qualitative (non-auto-testable) rules; the testable
+        # ones are evaluated via Agent2.check_for_validation() in the results.
+        out = [r for r in rules if not r.get("checkable_against_data", False)]
+        if want:
+            out = [r for r in out if r.get("stage") == want]
+        return out
     except Exception:
         return []
 
@@ -2817,8 +2941,8 @@ def _render_rag_rules_panel(rules: list[dict], panel_key: str = "rag") -> None:
     if not rules:
         st.info(
             "ℹ️ No qualitative rules found in rag_store/val_mdd_rules.json. "
-            "Run `python val_build_rules.py --extract` to populate the knowledge store, "
-            "or `python val_build_rules.py` to seed it with the curated baseline rules."
+            "Run `python build_rules.py` to seed the knowledge store with baseline rules, "
+            "or `python build_rules.py --extract` to pull rules from the RAG agent."
         )
         return
 
@@ -3087,18 +3211,25 @@ def render_val_data_validation():
         })
 
         # ── Agent 1 RAG rules — Stage 2 context ──────────────────────────────
-        _va2_singleton = _get_val_agent2()
-        if _va2_singleton is not None:
-            _imbalance_ratio = (
-                round(1.0 / _ratio_10, 2) if (_bin_tgt and _ratio_10 > 0) else 1.0
-            )
-            _rag_findings = _va2_singleton.check_rules_from_agent1("data", {
+        # ── RAG agent — quantitative rule checks + MDD keyword search ──
+        _imbalance_ratio = (
+            round(1.0 / _ratio_10, 2) if (_bin_tgt and _ratio_10 > 0) else 1.0
+        )
+        _del_a2 = _get_agent2()
+        if _del_a2 is not None:
+            # Quantitative checks from val_mdd_rules.json (checkable_against_data=True)
+            _rag_findings = _del_a2.check_for_validation("data_validation", {
                 "missing_rate":          _max_miss,
                 "duplicate_rate":        _dup_rate,
                 "n_rows":                len(_df),
                 "class_imbalance_ratio": _imbalance_ratio,
             })
             _results.extend(_rag_findings)
+            # Keyword-search cross-check against uploaded MDD (if available)
+            _mdd_text = st.session_state.get("val_mdd_text", "")
+            if _mdd_text:
+                _kw_findings = _del_a2.check_mdd_keywords(_mdd_text, stage="data_validation")
+                _results.extend(_kw_findings)
 
         st.session_state["val_dv_results"] = _results
 
@@ -3142,60 +3273,111 @@ def render_val_data_validation():
         _S_ICN = {"PASS": "✅",      "WARN": "🟡",       "FAIL": "🔴"}
         _V_COL = {"high": "#ef4444", "medium": "#f59e0b", "low": "#10b981"}
 
-        for _r in _dv_res:
-            _st  = _r["status"]
-            _sev = _r.get("severity", "medium")
-            _border = _S_COL.get(_st, "#6366f1")
-            _bg     = _S_BG.get(_st, "#1e293b")
-            _s_icn  = _S_ICN.get(_st, "⚪")
-            _sev_c  = _V_COL.get(_sev, "#6366f1")
+        # Split into threshold checks vs RAG agent flags.
+        # Threshold checks have numeric check_ids like "2.1", "2.10".
+        # RAG agent flags have IDs like "V13", "DV-001" — non-numeric prefixes.
+        import re as _re
+        def _is_threshold_check(r):
+            cid = str(r.get("check_id", r.get("rule_id", "")))
+            return bool(_re.match(r"^\d+\.\d+$", cid))
+        _thresh_res = [r for r in _dv_res if _is_threshold_check(r)]
+        _rag_res    = [r for r in _dv_res if not _is_threshold_check(r)]
+
+        _col_thresh, _col_rag = st.columns(2)
+
+        with _col_thresh:
             st.markdown(
-                f"<div style='border-left:3px solid {_border};padding:0.75rem 1rem;"
-                f"margin:0.4rem 0;background:{_bg};border-radius:0 6px 6px 0;'>"
-                f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
-                f"<div style='color:#f1f5f9;font-size:0.92rem;font-weight:600;line-height:1.4;'>"
-                f"{_s_icn} <span style='color:#94a3b8;'>[{_html.escape(str(_r['check_id']))}]</span> "
-                f"{_html.escape(str(_r['title']))}"
-                f"<span style='background:{_sev_c};color:#0f172a;font-size:0.7rem;font-weight:700;"
-                f"padding:0.1rem 0.5rem;border-radius:10px;margin-left:0.5rem;'>"
-                f"{_html.escape(_sev.upper())}</span></div>"
-                f"<span style='background:{_border};color:#0f172a;font-size:0.78rem;font-weight:700;"
-                f"padding:0.15rem 0.6rem;border-radius:4px;white-space:nowrap;'>{_st}</span>"
+                "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
+                "padding:0.6rem 1rem;margin-bottom:0.75rem;'>"
+                "<div style='color:#6366f1;font-weight:700;font-size:0.9rem;'>📐 Recommended Threshold Checks</div>"
+                "<div style='color:#64748b;font-size:0.75rem;'>Quantitative checks against regulatory thresholds</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            for _r in _thresh_res:
+                _st  = _r["status"]
+                _sev = _r.get("severity", "medium")
+                _border = _S_COL.get(_st, "#6366f1")
+                _bg     = _S_BG.get(_st, "#1e293b")
+                _s_icn  = _S_ICN.get(_st, "⚪")
+                _sev_c  = _V_COL.get(_sev, "#6366f1")
+                st.markdown(
+                    f"<div style='border-left:3px solid {_border};padding:0.75rem 1rem;"
+                    f"margin:0.4rem 0;background:{_bg};border-radius:0 6px 6px 0;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                    f"<div style='color:#f1f5f9;font-size:0.92rem;font-weight:600;line-height:1.4;'>"
+                    f"{_s_icn} <span style='color:#94a3b8;'>[{_html.escape(str(_r['check_id']))}]</span> "
+                    f"{_html.escape(str(_r['title']))}"
+                    f"<span style='background:{_sev_c};color:#0f172a;font-size:0.7rem;font-weight:700;"
+                    f"padding:0.1rem 0.5rem;border-radius:10px;margin-left:0.5rem;'>"
+                    f"{_html.escape(_sev.upper())}</span></div>"
+                    f"<span style='background:{_border};color:#0f172a;font-size:0.78rem;font-weight:700;"
+                    f"padding:0.15rem 0.6rem;border-radius:4px;white-space:nowrap;'>{_st}</span>"
                 f"</div>"
                 f"<div style='color:#94a3b8;font-size:0.78rem;margin-top:0.3rem;'>"
-                f"📋 {_html.escape(str(_r['source']))} — {_html.escape(str(_r['principle']))}</div>"
+                f"📋 {_html.escape(str(_r.get('source', '')))} — {_html.escape(str(_r.get('principle', '')))}</div>"
                 f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.25rem;'>"
-                f"📊 Observed: <code style='color:#e2e8f0;'>{_html.escape(str(_r['observed']))}</code></div>"
+                f"📊 Observed: <code style='color:#e2e8f0;'>{_html.escape(str(_r.get('observed', '')))}</code></div>"
                 f"<div style='color:#475569;font-size:0.78rem;margin-top:0.15rem;'>"
-                f"📐 Threshold: {_html.escape(str(_r['threshold']))}</div>"
+                f"📐 Threshold: {_html.escape(str(_r.get('threshold', '')))}</div>"
                 f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.2rem;'>"
-                f"💡 {_html.escape(str(_r['detail']))}</div>"
+                f"💡 {_html.escape(str(_r.get('detail', '')))}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
 
-        # ── RAG Agent — qualitative rules from knowledge store ──────────────
-        st.divider()
-        st.markdown("#### 🤖 RAG Agent — Qualitative Data Validation Rules")
-        st.markdown(
-            "<p style='color:#94a3b8;font-size:0.85rem;'>"
-            "The following rules were retrieved from the regulatory knowledge store "
-            "(SS1/23, SS11/13, IFRS 9) by the RAG agent. They cover qualitative "
-            "MDD documentation requirements for Stage 2 that cannot be assessed from "
-            "the dataset alone. Agent 2b will cross-check each rule against the "
-            "uploaded MDD and surface PASS / WARN / FAIL findings.</p>",
-            unsafe_allow_html=True,
-        )
-        _rag_dv_rules = _load_val_rag_rules(stage_filter="data")
-        _render_rag_rules_panel(_rag_dv_rules, panel_key="dv")
+        with _col_rag:
+            st.markdown(
+                "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
+                "padding:0.6rem 1rem;margin-bottom:0.75rem;'>"
+                "<div style='color:#a78bfa;font-weight:700;font-size:0.9rem;'>🤖 RAG Agent Rules</div>"
+                "<div style='color:#64748b;font-size:0.75rem;'>Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            if not _rag_res:
+                st.info("No RAG agent flags generated for this dataset.")
+            for _r in _rag_res:
+                _sev    = _r.get("severity", "low")
+                _border = {"high": "#ef4444", "medium": "#f59e0b", "low": "#10b981"}.get(_sev, "#6366f1")
+                _bg     = {"high": "#1c0808", "medium": "#1c1200", "low": "#071a0e"}.get(_sev, "#1e293b")
+                _icon   = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(_sev, "⚪")
+                _rule_id    = _html.escape(str(_r.get("rule_id", _r.get("check_id", "?"))))
+                _flag_text  = _html.escape(str(_r.get("flag", _r.get("title", ""))))
+                _suggestion = _html.escape(str(_r.get("suggestion", _r.get("detail", ""))))
+                _source     = _html.escape(str(_r.get("source", "")))
+                _principle  = _html.escape(str(_r.get("principle", "")))
+                _ov         = _r.get("observed_value", _r.get("observed"))
+                _obs_row    = (
+                    f"<div style='color:#94a3b8;font-size:0.78rem;margin-top:0.2rem;'>"
+                    f"📊 Observed: <code style='color:#e2e8f0;'>{_html.escape(str(_ov))}</code></div>"
+                    if _ov is not None else ""
+                )
+                _nv_tag = (
+                    "<span style='color:#64748b;font-size:0.75rem;font-style:italic;'> · not verifiable with current data</span>"
+                    if _r.get("not_verifiable") else ""
+                )
+                st.markdown(
+                    f"<div style='border-left:3px solid {_border};padding:0.6rem 1rem;"
+                    f"margin:0.35rem 0;background:{_bg};border-radius:0 6px 6px 0;'>"
+                    f"<div style='color:#f1f5f9;font-size:0.88rem;font-weight:600;line-height:1.4;'>"
+                    f"{_icon} <span style='color:#94a3b8;'>[{_rule_id}]</span> {_flag_text}{_nv_tag}</div>"
+                    f"{_obs_row}"
+                    f"<div style='color:#94a3b8;font-size:0.82rem;margin-top:0.25rem;line-height:1.4;'>"
+                    f"💡 {_suggestion}</div>"
+                    f"<div style='color:#475569;font-size:0.75rem;margin-top:0.15rem;'>"
+                    f"📋 {_source} — {_principle}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
         st.divider()
         _csv_rows = [{
-            "Check ID": r["check_id"], "Title": r["title"],
-            "Regulatory Source": r["source"], "Principle": r["principle"],
-            "Severity": r["severity"], "Status": r["status"],
-            "Observed": r["observed"], "Threshold": r["threshold"],
-            "Detail": r["detail"],
+            "Check ID": r.get("check_id", ""), "Title": r.get("title", r.get("flag", "")),
+            "Regulatory Source": r.get("source", ""), "Principle": r.get("principle", ""),
+            "Severity": r.get("severity", ""), "Status": r.get("status", ""),
+            "Observed": r.get("observed", ""), "Threshold": r.get("threshold", ""),
+            "Detail": r.get("detail", ""),
         } for r in _dv_res]
         st.download_button(
             "📥 Download Data Validation Report (CSV)",
@@ -3306,10 +3488,17 @@ def render_val_conceptual_soundness():
                         _corr_max = float(_cm.max())
                 except Exception:
                     pass
-            _rag_s3 = _va2_s3.check_rules_from_agent1("feature", {
-                "correlation_max": _corr_max,
-            })
-            _s3_results.extend(_rag_s3)
+            _del_a2 = _get_agent2()
+            if _del_a2 is not None:
+                # Keyword-search cross-check against uploaded MDD
+                _mdd_text_s3 = st.session_state.get("val_mdd_text", "")
+                if _mdd_text_s3:
+                    _kw_s3 = _del_a2.check_mdd_keywords(_mdd_text_s3, stage="conceptual_soundness")
+                    _s3_results.extend(_kw_s3)
+                _rag_s3 = _del_a2.check_for_validation("conceptual_soundness", {
+                    "correlation_max": _corr_max,
+                })
+                _s3_results.extend(_rag_s3)
 
             st.session_state["val_s3_results"] = _s3_results
             st.rerun()
@@ -3340,59 +3529,108 @@ def render_val_conceptual_soundness():
     _S_ICN = {"PASS": "✅",      "WARN": "🟡",       "FAIL": "🔴"}
     _V_COL = {"high": "#ef4444", "medium": "#f59e0b", "low": "#10b981"}
 
-    for _r in _cs_res:
-        _st  = _r.get("status", "WARN")
-        _sev = _r.get("severity", "medium")
+    # Split into threshold checks vs RAG agent flags.
+    # Threshold checks have numeric check_ids like "3.1". RAG flags use "V13", "CS-001" etc.
+    import re as _re
+    def _is_threshold_check_s3(r):
+        cid = str(r.get("check_id", r.get("rule_id", "")))
+        return bool(_re.match(r"^\d+\.\d+$", cid))
+    _thresh_s3  = [r for r in _cs_res if _is_threshold_check_s3(r)]
+    _rag_s3_res = [r for r in _cs_res if not _is_threshold_check_s3(r)]
+
+    _col_thresh_s3, _col_rag_s3 = st.columns(2)
+
+    with _col_thresh_s3:
         st.markdown(
-            f"<div style='border-left:3px solid {_S_COL.get(_st,'#6366f1')};"
-            f"padding:0.75rem 1rem;margin:0.4rem 0;"
-            f"background:{_S_BG.get(_st,'#1e293b')};border-radius:0 6px 6px 0;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
-            f"<div style='color:#f1f5f9;font-size:0.92rem;font-weight:600;line-height:1.4;'>"
-            f"{_S_ICN.get(_st,'⚪')} "
-            f"<span style='color:#94a3b8;'>[{_html.escape(str(_r.get('check_id','')))}]</span> "
-            f"{_html.escape(str(_r.get('title','')))}"
-            f"<span style='background:{_V_COL.get(_sev,'#6366f1')};color:#0f172a;"
-            f"font-size:0.7rem;font-weight:700;padding:0.1rem 0.5rem;"
-            f"border-radius:10px;margin-left:0.5rem;'>{_html.escape(_sev.upper())}</span>"
-            f"</div>"
-            f"<span style='background:{_S_COL.get(_st,'#6366f1')};color:#0f172a;"
-            f"font-size:0.78rem;font-weight:700;padding:0.15rem 0.6rem;"
-            f"border-radius:4px;white-space:nowrap;'>{_st}</span>"
-            f"</div>"
-            f"<div style='color:#94a3b8;font-size:0.78rem;margin-top:0.3rem;'>"
-            f"📋 {_html.escape(str(_r.get('source', '')))} — {_html.escape(str(_r.get('principle', '')))}</div>"
-            f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.25rem;'>"
-            f"📊 Observed: <code style='color:#e2e8f0;'>"
-            f"{_html.escape(str(_r.get('observed', '')))}</code></div>"
-            f"<div style='color:#475569;font-size:0.78rem;margin-top:0.15rem;'>"
-            f"📐 Threshold: {_html.escape(str(_r.get('threshold', '')))}</div>"
-            f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.2rem;'>"
-            f"💡 {_html.escape(str(_r.get('detail', '')))}</div>"
-            f"</div>",
+            "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
+            "padding:0.6rem 1rem;margin-bottom:0.75rem;'>"
+            "<div style='color:#6366f1;font-weight:700;font-size:0.9rem;'>📐 Recommended Threshold Checks</div>"
+            "<div style='color:#64748b;font-size:0.75rem;'>Quantitative checks against regulatory thresholds</div>"
+            "</div>",
             unsafe_allow_html=True,
         )
+        for _r in _thresh_s3:
+            _st  = _r.get("status", "WARN")
+            _sev = _r.get("severity", "medium")
+            st.markdown(
+                f"<div style='border-left:3px solid {_S_COL.get(_st,'#6366f1')};"
+                f"padding:0.75rem 1rem;margin:0.4rem 0;"
+                f"background:{_S_BG.get(_st,'#1e293b')};border-radius:0 6px 6px 0;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                f"<div style='color:#f1f5f9;font-size:0.92rem;font-weight:600;line-height:1.4;'>"
+                f"{_S_ICN.get(_st,'⚪')} "
+                f"<span style='color:#94a3b8;'>[{_html.escape(str(_r.get('check_id','')))}]</span> "
+                f"{_html.escape(str(_r.get('title','')))}"
+                f"<span style='background:{_V_COL.get(_sev,'#6366f1')};color:#0f172a;"
+                f"font-size:0.7rem;font-weight:700;padding:0.1rem 0.5rem;"
+                f"border-radius:10px;margin-left:0.5rem;'>{_html.escape(_sev.upper())}</span>"
+                f"</div>"
+                f"<span style='background:{_S_COL.get(_st,'#6366f1')};color:#0f172a;"
+                f"font-size:0.78rem;font-weight:700;padding:0.15rem 0.6rem;"
+                f"border-radius:4px;white-space:nowrap;'>{_st}</span>"
+                f"</div>"
+                f"<div style='color:#94a3b8;font-size:0.78rem;margin-top:0.3rem;'>"
+                f"📋 {_html.escape(str(_r.get('source', '')))} — {_html.escape(str(_r.get('principle', '')))}</div>"
+                f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.25rem;'>"
+                f"📊 Observed: <code style='color:#e2e8f0;'>"
+                f"{_html.escape(str(_r.get('observed', '')))}</code></div>"
+                f"<div style='color:#475569;font-size:0.78rem;margin-top:0.15rem;'>"
+                f"📐 Threshold: {_html.escape(str(_r.get('threshold', '')))}</div>"
+                f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.2rem;'>"
+                f"💡 {_html.escape(str(_r.get('detail', '')))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
-    # ── RAG Agent — qualitative rules from knowledge store ────────────────────────
-    st.divider()
-    st.markdown("#### 🤖 RAG Agent — Qualitative Conceptual Soundness Rules")
-    st.markdown(
-        "<p style='color:#94a3b8;font-size:0.85rem;'>"
-        "The following rules were retrieved from the regulatory knowledge store "
-        "(SS1/23, SS11/13, IFRS 9) by the RAG agent. They cover qualitative "
-        "MDD documentation requirements — model purpose, selection justification, "
-        "benchmarking evidence, assumptions, SICR criteria, and governance. "
-        "Agent 2b will cross-check each rule against the uploaded MDD and surface "
-        "PASS / WARN / FAIL findings.</p>",
-        unsafe_allow_html=True,
-    )
-    _rag_cs_rules = _load_val_rag_rules(stage_filter="conceptual")
-    _render_rag_rules_panel(_rag_cs_rules, panel_key="cs")
+    with _col_rag_s3:
+        st.markdown(
+            "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
+            "padding:0.6rem 1rem;margin-bottom:0.75rem;'>"
+            "<div style='color:#a78bfa;font-weight:700;font-size:0.9rem;'>🤖 RAG Agent Rules</div>"
+            "<div style='color:#64748b;font-size:0.75rem;'>Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if not _rag_s3_res:
+            st.info("No RAG agent flags generated for this stage.")
+        for _r in _rag_s3_res:
+            _sev    = _r.get("severity", "low")
+            _border = {"high": "#ef4444", "medium": "#f59e0b", "low": "#10b981"}.get(_sev, "#6366f1")
+            _bg     = {"high": "#1c0808", "medium": "#1c1200", "low": "#071a0e"}.get(_sev, "#1e293b")
+            _icon   = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(_sev, "⚪")
+            _rule_id    = _html.escape(str(_r.get("rule_id", _r.get("check_id", "?"))))
+            _flag_text  = _html.escape(str(_r.get("flag", _r.get("title", ""))))
+            _suggestion = _html.escape(str(_r.get("suggestion", _r.get("detail", ""))))
+            _source     = _html.escape(str(_r.get("source", "")))
+            _principle  = _html.escape(str(_r.get("principle", "")))
+            _ov         = _r.get("observed_value", _r.get("observed"))
+            _obs_row    = (
+                f"<div style='color:#94a3b8;font-size:0.78rem;margin-top:0.2rem;'>"
+                f"📊 Observed: <code style='color:#e2e8f0;'>{_html.escape(str(_ov))}</code></div>"
+                if _ov is not None else ""
+            )
+            _nv_tag = (
+                "<span style='color:#64748b;font-size:0.75rem;font-style:italic;'> · not verifiable with current data</span>"
+                if _r.get("not_verifiable") else ""
+            )
+            st.markdown(
+                f"<div style='border-left:3px solid {_border};padding:0.6rem 1rem;"
+                f"margin:0.35rem 0;background:{_bg};border-radius:0 6px 6px 0;'>"
+                f"<div style='color:#f1f5f9;font-size:0.88rem;font-weight:600;line-height:1.4;'>"
+                f"{_icon} <span style='color:#94a3b8;'>[{_rule_id}]</span> {_flag_text}{_nv_tag}</div>"
+                f"{_obs_row}"
+                f"<div style='color:#94a3b8;font-size:0.82rem;margin-top:0.25rem;line-height:1.4;'>"
+                f"💡 {_suggestion}</div>"
+                f"<div style='color:#475569;font-size:0.75rem;margin-top:0.15rem;'>"
+                f"📋 {_source} — {_principle}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     _csv_rows = [{
         "Check ID":  r.get("check_id", ""),
-        "Title":     r.get("title", ""),
+        "Title":     r.get("title", r.get("flag", "")),
         "Source":    r.get("source", ""),
         "Principle": r.get("principle", ""),
         "Severity":  r.get("severity", ""),
@@ -3420,6 +3658,537 @@ def render_val_conceptual_soundness():
             key="proceed_to_stage4",
         ):
             st.session_state["val_step"] = 4
+            st.rerun()
+
+
+def render_val_performance():
+    """Stage 5 — Performance Validation + Benchmarking"""
+    import html as _html
+    from sklearn.metrics import roc_curve as _roc_curve, confusion_matrix as _cm
+
+    st.markdown("### 📊 Stage 5 — Performance Validation & Benchmarking")
+    st.markdown(
+        "<p style='color:#94a3b8;font-size:0.87rem;'>"
+        "SS1/23 P4.1 · SS11/13 §10.3 · SS11/13 §10.5"
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    ij         = st.session_state.get("val_intake_json") or {}
+    rep_result = st.session_state.get("val_rep_result") or {}
+    rep_metrics = rep_result.get("metrics") or {}
+    y_proba    = rep_result.get("y_proba_test")
+    y_test     = rep_result.get("y_test")
+
+    if not ij:
+        st.warning("⚠️ No model intake data found. Complete Stage 1 first.")
+        return
+
+    tab1, tab2 = st.tabs(["📊 Performance Testing", "🏆 Benchmarking"])
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 1 — PERFORMANCE TESTING
+    # ══════════════════════════════════════════════════════════════════
+    with tab1:
+
+        st.markdown("#### 📋 Metrics — Stated vs Replicated vs Threshold")
+        st.caption(
+            "Stated = developer MDD. Replicated = independently computed in Stage 4. "
+            "Threshold = regulatory minimum."
+        )
+
+        _S_COL  = {"PASS": "#10b981", "WARN": "#f59e0b", "FAIL": "#ef4444"}
+        _S_BG   = {"PASS": "#071a0e", "WARN": "#1c1200", "FAIL": "#1c0808"}
+        _S_ICN  = {"PASS": "✅", "WARN": "🟡", "FAIL": "🔴"}
+        _SEV_C  = {"HIGH": "#ef4444", "MEDIUM": "#f59e0b", "LOW": "#10b981"}
+
+        perf_rows = [
+            ("ROC-AUC",    ij.get("stated_auc"),    rep_metrics.get("roc_auc"),
+             "≥ 0.70", lambda s,r: (r or s or 0) >= 0.70, "SS1/23 P4.1",    "HIGH"),
+            ("Gini",       ij.get("stated_gini"),
+             round(2*rep_metrics["roc_auc"]-1,4) if rep_metrics.get("roc_auc") else None,
+             "≥ 0.40", lambda s,r: (r or s or 0) >= 0.40, "SS11/13 §10.3",  "HIGH"),
+            ("Recall",     ij.get("stated_recall"),  rep_metrics.get("recall"),
+             "≥ 0.60", lambda s,r: (r or s or 0) >= 0.60, "SS1/23 P4.4",    "HIGH"),
+            ("Precision",  None,                     rep_metrics.get("precision"),
+             "≥ 0.50", lambda s,r: (r or 0) >= 0.50,      "SS1/23 P4.4",    "MEDIUM"),
+            ("F1 Score",   None,                     rep_metrics.get("f1"),
+             "≥ 0.55", lambda s,r: (r or 0) >= 0.55,      "SS1/23 P4.4",    "MEDIUM"),
+            ("Brier Score",ij.get("stated_brier"),   rep_metrics.get("brier_score"),
+             "< 0.25", lambda s,r: (r or s or 1) < 0.25,  "SS11/13 §10.5",  "HIGH"),
+            ("PR-AUC",     None,                     rep_metrics.get("pr_auc"),
+             "≥ 0.30", lambda s,r: (r or 0) >= 0.30,      "SS1/23 P3.3",    "MEDIUM"),
+            ("KS Statistic",None,                    rep_metrics.get("ks"),
+             "≥ 0.30", lambda s,r: (r or 0) >= 0.30,      "SS11/13 §10.3",  "MEDIUM"),
+        ]
+
+        csv_rows = []
+        for (check, stated, replicated, threshold, pass_fn, source, sev) in perf_rows:
+            val = replicated if replicated is not None else stated
+            if val is None:
+                status = "WARN"
+                obs    = "No stated or replicated value available"
+            elif pass_fn(stated, replicated):
+                status = "PASS"
+                obs    = f"{'Replicated' if replicated else 'Stated'}: {val:.4f}"
+            else:
+                status = "FAIL"
+                obs    = f"{'Replicated' if replicated else 'Stated'}: {val:.4f}"
+
+            gap_warn = ""
+            if stated is not None and replicated is not None:
+                gap = abs(stated - replicated)
+                if gap > 0.05:
+                    gap_warn = (
+                        f" ⚠️ Gap: stated={stated:.4f} vs "
+                        f"replicated={replicated:.4f} (Δ={gap:.4f})"
+                    )
+
+            border = _S_COL.get(status, "#6366f1")
+            bg     = _S_BG.get(status, "#1e293b")
+            icon   = _S_ICN.get(status, "⚪")
+            sev_c  = _SEV_C.get(sev, "#6366f1")
+
+            st.markdown(
+                f"<div style='border-left:3px solid {border};padding:0.75rem 1rem;"
+                f"margin:0.4rem 0;background:{bg};border-radius:0 6px 6px 0;'>"
+                f"<div style='display:flex;justify-content:space-between;'>"
+                f"<div style='color:#f1f5f9;font-size:0.92rem;font-weight:600;'>"
+                f"{icon} {_html.escape(check)}"
+                f"<span style='background:{sev_c};color:#0f172a;font-size:0.7rem;"
+                f"font-weight:700;padding:0.1rem 0.5rem;border-radius:10px;"
+                f"margin-left:0.5rem;'>{sev}</span></div>"
+                f"<span style='background:{border};color:#0f172a;font-size:0.78rem;"
+                f"font-weight:700;padding:0.15rem 0.6rem;border-radius:4px;'>"
+                f"{status}</span></div>"
+                f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.3rem;'>"
+                f"📊 {_html.escape(obs)}{_html.escape(gap_warn)}</div>"
+                f"<div style='color:#475569;font-size:0.78rem;margin-top:0.15rem;'>"
+                f"📐 Threshold: {_html.escape(threshold)} — "
+                f"📋 {_html.escape(source)}</div>"
+                f"<div style='color:#475569;font-size:0.75rem;margin-top:0.1rem;'>"
+                f"Stated: {f'{stated:.4f}' if stated else 'N/A'} | "
+                f"Replicated: {f'{replicated:.4f}' if replicated else 'N/A'}"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+            csv_rows.append({
+                "Check": check, "Stated": stated,
+                "Replicated": replicated, "Threshold": threshold,
+                "Status": status, "Source": source, "Severity": sev,
+            })
+
+        st.divider()
+
+        # ── Train/Test gap ────────────────────────────────────────────
+        st.markdown("#### 🔍 Train/Test AUC Gap (Overfitting Check)")
+        cv_mean  = rep_result.get("cv_mean_auc")
+        test_auc = rep_metrics.get("roc_auc")
+        if cv_mean and test_auc:
+            gap = abs(cv_mean - test_auc)
+            gs  = "PASS" if gap <= 0.10 else "FAIL"
+            st.markdown(
+                f"<div style='border-left:3px solid "
+                f"{'#10b981' if gs=='PASS' else '#ef4444'};"
+                f"padding:0.75rem 1rem;margin:0.4rem 0;"
+                f"background:{'#071a0e' if gs=='PASS' else '#1c0808'};"
+                f"border-radius:0 6px 6px 0;'>"
+                f"<div style='color:#f1f5f9;font-weight:600;'>"
+                f"{'✅' if gs=='PASS' else '🔴'} Train/Test AUC Gap</div>"
+                f"<div style='color:#94a3b8;font-size:0.8rem;margin-top:0.3rem;'>"
+                f"CV Mean AUC: {cv_mean:.4f} | Test AUC: {test_auc:.4f} | "
+                f"Gap: {gap:.4f}</div>"
+                f"<div style='color:#475569;font-size:0.78rem;margin-top:0.15rem;'>"
+                f"📐 Gap ≤ 0.10 — 📋 SS1/23 P4.4</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Run Stage 4 with CV enabled to populate this check.")
+
+        st.divider()
+
+        # ── Charts ────────────────────────────────────────────────────
+        if y_proba is not None and y_test is not None:
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.markdown("#### 📈 ROC Curve")
+                fpr, tpr, _ = _roc_curve(y_test.values, y_proba)
+                auc_val = rep_metrics.get("roc_auc", 0)
+                fig_roc = go.Figure()
+                fig_roc.add_trace(go.Scatter(
+                    x=fpr, y=tpr, mode="lines",
+                    name=f"AUC={auc_val:.4f}",
+                    line=dict(color="#6366f1", width=3),
+                    fill="tozeroy", fillcolor="rgba(99,102,241,0.08)",
+                ))
+                fig_roc.add_trace(go.Scatter(
+                    x=[0,1], y=[0,1], mode="lines", name="Random",
+                    line=dict(color="#64748b", dash="dash"),
+                ))
+                fig_roc.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#e2e8f0"),
+                    xaxis_title="FPR", yaxis_title="TPR",
+                )
+                st.plotly_chart(fig_roc, use_container_width=True)
+
+            with c2:
+                st.markdown("#### 🔢 Confusion Matrix")
+                y_pred = (y_proba >= 0.5).astype(int)
+                cm = _cm(y_test.values, y_pred)
+                fig_cm = go.Figure(go.Heatmap(
+                    z=cm, x=["Pred: 0","Pred: 1"],
+                    y=["Actual: 0","Actual: 1"],
+                    text=cm, texttemplate="%{text}",
+                    colorscale="Blues",
+                ))
+                fig_cm.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#e2e8f0"),
+                )
+                st.plotly_chart(fig_cm, use_container_width=True)
+
+            st.markdown("#### 📊 Score Distribution by Outcome")
+            fig_dist = go.Figure()
+            df_plot = pd.DataFrame({
+                "proba": y_proba, "actual": y_test.values
+            })
+            fig_dist.add_trace(go.Histogram(
+                x=df_plot[df_plot["actual"]==0]["proba"],
+                name="Non-Default", opacity=0.6,
+                marker_color="#10b981", nbinsx=40,
+            ))
+            fig_dist.add_trace(go.Histogram(
+                x=df_plot[df_plot["actual"]==1]["proba"],
+                name="Default", opacity=0.6,
+                marker_color="#ef4444", nbinsx=40,
+            ))
+            fig_dist.update_layout(
+                barmode="overlay",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e2e8f0"),
+                xaxis_title="Predicted PD",
+                yaxis_title="Count",
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # ── Calibration chart ─────────────────────────────────────
+            st.markdown("#### 🎯 Calibration Chart (Actual vs Predicted by Risk Bin)")
+            st.caption(
+                "Customers grouped into 10 bins by predicted PD. "
+                "Bars = actual default rate. Line = avg predicted PD. "
+                "A well-calibrated model has bars matching the line."
+            )
+            df_cal = pd.DataFrame({
+                "actual": y_test.values, "predicted": y_proba
+            })
+            df_cal["bin"] = pd.qcut(
+                df_cal["predicted"], q=10, duplicates="drop"
+            )
+            grouped = df_cal.groupby("bin", observed=True).agg(
+                actual_rate=("actual", "mean"),
+                predicted_rate=("predicted", "mean"),
+                n=("actual", "count"),
+            ).reset_index()
+            grouped["bin_label"] = grouped["bin"].astype(str)
+
+            fig_cal = go.Figure()
+            fig_cal.add_trace(go.Bar(
+                x=grouped["bin_label"],
+                y=grouped["actual_rate"],
+                name="Actual Default Rate",
+                marker_color="#ef4444", opacity=0.85,
+            ))
+            fig_cal.add_trace(go.Scatter(
+                x=grouped["bin_label"],
+                y=grouped["predicted_rate"],
+                mode="lines+markers",
+                name="Avg Predicted PD",
+                line=dict(color="#6366f1", width=3),
+                marker=dict(size=8),
+            ))
+            fig_cal.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e2e8f0"),
+                xaxis_title="Predicted PD Bin (low → high risk)",
+                yaxis=dict(tickformat=".0%", gridcolor="#334155"),
+            )
+            st.plotly_chart(fig_cal, use_container_width=True)
+
+        st.divider()
+
+        # ── Manual stubs ──────────────────────────────────────────────
+        st.markdown("#### 🚧 Checks Requiring Manual Review")
+        for cid, ctitle, src, prin, sev in [
+            ("5.8",  "Calibration Test (Hosmer-Lemeshow)",
+             "SS11/13", "§10.5", "HIGH"),
+            ("5.9",  "SHAP Explainability Outputs Reviewed",
+             "SS1/23",  "P4.2",  "HIGH"),
+            ("5.10", "Decision Threshold Justified",
+             "SS1/23",  "P5.1",  "MEDIUM"),
+            ("5.11", "Sensitivity Analysis Performed",
+             "SS1/23",  "P4.3",  "MEDIUM"),
+        ]:
+            st.markdown(
+                f"<div style='border-left:3px solid #475569;"
+                f"padding:0.6rem 1rem;margin:0.3rem 0;"
+                f"background:#1e293b;border-radius:0 6px 6px 0;'>"
+                f"<div style='color:#94a3b8;font-size:0.88rem;font-weight:600;'>"
+                f"⏭️ [{cid}] {_html.escape(ctitle)}</div>"
+                f"<div style='color:#475569;font-size:0.78rem;margin-top:0.2rem;'>"
+                f"📋 {src} {prin} — Manual review required"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.divider()
+        st.download_button(
+            "📥 Download Performance Report (CSV)",
+            data=pd.DataFrame(csv_rows).to_csv(index=False).encode("utf-8"),
+            file_name="performance_validation_report.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_perf_report",
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 2 — BENCHMARKING
+    # ══════════════════════════════════════════════════════════════════
+    with tab2:
+        st.markdown("#### 🏆 Benchmarking — Champion vs Challenger")
+        st.caption(
+            "Compare the submitted model against a baseline/benchmark model. "
+            "SS1/23 P4.2 requires performance to be assessed relative to "
+            "alternatives. Industry standard for credit risk is logistic "
+            "regression as the baseline challenger."
+        )
+
+        val_df = st.session_state.get("val_df")
+
+        if val_df is None:
+            st.warning("⚠️ No dataset found. Complete Stage 1 first.")
+        elif y_proba is None or y_test is None:
+            st.warning("⚠️ Run Stage 4 Model Replication first to enable benchmarking.")
+        else:
+            # ── Benchmark model selector ──────────────────────────────
+            st.markdown("##### Select Benchmark Model")
+            benchmark_model = st.selectbox(
+                "Benchmark / Challenger model",
+                [
+                    "Logistic Regression (Industry Standard)",
+                    "Decision Tree (Simple Interpretable)",
+                    "Random Forest (Ensemble Baseline)",
+                ],
+                key="benchmark_model_sel",
+            )
+
+            if st.button(
+                "🚀 Run Benchmark Comparison",
+                type="primary",
+                use_container_width=True,
+                key="run_benchmark_btn",
+            ):
+                from sklearn.linear_model import LogisticRegression
+                from sklearn.tree import DecisionTreeClassifier
+                from sklearn.ensemble import RandomForestClassifier
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.metrics import roc_auc_score
+                import warnings
+                warnings.filterwarnings("ignore")
+
+                with st.spinner("Training benchmark model..."):
+                    try:
+                        rep_res     = st.session_state.get("val_rep_result") or {}
+                        X_test_rep  = rep_res.get("X_test")
+                        X_train_rep = rep_res.get("X_train")
+                        y_train_rep = rep_res.get("y_train")
+                        y_test_rep  = rep_res.get("y_test")
+
+                        if X_train_rep is None:
+                            st.error("Stage 4 training data not found in session. Re-run Stage 4.")
+                        else:
+                            if "Logistic" in benchmark_model:
+                                bm = LogisticRegression(
+                                    max_iter=1000, class_weight="balanced", random_state=42
+                                )
+                            elif "Decision Tree" in benchmark_model:
+                                bm = DecisionTreeClassifier(
+                                    max_depth=5, class_weight="balanced", random_state=42
+                                )
+                            else:
+                                bm = RandomForestClassifier(
+                                    n_estimators=100, class_weight="balanced", random_state=42
+                                )
+
+                            from sklearn.impute import SimpleImputer
+
+                            # Select numeric columns only
+                            X_tr_num = X_train_rep.select_dtypes(include=[np.number])
+                            X_te_num = X_test_rep.select_dtypes(include=[np.number])
+
+                            # Impute missing values with median (learned on train only)
+                            imputer = SimpleImputer(strategy="median")
+                            X_tr_imp = imputer.fit_transform(X_tr_num)
+                            X_te_imp = imputer.transform(X_te_num)
+
+                            # Scale
+                            scaler  = StandardScaler()
+                            X_tr_sc = scaler.fit_transform(X_tr_imp)
+                            X_te_sc = scaler.transform(X_te_imp)
+
+                            bm.fit(X_tr_sc, y_train_rep)
+                            bm_proba  = bm.predict_proba(X_te_sc)[:, 1]
+                            bm_pred   = (bm_proba >= 0.5).astype(int)
+                            bm_auc    = round(roc_auc_score(y_test_rep.values, bm_proba), 4)
+                            bm_gini   = round(2 * bm_auc - 1, 4)
+                            bm_recall = round(
+                                float((bm_pred[y_test_rep.values == 1] == 1).mean()), 4
+                            )
+
+                            st.session_state["val_benchmark_proba"]   = bm_proba
+                            st.session_state["val_benchmark_metrics"] = {
+                                "roc_auc": bm_auc,
+                                "gini":    bm_gini,
+                                "recall":  bm_recall,
+                            }
+                            st.session_state["val_benchmark_name"]    = benchmark_model
+                            st.success(f"✅ Benchmark trained — AUC={bm_auc:.4f}")
+                    except Exception as e:
+                        st.error(f"Benchmark training failed: {e}")
+
+            # ── Show comparison if benchmark exists ───────────────────
+            bm_metrics      = st.session_state.get("val_benchmark_metrics")
+            bm_proba_stored = st.session_state.get("val_benchmark_proba")
+            bm_name         = st.session_state.get("val_benchmark_name", "Benchmark")
+
+            if bm_metrics:
+                st.markdown("##### 📊 Champion vs Challenger Comparison")
+
+                comp_data = {
+                    "Metric": ["ROC-AUC", "Gini", "Recall"],
+                    "Submitted Model (Champion)": [
+                        round(rep_metrics.get("roc_auc", 0), 4),
+                        round(2 * rep_metrics.get("roc_auc", 0) - 1, 4),
+                        round(rep_metrics.get("recall", 0), 4),
+                    ],
+                    f"Benchmark ({bm_name.split('(')[0].strip()})": [
+                        bm_metrics["roc_auc"],
+                        bm_metrics["gini"],
+                        bm_metrics["recall"],
+                    ],
+                }
+                comp_df = pd.DataFrame(comp_data)
+                comp_df["Delta (Champion - Benchmark)"] = (
+                    comp_df["Submitted Model (Champion)"]
+                    - comp_df[f"Benchmark ({bm_name.split('(')[0].strip()})"]
+                )
+                comp_df["Verdict"] = comp_df["Delta (Champion - Benchmark)"].apply(
+                    lambda d: "✅ Better" if d > 0.02
+                    else "⚠️ Similar" if d >= -0.02
+                    else "❌ Worse"
+                )
+                st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+                worse  = (comp_df["Verdict"] == "❌ Worse").sum()
+                better = (comp_df["Verdict"] == "✅ Better").sum()
+                if worse > 0:
+                    st.error(
+                        f"❌ Submitted model underperforms the benchmark on "
+                        f"{worse} metric(s) — requires justification per SS1/23 P4.2"
+                    )
+                elif better == len(comp_df):
+                    st.success(
+                        "✅ Submitted model outperforms benchmark on all metrics — "
+                        "champion/challenger test passed"
+                    )
+                else:
+                    st.warning(
+                        "⚠️ Submitted model performance is similar to benchmark — "
+                        "marginal improvement may not justify additional model complexity"
+                    )
+
+                if bm_proba_stored is not None:
+                    st.markdown("##### 📈 ROC Curve Overlay")
+                    from sklearn.metrics import roc_curve as _rc2
+                    fpr_ch, tpr_ch, _ = _rc2(y_test.values, y_proba)
+                    fpr_bm, tpr_bm, _ = _rc2(y_test.values, bm_proba_stored)
+
+                    fig_overlay = go.Figure()
+                    fig_overlay.add_trace(go.Scatter(
+                        x=fpr_ch, y=tpr_ch, mode="lines",
+                        name=f"Champion (AUC={rep_metrics.get('roc_auc', 0):.4f})",
+                        line=dict(color="#6366f1", width=3),
+                    ))
+                    fig_overlay.add_trace(go.Scatter(
+                        x=fpr_bm, y=tpr_bm, mode="lines",
+                        name=f"Benchmark (AUC={bm_metrics['roc_auc']:.4f})",
+                        line=dict(color="#f59e0b", width=2.5, dash="dash"),
+                    ))
+                    fig_overlay.add_trace(go.Scatter(
+                        x=[0, 1], y=[0, 1], mode="lines", name="Random",
+                        line=dict(color="#64748b", dash="dot"),
+                    ))
+                    fig_overlay.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#e2e8f0"),
+                        title="ROC Curve — Champion vs Challenger",
+                        xaxis_title="False Positive Rate",
+                        yaxis_title="True Positive Rate",
+                    )
+                    st.plotly_chart(fig_overlay, use_container_width=True)
+
+                st.download_button(
+                    "📥 Download Benchmarking Report (CSV)",
+                    data=comp_df.to_csv(index=False).encode("utf-8"),
+                    file_name="benchmarking_report.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_benchmark_report",
+                )
+            else:
+                st.info(
+                    "ℹ️ Select a benchmark model above and click "
+                    "'Run Benchmark Comparison' to start."
+                )
+
+            # ── Industry benchmarks ───────────────────────────────────
+            st.divider()
+            st.markdown("##### 📋 Industry Standard Benchmarks")
+            st.caption(
+                "Typical performance ranges for retail credit risk PD models. "
+                "Source: industry practice and regulatory guidance."
+            )
+            industry_df = pd.DataFrame({
+                "Metric":    ["ROC-AUC", "Gini", "KS", "Brier Score"],
+                "Minimum":   ["0.70",    "0.40", "0.30", "< 0.25"],
+                "Good":      ["0.75-0.80", "0.50-0.60", "0.40-0.50", "< 0.20"],
+                "Excellent": ["> 0.85",    "> 0.70",    "> 0.60",    "< 0.15"],
+                "Our Model": [
+                    f"{rep_metrics.get('roc_auc'):.4f}" if rep_metrics.get("roc_auc") else "N/A",
+                    f"{round(2*rep_metrics.get('roc_auc',0)-1,4):.4f}" if rep_metrics.get("roc_auc") else "N/A",
+                    f"{rep_metrics.get('ks'):.4f}" if rep_metrics.get("ks") else "N/A",
+                    f"{rep_metrics.get('brier_score'):.4f}" if rep_metrics.get("brier_score") else "N/A",
+                ],
+            })
+            st.dataframe(industry_df, use_container_width=True, hide_index=True)
+
+    # ── Proceed button ────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    _, col2, _ = st.columns([1, 2, 1])
+    with col2:
+        if st.button(
+            "▶️ Proceed to Stage 6: Stress & Backtesting",
+            type="primary",
+            use_container_width=True,
+            key="proceed_to_stage6",
+        ):
+            st.session_state["val_step"] = 6
             st.rerun()
 
 
@@ -3489,10 +4258,18 @@ def render_model_validation():
                     "config JSON to enable comparison against developer stated values."
                 )
 
+        st.divider()
+        if st.button(
+            "Proceed to Stage 5: Performance Testing →",
+            type="primary",
+            use_container_width=True,
+            key="proceed_to_stage5",
+        ):
+            st.session_state["val_step"] = 5
+            st.rerun()
+
     elif stage == 5:
-        _render_val_stage_stub(5, "📊", "Performance Testing", "SS1/23 P4 · IFRS 9 B5.5.50",
-            "Evaluate discriminatory power (AUC, Gini), calibration (Brier score, reliability diagrams), "
-            "and stability (PSI, CSI) across time periods and segments.")
+        render_val_performance()
     elif stage == 6:
         _render_val_stage_stub(6, "📉", "Stress Testing & Backtesting", "SS11/13 §12 · IFRS 9 B5.5.49",
             "Test model performance under stress scenarios and economic downturns. "
@@ -3531,231 +4308,96 @@ def render_header():
 
 
 # ─────────────────────────────────────────────
-# STEP 9: ECL Calculation
+# Model Development — LGD & EAD tabs
 # ─────────────────────────────────────────────
-def render_ecl():
+def render_lgd_development():
+    """LGD modelling tab (Model Development). Mirrors the PD pipeline's staged feel,
+    but is fully automatic: training population, realized-LGD target and predictors
+    are all derived from the same uploaded dataset and the PD target already chosen
+    in the PD Model tab. Uses the SAME dataset uploaded in Step 1 — no re-upload."""
     st.markdown("""
     <div class='step-header'>
-        <h3>\U0001F3E6 Step 9 — ECL Calculation (IFRS 9)</h3>
-        <p>SICR assessment &rarr; Stage 1/2/3 classification &rarr; ECL = PD &times; LGD &times; EAD
-        (12-month PD for Stage 1, lifetime PD for Stage 2 &amp; 3)</p>
+        <h3>💧 LGD Model — Loss Given Default</h3>
+        <p>Train a regression model on the defaulted loans in your uploaded dataset
+        (default flag = the PD target chosen in the PD Model tab), enriched with
+        point-in-time macroeconomic features from FRED. Same dataset, no re-upload.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    pipeline = st.session_state.trained_pipeline
-    # Portfolio scoring uses the engineered matrix reassembled from the train/val/
-    # test splits. The transforms were LEARNED on train and merely applied to every
-    # row, so this is leakage-free deployment-style scoring of the whole book.
+    data = st.session_state.get("df")
+    if data is None:
+        st.warning("Please upload or generate a dataset first (Step 1).")
+        return
+
     X_full = _full_engineered_X()
-    if X_full is None:
-        X_full = st.session_state.X_engineered if st.session_state.X_engineered is not None else st.session_state.X
-    if pipeline is None or X_full is None:
-        st.warning("Train a model first (Step 6).")
+    portfolio_index = X_full.index if X_full is not None else None
+
+    lgd_ui.render_lgd_workflow(data, portfolio_index, y=st.session_state.get("y"))
+
+
+def render_ead_development():
+    """EAD modelling tab (Model Development). Revolving products (cards) use an
+    ML-estimated CCF (EAD = drawn + CCF × undrawn); non-revolving term loans use
+    the amortisation schedule. Same uploaded dataset — no re-upload."""
+    st.markdown("""
+    <div class='step-header'>
+        <h3>💳 EAD Model — Exposure at Default</h3>
+        <p>Revolving accounts: ML-estimated Credit Conversion Factor on the defaulted
+        revolving book. Non-revolving term loans: amortising outstanding principal +
+        accrued interest. Same dataset uploaded in Step 1 — no re-upload.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    data = st.session_state.get("df")
+    if data is None:
+        st.warning("Please upload or generate a dataset first (Step 1).")
         return
 
-    raw = st.session_state.df
-    try:
-        data = raw.loc[X_full.index]
-    except Exception:
-        data = raw.iloc[:len(X_full)].copy()
-        data.index = X_full.index
+    X_full = _full_engineered_X()
+    portfolio_index = X_full.index if X_full is not None else None
 
-    num_cols = ecl.numeric_columns(data)
-    all_cols = data.columns.tolist()
-    if not num_cols:
-        st.error("No numeric column is available to use as exposure (EAD).")
+    ead_ui.render_ead_workflow(data, portfolio_index, y=st.session_state.get("y"))
+
+
+
+def _render_attestation_checklist():
+    """
+    Option B: render descriptive (non-machine-testable) extracted rules as a
+    per-stage reviewer sign-off checklist. Source: Agent2.get_attestation_checklist().
+    """
+    _a2 = _get_agent2()
+    if _a2 is None or not hasattr(_a2, "get_attestation_checklist"):
+        return
+    _items = _a2.get_attestation_checklist()
+    if not _items:
         return
 
-    ltv_default  = ecl.detect_ltv_col(data)
-    dpd_default  = ecl.detect_dpd_col(data)
-    orig_pd_def  = ecl.detect_orig_pd_col(data)
-    mat_default  = ecl.detect_maturity_col(data)
+    from collections import defaultdict
+    _labels = {"data": "Data", "feature": "Feature Engineering",
+               "training": "Training", "evaluation": "Evaluation", "other": "Other"}
+    _by_stage = defaultdict(list)
+    for _it in _items:
+        _by_stage[_it.get("stage", "other")].append(_it)
 
-    # ── EAD comes from the outstanding balance resolved in Feature Engineering ──
-    st.markdown("#### Exposure & Loss inputs")
-    ead_series = st.session_state.get("ead_values")
-    ead_col = None
-    if ead_series is not None:
-        ead_series = pd.to_numeric(pd.Series(ead_series), errors="coerce").reindex(X_full.index)
-        _src = st.session_state.get("ead_method", "outstanding balance (set in Feature Engineering)")
-        st.info(f"EAD source (from Feature Engineering): {_src}.  Mean EAD "
-                f"{float(ead_series.mean()):,.0f}.  PD is read from the trained model.")
-    else:
-        ead_col = ecl.detect_exposure_col(data) or num_cols[0]
-        st.warning("No outstanding-balance EAD was set in Feature Engineering (Step 4). "
-                   f"Falling back to auto-detected column `{ead_col}`. Set it in Step 4 to be explicit.")
-    lgd_mode = st.radio("Loss Given Default (LGD) method",
-                        ["Fixed assumption", "By loan type", "From LTV column"],
-                        horizontal=True)
-
-    loan_type_col = None
-    lgd_map = None
-    lgd_fixed = 0.45
-
-    if lgd_mode == "Fixed assumption":
-        lgd_fixed = st.slider("LGD assumption (all loans)", 0.05, 0.95, 0.45, 0.05)
-
-    elif lgd_mode == "By loan type":
-        cat_cols = [c for c in all_cols if data[c].dtype == object or data[c].nunique() <= 20]
-        if not cat_cols:
-            st.warning("No categorical columns detected. Switch to 'Fixed assumption'.")
-        else:
-            loan_type_col = st.selectbox(
-                "Column that identifies loan type", cat_cols,
-                help="Each unique value in this column gets its own LGD slider."
-            )
-            loan_types = sorted(data[loan_type_col].dropna().astype(str).unique())
-            st.markdown(f"**Set LGD for each `{loan_type_col}` value:**")
-            defaults = {lt: round(0.30 + (i * 0.05) % 0.65, 2) for i, lt in enumerate(loan_types)}
-            lgd_map = {}
-            cols_per_row = 3
-            for row_start in range(0, len(loan_types), cols_per_row):
-                row_types = loan_types[row_start: row_start + cols_per_row]
-                slider_cols = st.columns(len(row_types))
-                for col_widget, lt in zip(slider_cols, row_types):
-                    with col_widget:
-                        lgd_map[lt] = st.slider(
-                            f"LGD — {lt}", 0.05, 0.95,
-                            float(defaults[lt]), 0.05,
-                            key=f"lgd_type_{lt}"
-                        )
-
-    else:  # From LTV column
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            ltv_idx = num_cols.index(ltv_default) if ltv_default in num_cols else 0
-            ltv_col = st.selectbox("LTV column", num_cols, index=ltv_idx)
-        with lc2:
-            haircut = st.slider("Collateral haircut", 0.0, 0.6, 0.20, 0.05)
-
-    # ── SICR configuration ──
-    st.markdown("#### IFRS 9 SICR & Staging")
-    with st.expander("Configure SICR thresholds & lifetime PD", expanded=True):
-        s1, s2 = st.columns(2)
-        with s1:
-            no_cols_opt = ["— not available —"]
-            dpd_options  = no_cols_opt + num_cols
-            orig_options = no_cols_opt + num_cols
-            mat_options  = no_cols_opt + num_cols
-
-            dpd_idx  = dpd_options.index(dpd_default)  if dpd_default  in dpd_options  else 0
-            orig_idx = orig_options.index(orig_pd_def) if orig_pd_def  in orig_options else 0
-            mat_idx  = mat_options.index(mat_default)  if mat_default  in mat_options  else 0
-
-            dpd_col_sel  = st.selectbox("Days Past Due column",      dpd_options,  index=dpd_idx,
-                                         help="Used for qualitative SICR backstop and Stage 3 (≥90 DPD).")
-            orig_pd_sel  = st.selectbox("Origination PD column",     orig_options, index=orig_idx,
-                                         help="PD at loan origination. Used to detect relative PD increase.")
-            mat_col_sel  = st.selectbox("Remaining maturity column", mat_options,  index=mat_idx,
-                                         help="Remaining loan term in years. Required for lifetime PD extension (Stage 2 & 3). If not available, lifetime PD equals 12-month PD.")
-
-            dpd_col_val  = None if dpd_col_sel  == no_cols_opt[0] else dpd_col_sel
-            orig_pd_val  = None if orig_pd_sel  == no_cols_opt[0] else orig_pd_sel
-            mat_col_val  = None if mat_col_sel  == no_cols_opt[0] else mat_col_sel
-
-        with s2:
-            pd_rel   = st.slider("SICR: relative PD multiplier",   1.1, 5.0, 1.5, 0.1,
-                                  help="current_PD / orig_PD above this → SICR (IFRS 9 §B5.5.15)")
-            pd_abs   = st.slider("SICR: absolute PD increase (pp)", 0.01, 0.20, 0.03, 0.01,
-                                  help="current_PD − orig_PD above this → SICR")
-            dpd_sicr = st.slider("SICR: DPD backstop threshold",   15, 60, 30, 5,
-                                  help="DPD ≥ this triggers qualitative SICR (IFRS 9 §B5.5.19)")
-
-    # ── Build config ──
-    if lgd_mode == "Fixed assumption":
-        cfg = ecl.ECLConfig(
-            lgd_method="fixed", lgd_fixed=lgd_fixed,
-            pd_relative_threshold=pd_rel, pd_absolute_threshold=pd_abs,
-            dpd_sicr_threshold=int(dpd_sicr),
-            dpd_col=dpd_col_val, orig_pd_col=orig_pd_val, maturity_col=mat_col_val,
-        )
-    elif lgd_mode == "By loan type":
-        cfg = ecl.ECLConfig(
-            lgd_method="fixed", lgd_fixed=0.45,
-            pd_relative_threshold=pd_rel, pd_absolute_threshold=pd_abs,
-            dpd_sicr_threshold=int(dpd_sicr),
-            dpd_col=dpd_col_val, orig_pd_col=orig_pd_val, maturity_col=mat_col_val,
-        )
-    else:
-        cfg = ecl.ECLConfig(
-            lgd_method="ltv", ltv_col=ltv_col, lgd_haircut=haircut,
-            pd_relative_threshold=pd_rel, pd_absolute_threshold=pd_abs,
-            dpd_sicr_threshold=int(dpd_sicr),
-            dpd_col=dpd_col_val, orig_pd_col=orig_pd_val, maturity_col=mat_col_val,
-        )
-
-    if st.button("💰 Calculate ECL", type="primary", use_container_width=True):
-        try:
-            res, summary = ecl.compute(
-                pipeline, X_full, data, ead_col=ead_col, cfg=cfg,
-                loan_type_col=loan_type_col, lgd_map=lgd_map,
-                ead_series=ead_series,
-            )
-            st.session_state.ecl_result = res
-            st.session_state.ecl_summary = summary
-        except Exception as e:
-            st.error(f"ECL calculation failed: {e}")
-            return
-
-    res = st.session_state.get("ecl_result")
-    summary = st.session_state.get("ecl_summary")
-    if res is not None and summary is not None:
-        # ── Portfolio KPIs ──
-        st.markdown("#### Portfolio result")
-        sc = summary.get("stage_counts", {})
-        m = st.columns(6)
-        m[0].metric("Total ECL",    f"{summary['total_ecl']:,.0f}")
-        m[1].metric("Total EAD",    f"{summary['total_ead']:,.0f}")
-        m[2].metric("Coverage",     f"{summary['coverage_pct']}%")
-        m[3].metric("Stage 1",      f"{sc.get('stage_1', 0):,} loans")
-        m[4].metric("Stage 2",      f"{sc.get('stage_2', 0):,} loans")
-        m[5].metric("Stage 3",      f"{sc.get('stage_3', 0):,} loans")
-
-        ecl_s = summary.get("ecl_by_stage", {})
-        e1, e2, e3 = st.columns(3)
-        e1.metric("ECL — Stage 1 (12m PD)",       f"{ecl_s.get('stage_1', 0):,.0f}")
-        e2.metric("ECL — Stage 2 (lifetime PD)",  f"{ecl_s.get('stage_2', 0):,.0f}")
-        e3.metric("ECL — Stage 3 (lifetime PD)",  f"{ecl_s.get('stage_3', 0):,.0f}")
-
-        sicr_pct = summary.get("sicr_pct", 0)
-        st.info(
-            f"**{summary.get('sicr_count', 0):,} loans** ({sicr_pct:.1f}%) flagged with SICR — "
-            f"moved to Stage 2 or Stage 3.  "
-            f"Avg 12m PD: **{summary['avg_pd_12m']:.2%}** → "
-            f"Avg Lifetime PD: **{summary['avg_pd_lifetime']:.2%}**"
-        )
-
-        # ── Charts ──
-        g1, g2 = st.columns(2)
-        with g1:
-            st.plotly_chart(ecl.plot_stage_loan_count(res), use_container_width=True)
-        with g2:
-            st.plotly_chart(ecl.plot_stage_ecl(res), use_container_width=True)
-
-        g3, g4 = st.columns(2)
-        with g3:
-            st.plotly_chart(ecl.plot_ecl_by_pd_band(res), use_container_width=True)
-        with g4:
-            st.plotly_chart(ecl.plot_pd_distribution(res), use_container_width=True)
-
-        st.plotly_chart(ecl.plot_ecl_12m_vs_lifetime(res), use_container_width=True)
-
-        # ── Per-loan table ──
-        st.markdown("#### Per-loan ECL (top 20 by ECL)")
-        display_cols = [c for c in [
-            "ifrs9_stage", "sicr_flag", "dpd", "orig_pd", "pd_12m",
-            "pd_lifetime", "lgd", "ead", "ecl_12m", "ecl",
-        ] if c in res.columns]
-        st.dataframe(
-            res[display_cols].sort_values("ecl", ascending=False).head(20),
-            use_container_width=True,
-        )
-        df_to_csv_download(res.copy(), "ecl_results.csv")
-
-    st.divider()
-    if st.button("\u25c0 Back to Explainability", use_container_width=True):
-        st.session_state.current_step = 8
-        st.rerun()
+    with st.expander(f"📝 Manual Attestation Checklist — {len(_items)} descriptive rule(s)", expanded=False):
+        st.caption("IFRS 9 / SS1-23 rules that can't be auto-checked against data — "
+                   "a reviewer confirms each during validation.")
+        for _sk in ["data", "feature", "training", "evaluation", "other"]:
+            _group = _by_stage.get(_sk, [])
+            if not _group:
+                continue
+            st.markdown(f"**{_labels.get(_sk, _sk.title())}** ({len(_group)})")
+            for _it in _group:
+                _rid = _it.get("rule_id", "?")
+                _help = " · ".join(
+                    p for p in (_it.get("source", ""), _it.get("principle", ""),
+                                _it.get("suggestion", "")) if p
+                )
+                st.checkbox(
+                    f"[{_rid}] {_it.get('statement', '')}",
+                    key=f"attest_{_sk}_{_rid}",
+                    help=_help or None,
+                )
 
 
 # ─────────────────────────────────────────────
@@ -3768,6 +4410,8 @@ def _render_compliance_tab():
         <p>Consolidated SS1/23, IFRS 9, IFRS 7 compliance flags from all pipeline stages</p>
     </div>
     """, unsafe_allow_html=True)
+
+    _render_attestation_checklist()
 
     _stage_map = {
         "data":       "Data Profiling",
@@ -3931,47 +4575,61 @@ def main():
 
     if step == 1:
         render_upload()
-    elif step == 2:
-        if st.session_state.df is None:
-            st.warning("Please upload or generate a dataset first.")
-            st.session_state.current_step = 1
-            st.rerun()
-        render_profiling()
-    elif step == 3:
-        if st.session_state.df is None or st.session_state.target_col is None:
-            st.session_state.current_step = 2
-            st.rerun()
-        render_preprocessing()
-    elif step == 4:
-        if st.session_state.X is None:
-            st.session_state.current_step = 3
-            st.rerun()
-        render_feature_engineering()
-    elif step == 5:
-        if st.session_state.X is None:
-            st.session_state.current_step = 4
-            st.rerun()
-        render_model_selection()
-    elif step == 6:
-        if st.session_state.X is None:
-            st.session_state.current_step = 5
-            st.rerun()
-        render_training()
-    elif step == 7:
-        if st.session_state.trained_pipeline is None:
-            st.session_state.current_step = 6
-            st.rerun()
-        render_evaluation()
-    elif step == 8:
-        if st.session_state.trained_pipeline is None:
-            st.session_state.current_step = 7
-            st.rerun()
-        render_explainability()
-    elif step == 9:
-        if st.session_state.trained_pipeline is None:
-            st.session_state.current_step = 6
-            st.rerun()
-        render_ecl()
+    elif step in (2, 3, 4, 5, 6, 7, 8):
+        tab_pd, tab_lgd, tab_ead = st.tabs(["🎯 PD Model", "💧 LGD Model", "💳 EAD Model"])
+        with tab_pd:
+            if step == 2:
+                if st.session_state.df is None:
+                    st.warning("Please upload or generate a dataset first.")
+                    st.session_state.current_step = 1
+                    st.rerun()
+                render_profiling()
+            elif step == 3:
+                if st.session_state.df is None or st.session_state.target_col is None:
+                    st.session_state.current_step = 2
+                    st.rerun()
+                render_preprocessing()
+            elif step == 4:
+                if st.session_state.X is None:
+                    st.session_state.current_step = 3
+                    st.rerun()
+                render_feature_engineering()
+            elif step == 5:
+                if st.session_state.X is None:
+                    st.session_state.current_step = 4
+                    st.rerun()
+                render_model_selection()
+            elif step == 6:
+                if st.session_state.X is None:
+                    st.session_state.current_step = 5
+                    st.rerun()
+                render_training()
+            elif step == 7:
+                if st.session_state.trained_pipeline is None:
+                    st.session_state.current_step = 6
+                    st.rerun()
+                render_evaluation()
+            elif step == 8:
+                if st.session_state.trained_pipeline is None:
+                    st.session_state.current_step = 7
+                    st.rerun()
+                render_explainability()
+        with tab_lgd:
+            # Gated: finish the PD pipeline (train a PD model) before LGD.
+            if st.session_state.get("trained_pipeline") is None:
+                st.info("🔒 **Locked.** Complete the **🎯 PD Model** pipeline first "
+                        "(train a PD model in Step 6) to unlock the LGD model.")
+            else:
+                render_lgd_development()
+        with tab_ead:
+            # Gated: finish the LGD pipeline (train an LGD model) before EAD.
+            if st.session_state.get("trained_pipeline") is None:
+                st.info("🔒 **Locked.** Complete the **🎯 PD Model** pipeline first.")
+            elif st.session_state.get("lgd_model_bundle") is None:
+                st.info("🔒 **Locked.** Complete the **💧 LGD Model** pipeline first "
+                        "(train an LGD model) to unlock the EAD model.")
+            else:
+                render_ead_development()
 
 
 if __name__ == "__main__":

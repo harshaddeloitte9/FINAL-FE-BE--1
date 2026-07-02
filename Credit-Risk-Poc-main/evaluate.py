@@ -319,3 +319,190 @@ def plot_lift_chart(y_true, y_proba) -> go.Figure:
         showlegend=True,
     )
     return fig
+
+
+def plot_actual_vs_predicted(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    n_bins: int = 10,
+) -> go.Figure:
+    """
+    Plots actual default rate vs average predicted PD, grouped into
+    bins by predicted score (calibration-style chart, not time-based).
+    Shows whether the model's predicted probabilities match real-world
+    outcomes — e.g. customers predicted at 70% PD should actually
+    default ~70% of the time.
+    """
+    df = pd.DataFrame({"actual": y_true, "predicted": y_proba})
+    df["bin"] = pd.qcut(df["predicted"], q=n_bins, duplicates="drop")
+
+    grouped = df.groupby("bin", observed=True).agg(
+        actual_rate=("actual", "mean"),
+        predicted_rate=("predicted", "mean"),
+        n=("actual", "count"),
+    ).reset_index()
+    grouped["bin_label"] = grouped["bin"].astype(str)
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=grouped["bin_label"], y=grouped["actual_rate"],
+        name="Actual Default Rate",
+        marker_color="#ef4444",
+        opacity=0.85,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=grouped["bin_label"], y=grouped["predicted_rate"],
+        mode="lines+markers", name="Avg Predicted PD",
+        line=dict(color="#6366f1", width=3),
+        marker=dict(size=8),
+    ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e2e8f0"),
+        title="Actual vs Predicted Default Rate by Risk Bin",
+        xaxis_title="Predicted PD Bin (low → high risk)",
+        yaxis_title="Default Rate",
+        yaxis=dict(tickformat=".0%", gridcolor="#334155"),
+        legend=dict(orientation="h", y=1.1),
+    )
+
+    return fig
+
+
+# ─────────────────────────────────────────────
+# Temporal Stability (Actual vs Predicted over time)
+# ─────────────────────────────────────────────
+
+def _temporal_grouped(dates, y_true, y_proba, freq: str = "ME") -> pd.DataFrame:
+    """Group actual default rate and average predicted PD by calendar period."""
+    dates = pd.to_datetime(pd.Series(dates).reset_index(drop=True), errors="coerce")
+    y_true_arr = np.asarray(y_true)
+    y_proba_arr = _to_scores(np.asarray(y_proba))
+
+    df = pd.DataFrame({
+        "date": dates,
+        "actual": y_true_arr,
+        "predicted": y_proba_arr,
+    }).dropna(subset=["date"])
+
+    if df.empty:
+        return df
+
+    pandas_freq = {"Monthly": "M", "Quarterly": "Q", "Yearly": "Y"}.get(freq, freq)
+    pandas_freq = pandas_freq.replace("ME", "M").replace("QE", "Q").replace("YE", "Y")
+    df["period"] = df["date"].dt.to_period(pandas_freq)
+    grouped = df.groupby("period", observed=True).agg(
+        actual_rate=("actual", "mean"),
+        predicted_rate=("predicted", "mean"),
+        n=("actual", "count"),
+    ).reset_index()
+    grouped["period_label"] = grouped["period"].astype(str)
+    grouped["gap"] = grouped["actual_rate"] - grouped["predicted_rate"]
+    grouped["abs_gap"] = grouped["gap"].abs()
+    return grouped.sort_values("period").reset_index(drop=True)
+
+
+def plot_actual_vs_predicted_over_time(
+    dates,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    freq: str = "ME",
+) -> go.Figure:
+    """
+    Plots actual default rate vs average predicted PD over calendar time
+    (monthly/quarterly/yearly), to check whether predicted PDs track real-world
+    outcomes consistently across the observation window (temporal/regime stability),
+    as opposed to plot_actual_vs_predicted() which bins by predicted score.
+    """
+    grouped = _temporal_grouped(dates, y_true, y_proba, freq=freq)
+
+    fig = go.Figure()
+    if grouped.empty:
+        fig.update_layout(**_plotly_layout("Actual vs Predicted Default Rate Over Time"))
+        return fig
+
+    fig.add_trace(go.Bar(
+        x=grouped["period_label"], y=grouped["actual_rate"],
+        name="Actual Default Rate",
+        marker_color=COLORS["danger"],
+        opacity=0.85,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=grouped["period_label"], y=grouped["predicted_rate"],
+        mode="lines+markers", name="Avg Predicted PD",
+        line=dict(color=COLORS["primary"], width=3),
+        marker=dict(size=8),
+    ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"]),
+        title="Actual vs Predicted Default Rate Over Time",
+        xaxis_title="Period",
+        yaxis_title="Default Rate",
+        yaxis=dict(tickformat=".0%", gridcolor="#334155"),
+        legend=dict(orientation="h", y=1.1),
+    )
+    return fig
+
+
+def compute_temporal_stability_summary(
+    dates,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    freq: str = "ME",
+    gap_threshold: float = 0.05,
+) -> Dict[str, Any]:
+    """
+    Summarize how closely predicted PD tracks actual default rate across time
+    periods. A period is "flagged" if |actual - predicted| exceeds gap_threshold
+    (default 5pp). Useful for spotting stress periods / regime shifts the model
+    under- or over-estimates.
+    """
+    grouped = _temporal_grouped(dates, y_true, y_proba, freq=freq)
+
+    if grouped.empty:
+        return {
+            "n_periods_total": 0,
+            "n_periods_flagged": 0,
+            "mean_absolute_gap": 0.0,
+            "max_underestimation_period": None,
+            "max_underestimation_gap": 0.0,
+            "max_overestimation_period": None,
+            "max_overestimation_gap": 0.0,
+            "by_period": [],
+        }
+
+    flagged = grouped[grouped["abs_gap"] > gap_threshold]
+
+    # Underestimation: actual > predicted (gap > 0) — model understates risk.
+    under = grouped[grouped["gap"] > 0]
+    over = grouped[grouped["gap"] < 0]
+
+    max_under_row = under.loc[under["gap"].idxmax()] if not under.empty else None
+    max_over_row = over.loc[over["gap"].idxmin()] if not over.empty else None
+
+    return {
+        "n_periods_total": int(len(grouped)),
+        "n_periods_flagged": int(len(flagged)),
+        "mean_absolute_gap": float(grouped["abs_gap"].mean()),
+        "max_underestimation_period": str(max_under_row["period_label"]) if max_under_row is not None else None,
+        "max_underestimation_gap": float(max_under_row["gap"]) if max_under_row is not None else 0.0,
+        "max_overestimation_period": str(max_over_row["period_label"]) if max_over_row is not None else None,
+        "max_overestimation_gap": float(abs(max_over_row["gap"])) if max_over_row is not None else 0.0,
+        "by_period": [
+            {
+                "period": row["period_label"],
+                "n": int(row["n"]),
+                "actual_rate": round(float(row["actual_rate"]), 4),
+                "predicted_rate": round(float(row["predicted_rate"]), 4),
+                "gap": round(float(row["gap"]), 4),
+                "flagged": bool(row["abs_gap"] > gap_threshold),
+            }
+            for _, row in grouped.iterrows()
+        ],
+    }

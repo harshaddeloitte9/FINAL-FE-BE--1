@@ -322,6 +322,26 @@ def get_feature_names_from_fitted_preprocessor(preprocessor: ColumnTransformer) 
 # Main entry point
 # ─────────────────────────────────────────────
 
+_ECL_ONLY_SIGNATURES = [
+    "dpd", "dayspastdue",               # days-past-due: definitional leakage (dpd≥90 ≡ default)
+    "origpd", "originationpd", "pdorig", "pdatorigination",
+    "pdorigination", "initialpd", "basepd", "originalpd", "pdinitial",
+]
+
+
+def _find_ecl_only_cols(columns):
+    """Return columns that are ECL/SICR inputs only — never PD model features."""
+    import re
+    def _norm(s):
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
+    found = []
+    for c in columns:
+        nc = _norm(c)
+        if any(sig in nc for sig in _ECL_ONLY_SIGNATURES):
+            found.append(c)
+    return found
+
+
 def finalize_xy(
     df: pd.DataFrame,
     col_types: Dict[str, List[str]],
@@ -344,6 +364,10 @@ def finalize_xy(
     id_cols = col_types.get("id", [])
     df = df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
 
+    # Drop ECL-only columns (dpd, orig_pd) — they must never enter the feature matrix
+    _ecl_cols = _find_ecl_only_cols([c for c in df.columns if c != target_col])
+    df = df.drop(columns=_ecl_cols, errors="ignore")
+
     before = len(df)
     df = df.drop_duplicates()
     after = len(df)
@@ -351,7 +375,7 @@ def finalize_xy(
     y = df[target_col].copy()
     X = df.drop(columns=[target_col])
 
-    return X, y, {"duplicates_removed": before - after}
+    return X, y, {"duplicates_removed": before - after, "ecl_only_cols_dropped": _ecl_cols}
 
 
 def prepare_data(
@@ -369,6 +393,10 @@ def prepare_data(
     # Drop ID columns
     id_cols = col_types.get("id", [])
     df = df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+
+    # Drop ECL-only columns (dpd, orig_pd) — they must never enter the feature matrix
+    _ecl_cols = _find_ecl_only_cols([c for c in df.columns if c != target_col])
+    df = df.drop(columns=_ecl_cols, errors="ignore")
 
     before = len(df)
     df = df.drop_duplicates()

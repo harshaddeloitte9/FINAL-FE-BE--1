@@ -1,8 +1,7 @@
 /**
  * Thin HTTP client for the FastAPI backend (see `backend/api/`).
  *
- * The Aegis UI currently renders against `mock-data.ts`; as endpoints come
- * online, swap mock reads for `api<T>('/api/...')` calls.
+ * The Aegis UI now renders from FastAPI endpoints only.
  */
 const BASE_URL = import.meta.env.VITE_API_URL ?? "";
 // Default to local backend during development when VITE_API_URL is not set

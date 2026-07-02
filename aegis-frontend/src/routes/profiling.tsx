@@ -24,7 +24,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ArrowLeft, ArrowRight, Download } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Download, FileText, Info, Table2, Target } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 export const Route = createFileRoute("/profiling")({
@@ -124,6 +124,9 @@ function Profiling() {
   const missingCells = active.missing_cells ?? null;
   const missingPct = active.missing_percentage ?? null;
   const duplicateRows = active.duplicate_rows ?? null;
+  const duplicateRate = active.duplicate_rate ?? null;
+  const outlierAnalysis = active.outlier_analysis ?? {};
+  const outlierEntries = Object.entries(outlierAnalysis as Record<string, any>);
   const missingByColumn = active.missing_by_column
     ? Object.entries(active.missing_by_column).map(([col, value]) => ({
         col,
@@ -133,12 +136,16 @@ function Profiling() {
     : [];
   const sortedMissing = [...missingByColumn].sort((a, b) => b.count - a.count).slice(0, 10);
   const classDistribution = active.class_distribution ?? null;
+  const targetSummary = active.target_summary ?? null;
   const correlationColumns: string[] = active.correlation_matrix?.columns ?? [];
   const correlationValues: number[][] = active.correlation_matrix?.values ?? [];
   const dataDictionary = active.data_dictionary ?? [];
   const columnTypeTable = active.column_type_table ?? [];
   const summaryStats = active.summary_stats ?? [];
   const distributionHistograms = active.distribution_histograms ?? [];
+  const leakageRiskCols = active.leakage_risk_cols ?? [];
+  const dateIntegrity = active.date_integrity ?? {};
+  const dateIntegrityEntries = Object.entries(dateIntegrity);
   const agent2Flags = active.agent2_flags_data ?? [];
   const agent2Error = active.agent2_error ?? null;
 
@@ -188,7 +195,7 @@ function Profiling() {
             value={missingCells !== null ? missingCells.toLocaleString() : missingPct !== null ? `${missingPct}%` : "—"}
             sub={missingPct !== null ? `${missingPct}% of total` : undefined}
           />
-          <Stat label="Duplicates" value={duplicateRows !== null ? String(duplicateRows) : "—"} />
+          <Stat label="Duplicates" value={duplicateRows !== null ? String(duplicateRows) : "—"} sub={duplicateRate !== null ? `${duplicateRate}% of rows` : undefined} />
         </div>
 
         <div className="rounded-xl border border-border bg-card p-4">
@@ -233,19 +240,70 @@ function Profiling() {
             <div className="mt-4 rounded-xl border border-destructive bg-destructive/10 p-3 text-sm text-destructive">{targetError}</div>
           )}
           {agent2Error && (
-            <div className="mt-4 rounded-xl border border-destructive bg-destructive/10 p-3 text-sm text-destructive">Data compliance check failed to run.</div>
+            <div className="mt-4 rounded-xl border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="font-medium">Data compliance check could not be completed.</div>
+              <div className="mt-1 text-xs">{agent2Error}</div>
+            </div>
           )}
           {agent2Flags.length > 0 && (
             <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-              ⚠️ {agent2Flags.length} data compliance flag{agent2Flags.length === 1 ? "" : "s"} detected for this dataset.
+              <div className="flex items-center gap-2 font-medium">
+                <AlertTriangle className="h-4 w-4" />
+                <span>{agent2Flags.length} data compliance flag{agent2Flags.length === 1 ? "" : "s"} detected for this dataset.</span>
+              </div>
             </div>
           )}
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="rounded-lg border border-border bg-background p-3">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                <Target className="h-4 w-4" />
+                <span>Target summary</span>
+              </div>
+              <div className="mt-2 text-sm text-foreground">
+                {targetSummary?.task_label ?? "Target diagnostics will appear after selection."}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Selected target: {selectedTarget ?? "—"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-border bg-background p-3">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                <Info className="h-4 w-4" />
+                <span>Quality checks</span>
+              </div>
+              <div className="mt-2 text-sm text-foreground">
+                {targetSummary?.is_imbalanced ? "Target class imbalance detected." : "Target distribution appears balanced for the current profile."}
+              </div>
+              {targetSummary?.imbalance_ratio ? (
+                <div className="mt-2 text-xs text-muted-foreground">Imbalance ratio: {targetSummary.imbalance_ratio}:1</div>
+              ) : null}
+            </div>
+            <div className="rounded-lg border border-border bg-background p-3">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                <AlertTriangle className="h-4 w-4" />
+                <span>Leakage & dates</span>
+              </div>
+              <div className="mt-2 text-sm text-foreground">
+                {leakageRiskCols.length > 0
+                  ? `${leakageRiskCols.length} potential leakage column${leakageRiskCols.length === 1 ? "" : "s"}`
+                  : "No strong leakage signals detected."}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                {dateIntegrityEntries.length > 0
+                  ? `${dateIntegrityEntries.length} date field${dateIntegrityEntries.length === 1 ? "" : "s"} checked for future/ancient values`
+                  : "No date fields detected."}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <h2 className="text-base font-semibold">Class distribution</h2>
+              <div className="flex items-center gap-2">
+                <BarChart3 className="h-4 w-4 text-muted-foreground" />
+                <h2 className="text-base font-semibold">Class distribution</h2>
+              </div>
               <p className="text-xs text-muted-foreground">Counts for the selected target value.</p>
             </div>
             <Button variant="outline" size="sm" onClick={downloadDataDictionary} className="gap-2">
@@ -283,12 +341,78 @@ function Profiling() {
         </div>
       </section>
 
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-base font-semibold">Duplicate and outlier signals</h2>
+          </div>
+          <div className="mt-4 space-y-3 text-sm text-muted-foreground">
+            <div className="rounded-lg border border-border bg-background p-3">
+              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Duplicate rate</div>
+              <div className="mt-1 text-lg font-semibold text-foreground">{duplicateRate !== null ? `${duplicateRate}%` : "—"}</div>
+              <div className="mt-1 text-xs">{duplicateRows !== null ? `${duplicateRows.toLocaleString()} duplicate row${duplicateRows === 1 ? "" : "s"}` : "No duplicate count available"}</div>
+            </div>
+            <div className="rounded-lg border border-border bg-background p-3">
+              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Outlier checks</div>
+              <div className="mt-1 text-sm text-foreground">
+                {outlierEntries.length > 0
+                  ? outlierEntries.slice(0, 4).map(([column, info]) => (
+                      <div key={column} className="mt-2 flex items-center justify-between gap-2">
+                        <span>{column}</span>
+                        <span className="font-medium tabular-nums">{(info as any).outlier_fraction ? `${((info as any).outlier_fraction * 100).toFixed(1)}%` : "0.0%"}</span>
+                      </div>
+                    ))
+                  : "No numeric outlier analysis available."}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-center gap-2">
+            <Info className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-base font-semibold">Correlation snapshot</h2>
+          </div>
+          <div className="mt-4 text-sm text-muted-foreground">
+            {correlationColumns.length > 0 ? (
+              <div className="rounded-lg border border-border bg-background p-3">
+                <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Numeric correlation matrix</div>
+                <div className="mt-2 text-sm text-foreground">{correlationColumns.slice(0, 6).join(", ")}{correlationColumns.length > 6 ? " …" : ""}</div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border bg-background p-3">No numeric correlation matrix available for this dataset.</div>
+            )}
+          </div>
+        </div>
+      </section>
+
       <Tabs defaultValue="summary">
         <TabsList>
-          <TabsTrigger value="summary">📊 Summary Stats</TabsTrigger>
-          <TabsTrigger value="missing">❓ Missing Values</TabsTrigger>
-          <TabsTrigger value="types">🏷️ Column Types</TabsTrigger>
-          <TabsTrigger value="distributions">📈 Distributions</TabsTrigger>
+          <TabsTrigger value="summary">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4" />
+              <span>Summary Stats</span>
+            </div>
+          </TabsTrigger>
+          <TabsTrigger value="missing">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4" />
+              <span>Missing Values</span>
+            </div>
+          </TabsTrigger>
+          <TabsTrigger value="types">
+            <div className="flex items-center gap-2">
+              <Table2 className="h-4 w-4" />
+              <span>Column Types</span>
+            </div>
+          </TabsTrigger>
+          <TabsTrigger value="distributions">
+            <div className="flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              <span>Distributions</span>
+            </div>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="summary">

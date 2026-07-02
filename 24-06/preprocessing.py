@@ -8,6 +8,7 @@ FIX v2:
   - Preprocessor is rebuilt on X_engineered so column sets always match
 """
 
+import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Any
@@ -20,6 +21,24 @@ from sklearn.preprocessing import (
 )
 from sklearn.impute import SimpleImputer
 from sklearn.base import BaseEstimator, TransformerMixin
+
+
+_ECL_ONLY_SIGNATURES = [
+    "dpd", "dayspastdue", "origpd", "originationpd", "pdorig", "pdatorigination",
+    "pdorigination", "initialpd", "basepd", "originalpd", "pdinitial",
+]
+
+
+def _find_ecl_only_cols(columns):
+    """Return columns that are ECL/SICR inputs only — never PD model features."""
+    def _norm(s):
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
+    found = []
+    for c in columns:
+        nc = _norm(c)
+        if any(sig in nc for sig in _ECL_ONLY_SIGNATURES):
+            found.append(c)
+    return found
 
 
 # ─────────────────────────────────────────────
@@ -324,13 +343,17 @@ def finalize_xy(
     target_col: str,
 ) -> Tuple[pd.DataFrame, pd.Series, Dict[str, Any]]:
     """
-    Finalize the raw dataset by dropping ID columns and duplicate rows only.
-    This avoids learning any statistics before the train/validation/test split.
+    Finalize the raw dataset by dropping ID columns, ECL-only leakage columns,
+    and duplicate rows only. This avoids learning any statistics before the
+    train/validation/test split.
     """
     df = df.copy()
 
     id_cols = col_types.get("id", [])
     df = df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+
+    _ecl_cols = _find_ecl_only_cols([c for c in df.columns if c != target_col])
+    df = df.drop(columns=_ecl_cols, errors="ignore")
 
     before = len(df)
     df = df.drop_duplicates()
@@ -339,7 +362,10 @@ def finalize_xy(
     y = df[target_col].copy()
     X = df.drop(columns=[target_col])
 
-    return X, y, {"duplicates_removed": before - after}
+    return X, y, {
+        "duplicates_removed": before - after,
+        "ecl_only_cols_dropped": _ecl_cols,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -358,9 +384,11 @@ def prepare_data(
     """
     df = df.copy()
 
-    # Drop ID columns
     id_cols = col_types.get("id", [])
     df = df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+
+    _ecl_cols = _find_ecl_only_cols([c for c in df.columns if c != target_col])
+    df = df.drop(columns=_ecl_cols, errors="ignore")
 
     before = len(df)
     df = df.drop_duplicates()
@@ -370,12 +398,10 @@ def prepare_data(
     X = df.drop(columns=[target_col])
 
     report = build_preprocessing_report(X.assign(**{target_col: y}), col_types, target_col)
-
-    # Build an UNFITTED preprocessor on X (will be rebuilt later on X_engineered)
     preprocessor = build_preprocessing_pipeline(X, col_types, target_col, report)
 
     report["duplicates_removed"] = before - after
-    # Placeholder — real names come after fitting on X_engineered
+    report["ecl_only_cols_dropped"] = _ecl_cols
     feature_names = list(X.columns)
     return X, y, preprocessor, report, feature_names
 

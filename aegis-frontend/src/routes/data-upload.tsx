@@ -1,6 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { PageHeader } from "@/components/app-shell";
-import { UploadCloud, FileSpreadsheet, Sparkles, CheckCircle2, ArrowRight } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Sparkles, Table2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -12,196 +11,296 @@ export const Route = createFileRoute("/data-upload")({
 });
 
 function DataUpload() {
-  const [progress, setProgress] = useState(0);
-  const [file, setFile] = useState<{ name: string; size: string; rows?: number } | null>(null);
+  const [dataSourceType, setDataSourceType] = useState("upload");
+  const [syntheticSamples, setSyntheticSamples] = useState(2000);
+  const [uploadSummary, setUploadSummary] = useState<{
+    kind: "file" | "synthetic";
+    name: string;
+    rows: number;
+    cols: number;
+  } | null>(null);
   const { setUploadResult, profile } = useDataset();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
+  const dataSourceOptions = [
+    { value: "upload", label: "Upload File (CSV / XLSX)", icon: Upload },
+    { value: "database", label: "Database Connection", icon: Database },
+    { value: "api", label: "API Endpoint", icon: Globe2 },
+    { value: "cloud", label: "Cloud Storage (S3 / Azure Blob)", icon: Cloud },
+    { value: "sftp", label: "SFTP / File Server", icon: HardDrive },
+  ];
+
+  const applyUploadResult = (uploadedFile: File | null, response: any) => {
+    const datasetName = response?.dataset_name ?? uploadedFile?.name ?? "Synthetic Credit Dataset.csv";
+    const resolvedFile = uploadedFile
+      ?? (typeof response?.csv_text === "string"
+        ? new File([response.csv_text], datasetName.endsWith(".csv") ? datasetName : `${datasetName}.csv`, { type: "text/csv" })
+        : null);
+
+    setUploadResult(resolvedFile, response as any);
+
+    const rows = Array.isArray(response?.shape) ? Number(response.shape[0] ?? 0) : 0;
+    const cols = Array.isArray(response?.shape) ? Number(response.shape[1] ?? 0) : 0;
+    setUploadSummary({
+      kind: response?.source_type === "synthetic" ? "synthetic" : "file",
+      name: datasetName,
+      rows,
+      cols,
+    });
+  };
 
   const uploadFile = async (f: File | null) => {
     if (!f) return;
-    setFile({ name: f.name, size: `${(f.size / (1024 * 1024)).toFixed(1)} MB` });
-    setProgress(0);
-    const t = setInterval(() => setProgress((p) => Math.min(90, p + 6)), 120);
     try {
       const form = new FormData();
       form.append("file", f);
       console.log("DataUpload: sending POST to /data/upload", { filename: f.name, size: f.size });
       const profile = await formUpload("/data/upload", form);
       console.log("DataUpload: received profile", profile);
-      setProgress(100);
-      setUploadResult(f, profile as any);
-      if (profile && (profile as any).shape) {
-        const rows = (profile as any).shape?.[0];
-        setFile((prev) => (prev ? { ...prev, rows } : prev));
-      }
+      applyUploadResult(f, profile);
     } catch (err) {
-      setProgress(0);
       console.error("DataUpload: upload failed", err);
-    } finally {
-      clearInterval(t);
     }
   };
 
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Data Upload"
-        description="Bring in loan tape, exposure, or scoring datasets. CSV and XLSX up to 5 GB."
-      />
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div
-          className="lg:col-span-2 group relative cursor-pointer rounded-2xl border-2 border-dashed border-border bg-card p-10 text-center transition-colors hover:border-primary/60 hover:bg-primary/5"
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            const f = e.dataTransfer.files[0];
-            if (f) uploadFile(f);
-          }}
-        >
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".csv,.xlsx"
-            className="hidden"
-            onChange={(e) => uploadFile(e.target.files?.[0] ?? null)}
-          />
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl gradient-primary shadow-elegant transition-transform group-hover:scale-105">
-            <UploadCloud className="h-8 w-8 text-primary-foreground" />
+    <div className="space-y-6">
+      <div className="rounded-xl border-l-4 border-primary bg-card px-4 py-3 shadow-elegant">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+            <Folder className="h-5 w-5 text-muted-foreground" />
           </div>
-          <h3 className="mt-5 text-lg font-semibold">Drop CSV or XLSX here</h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Or click to browse. We'll auto-detect schema and run profiling.
-          </p>
-          <div className="mt-4 flex justify-center gap-2 text-[11px] text-muted-foreground">
-            <span className="rounded-full border border-border bg-background px-2 py-0.5">CSV</span>
-            <span className="rounded-full border border-border bg-background px-2 py-0.5">XLSX</span>
-            <span className="rounded-full border border-border bg-background px-2 py-0.5">Parquet (beta)</span>
+          <div>
+            <h3 className="text-lg font-semibold tracking-tight">Step 1 — Data Upload</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Upload a CSV or Excel file, or use the built-in synthetic credit dataset
+            </p>
           </div>
-        </div>
-
-        <div className="rounded-2xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-soft">
-              <Sparkles className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold">Synthetic dataset</h3>
-              <p className="text-xs text-muted-foreground">No data? Generate a realistic loan tape.</p>
-            </div>
-          </div>
-          <ul className="mt-4 space-y-2 text-xs text-muted-foreground">
-            <li>· 200k synthetic obligors, balanced default flag</li>
-            <li>· IFRS 9 staging, macro overlay variables</li>
-            <li>· Geographic + sector segmentation</li>
-          </ul>
-          <button
-            onClick={async () => {
-              setProgress(0);
-              try {
-                const t = setInterval(() => setProgress((p) => Math.min(90, p + 6)), 120);
-                const form = new FormData();
-                form.append("synthetic_samples", "200000");
-                console.log("DataUpload: requesting synthetic dataset generation POST /data/upload", { synthetic_samples: 200000 });
-                const profile = await formUpload("/data/upload", form);
-                console.log("DataUpload: synthetic profile received", profile);
-                clearInterval(t);
-                setProgress(100);
-                setFile({ name: "synthetic_portfolio.csv", size: "~200 MB", rows: profile?.shape?.[0] ?? undefined });
-                setUploadResult(null, profile as any);
-              } catch (err) {
-                setProgress(0);
-                console.error("DataUpload: synthetic generation failed", err);
-              }
-            }}
-            className="mt-5 w-full rounded-lg border border-primary/30 bg-primary-soft px-3 py-2 text-sm font-medium text-foreground hover:bg-primary/20"
-          >
-            Generate dataset
-          </button>
         </div>
       </div>
 
-      {file && (
-        <div className="rounded-2xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-4">
-              <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-border bg-background">
-                <FileSpreadsheet className="h-6 w-6 text-primary" />
-              </div>
-              <div>
-                <div className="font-medium">{file.name}</div>
-                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                  <span>{file.size}</span>
-                  <span>{file.rows ? file.rows.toLocaleString() + " rows · 38 columns" : "— rows · 38 columns"}</span>
-                  <span>SHA-256 a4f…b921</span>
+      <div>
+        <h4 className="text-sm font-semibold text-foreground">Data Source</h4>
+        <div className="mt-4 space-y-3">
+          {dataSourceOptions.map((option) => {
+            const Icon = option.icon;
+            return (
+              <label
+                key={option.value}
+                className="flex cursor-pointer items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm shadow-elegant"
+              >
+                <input
+                  type="radio"
+                  name="data-source-type"
+                  value={option.value}
+                  checked={dataSourceType === option.value}
+                  onChange={() => setDataSourceType(option.value)}
+                  className="h-4 w-4 accent-primary"
+                />
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-background/80">
+                  <Icon className="h-5 w-5 text-muted-foreground" />
                 </div>
+                <span className="font-medium text-foreground">{option.label}</span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      {dataSourceType === "upload" ? (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <input ref={inputRef} type="file" accept=".csv,.xlsx" className="hidden" onChange={(e) => uploadFile(e.target.files?.[0] ?? null)} />
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+                <FileSpreadsheet className="h-5 w-5 text-muted-foreground" />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-foreground">Upload your dataset (CSV / XLSX)</label>
+                <p className="text-xs text-muted-foreground">The system adapts automatically to any structured dataset schema.</p>
               </div>
             </div>
-            {progress >= 100 && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-primary-soft px-3 py-1 text-xs font-medium text-foreground">
-                <CheckCircle2 className="h-4 w-4 text-primary" /> Ready
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="inline-flex items-center justify-center rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:border-primary/40 hover:bg-primary-soft"
+              >
+                Browse files
+              </button>
+              <span className="inline-flex items-center rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                CSV / XLSX
               </span>
-            )}
+            </div>
           </div>
-          <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full gradient-primary transition-all"
-              style={{ width: `${progress}%` }}
-            />
+
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+                <Sparkles className="h-5 w-5 text-muted-foreground" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold">Synthetic dataset</h3>
+                <p className="text-xs text-muted-foreground">No data? Generate a realistic loan tape.</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const form = new FormData();
+                  form.append("synthetic_samples", String(syntheticSamples));
+                  console.log("DataUpload: requesting synthetic dataset generation POST /data/upload", { synthetic_samples: syntheticSamples });
+                  const result = await formUpload("/data/upload", form);
+                  console.log("DataUpload: synthetic profile received", result);
+                  applyUploadResult(null, result);
+                } catch (err) {
+                  console.error("DataUpload: synthetic generation failed", err);
+                }
+              }}
+              className="mt-5 w-full rounded-lg border border-primary/30 bg-primary-soft px-3 py-2 text-sm font-medium text-foreground hover:bg-primary/20"
+            >
+              Use Synthetic Dataset
+            </button>
+            <label className="mt-4 block text-xs text-muted-foreground">
+              Synthetic samples
+              <input
+                type="number"
+                min={500}
+                max={50000}
+                step={500}
+                value={syntheticSamples}
+                onChange={(e) => setSyntheticSamples(Number(e.target.value) || 2000)}
+                className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
+              />
+            </label>
           </div>
-          <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
-            <span>{progress < 100 ? "Uploading and validating schema…" : "Schema validated"}</span>
-            <span>{progress}%</span>
+        </div>
+      ) : dataSourceType === "database" ? (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+              <Database className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">Database connection setup</div>
+              <div className="mt-2 text-sm text-muted-foreground">Database connectivity is not yet implemented in this POC. This UI demonstrates the intended workflow — connection logic will be added once the target database and credentials are confirmed.</div>
+            </div>
           </div>
+          <button type="button" disabled className="mt-4 w-full rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-muted-foreground">
+            Connect &amp; Pull Data
+          </button>
+        </div>
+      ) : dataSourceType === "api" ? (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+              <Globe2 className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">API connection setup</div>
+              <div className="mt-2 text-sm text-muted-foreground">API connectivity is not yet implemented in this POC. This UI demonstrates the intended workflow.</div>
+            </div>
+          </div>
+          <button type="button" disabled className="mt-4 w-full rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-muted-foreground">
+            Fetch Data
+          </button>
+        </div>
+      ) : dataSourceType === "cloud" ? (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+              <Cloud className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">Cloud storage connection setup</div>
+              <div className="mt-2 text-sm text-muted-foreground">Cloud storage connectivity is not yet implemented in this POC. This UI demonstrates the intended workflow.</div>
+            </div>
+          </div>
+          <button type="button" disabled className="mt-4 w-full rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-muted-foreground">
+            Load from Cloud
+          </button>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+              <HardDrive className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">SFTP / File Server connection setup</div>
+              <div className="mt-2 text-sm text-muted-foreground">SFTP connectivity is not yet implemented in this POC. This UI demonstrates the intended workflow — useful for scheduled exports landing in a fixed location.</div>
+            </div>
+          </div>
+          <button type="button" disabled className="mt-4 w-full rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-muted-foreground">
+            Pull from Server
+          </button>
         </div>
       )}
 
-      {profile && progress >= 100 && (
-        <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-elegant">
-            <h3 className="text-sm font-semibold">Dataset summary</h3>
-            <div className="mt-4 space-y-3 text-sm text-foreground/90">
-              <div className="flex items-center justify-between border-b border-border/70 pb-3">
-                <span className="text-xs text-muted-foreground">Total rows</span>
-                <span className="font-semibold">{profile.shape?.[0]?.toLocaleString() ?? "—"}</span>
+      {uploadSummary ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          <span className="inline-flex items-center gap-2 font-semibold">
+            <CheckCircle2 className="h-5 w-5" />
+            {uploadSummary.kind === "synthetic" ? "Generated synthetic dataset" : `Loaded ${uploadSummary.name}`}
+          </span>
+          <span className="ml-2">
+            — {uploadSummary.rows.toLocaleString()} rows × {uploadSummary.cols.toLocaleString()} columns
+          </span>
+        </div>
+      ) : null}
+
+      {profile ? (
+        <>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <Table2 className="h-4 w-4" />
+                <span>Rows</span>
               </div>
-              <div className="flex items-center justify-between border-b border-border/70 pb-3">
-                <span className="text-xs text-muted-foreground">Total columns</span>
-                <span className="font-semibold">{profile.shape?.[1]?.toLocaleString() ?? "—"}</span>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.shape?.[0]?.toLocaleString() ?? "—"}</div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <Table2 className="h-4 w-4" />
+                <span>Columns</span>
               </div>
-              <div className="flex items-center justify-between border-b border-border/70 pb-3">
-                <span className="text-xs text-muted-foreground">Missing values</span>
-                <span className="font-semibold">{profile.missing_cells?.toLocaleString() ?? "—"}</span>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.shape?.[1]?.toLocaleString() ?? "—"}</div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <AlertCircle className="h-4 w-4" />
+                <span>Missing Values</span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">Duplicate rows</span>
-                <span className="font-semibold">{profile.duplicate_rows?.toLocaleString() ?? "—"}</span>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.missing_cells?.toLocaleString() ?? "—"}</div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <Table2 className="h-4 w-4" />
+                <span>Duplicates</span>
               </div>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.duplicate_rows?.toLocaleString() ?? "—"}</div>
             </div>
           </div>
 
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-semibold">Preview first {profile.data_preview?.length ?? 0} rows</h3>
-                <p className="text-xs text-muted-foreground">Loaded directly from backend response</p>
-              </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center gap-2">
+              <Table2 className="h-5 w-5 text-muted-foreground" />
+              <h3 className="text-sm font-semibold">Dataset Preview</h3>
             </div>
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
-                    {(profile.columns ?? []).slice(0, 10).map((column) => (
+                    {(profile.columns ?? []).map((column) => (
                       <th key={column} className="px-2 py-2">{column}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {(profile.data_preview ?? []).map((row, rowIndex) => (
+                  {(profile.data_preview ?? []).map((row: Record<string, any>, rowIndex: number) => (
                     <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : "bg-card"}>
-                      {(profile.columns ?? []).slice(0, 10).map((column) => (
+                      {(profile.columns ?? []).map((column) => (
                         <td key={`${rowIndex}-${column}`} className="whitespace-nowrap px-2 py-2 text-xs text-foreground/90">
                           {row[column] ?? ""}
                         </td>
@@ -212,15 +311,27 @@ function DataUpload() {
               </table>
             </div>
           </div>
-        </div>
-      )}
 
-      {file && progress >= 100 && (
-        <div className="flex justify-end gap-3 pt-4">
-          <Button onClick={() => navigate({ to: "/profiling" })} className="gap-2">
-            Proceed to Profiling
-            <ArrowRight className="h-4 w-4" />
-          </Button>
+          <div className="flex justify-end gap-3 pt-4">
+            <Button onClick={() => navigate({ to: "/profiling" })} className="gap-2">
+              Proceed to Data Profiling
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </>
+      ) : (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-center gap-2">
+            <Info className="h-5 w-5 text-muted-foreground" />
+            <h4 className="text-sm font-semibold">Welcome to CreditRisk ML POC</h4>
+          </div>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This platform intelligently adapts to <strong>any structured dataset</strong> — no hardcoded columns required.
+          </p>
+          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+            <li>Upload your own CSV/XLSX file, or</li>
+            <li>Click <strong>Use Synthetic Dataset</strong> to explore with demo data</li>
+          </ul>
         </div>
       )}
     </div>

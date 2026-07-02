@@ -7,8 +7,6 @@ import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Any
-from sklearn.feature_selection import mutual_info_classif, VarianceThreshold
-from sklearn.metrics import roc_auc_score
 
 
 MAX_DIAGNOSTIC_ROWS = 20000
@@ -16,55 +14,33 @@ MAX_IV_FEATURES = 40
 MAX_WOE_FEATURES = 8
 EPS = 0.5
 
-# ── Outstanding-balance / EAD resolution (computed here, used as EAD in ECL) ───
-_OUTSTANDING_BALANCE_SYNONYMS = [
-    "outstanding_balance", "outstanding_principal", "current_balance",
-    "book_balance", "loan_balance", "principal_outstanding",
-    "outstanding_amount", "balance_outstanding", "current_principal", "outstanding",
-]
-_LOAN_AMOUNT_SYNONYMS = [
-    "loan_amount", "total_loan_amount", "original_loan_amount", "sanctioned_amount",
-    "disbursed_amount", "loan_principal", "original_principal", "principal", "loan_amt",
-]
-_INTEREST_RATE_SYNONYMS = [
-    "interest_rate", "int_rate", "interest", "apr", "coupon",
-    "annual_rate", "nominal_rate", "rate",
-]
-_YEARS_ELAPSED_SYNONYMS = [
-    "years_elapsed", "years_on_book", "loan_age_years", "age_years",
-    "seasoning_years", "elapsed_years", "time_on_book_years",
-]
-_MONTHS_ELAPSED_SYNONYMS = [
-    "months_on_book", "loan_age_months", "age_months", "seasoning_months",
-    "months_elapsed", "mob", "time_on_book",
-]
-_TERM_SYNONYMS = [
-    "term_years", "loan_term_years", "tenure_years", "maturity_years",
-    "original_term", "loan_term", "tenure", "term",
-]
+# ── EAD calculation moved to ecl_engine (re-exported for backward compatibility) ──
+# The Exposure-at-Default computation now lives in ecl_engine.py. These imports
+# keep existing `from feature_engineering import compute_ead*/detect_*` callers working.
+# NOTE: do NOT redefine these names below — ecl_engine.py is the single source of
+# truth for EAD/outstanding-balance detection and computation (see Step 9 / ECL).
+from ecl_engine import (
+    PAYMENT_FREQUENCIES, DEFAULT_PAYMENT_FREQUENCY,
+    detect_outstanding_balance_col, detect_loan_amount_col,
+    detect_interest_rate_col, detect_years_elapsed_col, detect_term_col,
+    detect_payment_frequency_col,
+    compute_outstanding_balance, compute_ead_schedule, compute_ead,
+)
 
 
 def _norm_name(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def _match_column(columns, synonyms):
-    norm = {_norm_name(c): c for c in columns}
-    for syn in synonyms:                       # exact (normalized) match first
-        if _norm_name(syn) in norm:
-            return norm[_norm_name(syn)]
-    for syn in synonyms:                       # then substring match
-        ns = _norm_name(syn)
-        for nc, orig in norm.items():
-            if ns and ns in nc:
-                return orig
-    return None
-
-
 # ── Origination-PD columns must be hidden from model development (Change 3) ────
 _ORIG_PD_SIGNATURES = [
     "originationpd", "origpd", "pdorig", "pdatorigination",
     "pdorigination", "initialpd", "basepd", "originalpd", "pdinitial",
+]
+
+# ── DPD columns are definitional leakage (dpd≥90 ≡ default=1) ───────────────
+_DPD_SIGNATURES = [
+    "dpd", "dayspastdue",
 ]
 
 
@@ -78,74 +54,15 @@ def find_origination_pd_cols(columns):
     return out
 
 
-def detect_outstanding_balance_col(df):
-    return _match_column(df.columns, _OUTSTANDING_BALANCE_SYNONYMS)
-
-
-def detect_loan_amount_col(df):
-    return _match_column(df.columns, _LOAN_AMOUNT_SYNONYMS)
-
-
-def detect_interest_rate_col(df):
-    return _match_column(df.columns, _INTEREST_RATE_SYNONYMS)
-
-
-def detect_years_elapsed_col(df):
-    """Return (column, is_in_months)."""
-    col = _match_column(df.columns, _YEARS_ELAPSED_SYNONYMS)
-    if col:
-        return col, False
-    col = _match_column(df.columns, _MONTHS_ELAPSED_SYNONYMS)
-    if col:
-        return col, True
-    return None, False
-
-
-def detect_term_col(df):
-    return _match_column(df.columns, _TERM_SYNONYMS)
-
-
-def compute_outstanding_balance(loan_amount, interest_rate, years_elapsed,
-                                term_years=None, rate_is_percent=None):
-    """
-    Outstanding balance per loan from loan amount, annual interest rate and years
-    elapsed. With a loan term, an amortizing (declining) balance is used:
-
-        B = P * ((1+r)^N - (1+r)^m) / ((1+r)^N - 1)     (m = elapsed, N = term)
-
-    Without a term, an interest-accrual balance is used: B = P * (1+r)^m.
-    The interest rate is auto-normalised from percent to a fraction when needed.
-    All inputs are pandas Series sharing one index.
-    """
-    P = pd.to_numeric(loan_amount, errors="coerce").astype(float)
-    r = pd.to_numeric(interest_rate, errors="coerce").astype(float)
-    t = pd.to_numeric(years_elapsed, errors="coerce").astype(float)
-    idx = P.index
-
-    P = P.fillna(0.0).clip(lower=0)
-    nonzero = r.replace(0, np.nan).dropna()
-    auto_percent = bool(len(nonzero)) and float(nonzero.median()) > 1.0
-    if rate_is_percent is True or (rate_is_percent is None and auto_percent):
-        r = r / 100.0
-    r = r.fillna(0.0).clip(lower=0)
-    t = t.fillna(0.0).clip(lower=0)
-
-    if term_years is not None:
-        N = pd.to_numeric(term_years, errors="coerce").reindex(idx).astype(float)
-        N = N.where(N > 0).fillna(t.clip(lower=1.0))
-        m = np.minimum(t, N)
-        one_plus_r = 1.0 + r
-        factor_N = one_plus_r ** N
-        factor_m = one_plus_r ** m
-        denom = (factor_N - 1.0).replace(0, np.nan)
-        amort = P * (factor_N - factor_m) / denom
-        straight = P * (1.0 - (m / N.replace(0, np.nan)).clip(0, 1))
-        bal = amort.where(r > 1e-9, straight).fillna(straight)
-    else:
-        bal = P * (one_plus_r if False else (1.0 + r)) ** t
-
-    return bal.clip(lower=0).rename("outstanding_balance")
-
+def find_dpd_cols(columns):
+    """Columns that look like Days-Past-Due (excluded from the PD model — DPD>=90
+    is definitionally equivalent to default=1, so leaving it in is direct leakage)."""
+    out = []
+    for c in columns:
+        nc = _norm_name(c)
+        if any(sig in nc for sig in _DPD_SIGNATURES):
+            out.append(c)
+    return out
 
 
 def _sample_xy(X: pd.DataFrame, y: pd.Series, max_rows: int = MAX_DIAGNOSTIC_ROWS):
@@ -354,12 +271,14 @@ def analyze_for_feature_engineering(
     numeric_cols = [c for c in col_types.get("numeric", []) if c in X.columns]
     cat_cols = [c for c in col_types.get("categorical", []) if c in X.columns]
 
-    # Change 3: hide origination PD from model development (no features derived from it)
+    # Change 3: hide origination PD and DPD from model development (leakage / definitional)
     _orig_pd_cols = find_origination_pd_cols(X.columns)
-    if _orig_pd_cols:
-        numeric_cols = [c for c in numeric_cols if c not in _orig_pd_cols]
-        cat_cols = [c for c in cat_cols if c not in _orig_pd_cols]
-        plan["excluded_orig_pd"] = list(_orig_pd_cols)
+    _dpd_cols     = find_dpd_cols(X.columns)
+    _hidden_cols  = list(dict.fromkeys(_orig_pd_cols + _dpd_cols))
+    if _hidden_cols:
+        numeric_cols = [c for c in numeric_cols if c not in _hidden_cols]
+        cat_cols     = [c for c in cat_cols     if c not in _hidden_cols]
+        plan["excluded_orig_pd"] = _hidden_cols
 
     for col in numeric_cols:
         s = X[col].dropna()
@@ -376,6 +295,7 @@ def analyze_for_feature_engineering(
         try:
             X_num = X[numeric_cols].apply(pd.to_numeric, errors="coerce")
             X_num = X_num.fillna(X_num.median()).fillna(0)
+            from sklearn.feature_selection import mutual_info_classif
             mi = mutual_info_classif(X_num, y.fillna(y.mode()[0]), random_state=42, discrete_features=False)
             mi_series = pd.Series(mi, index=numeric_cols).sort_values(ascending=False)
             plan["mi_scores"] = mi_series.round(5).to_dict()
@@ -438,6 +358,7 @@ def analyze_for_feature_engineering(
     try:
         X_num = X[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         if X_num.shape[1] > 0:
+            from sklearn.feature_selection import VarianceThreshold
             selector = VarianceThreshold(threshold=0.01)
             selector.fit(X_num)
             low_var_mask = ~selector.get_support()
@@ -498,11 +419,13 @@ def apply_feature_engineering(
     summary = {"added": [], "removed": [], "transformed": []}
     original_shape = X.shape
 
-    # Change 3: drop origination PD so it can never be a model feature
+    # Change 3: drop origination PD and DPD — they must never be model features
     _orig_pd_cols = find_origination_pd_cols(X.columns)
-    if _orig_pd_cols:
-        X = X.drop(columns=list(_orig_pd_cols), errors="ignore")
-    summary["excluded_orig_pd"] = list(_orig_pd_cols)
+    _dpd_cols     = find_dpd_cols(X.columns)
+    _hidden_cols  = list(dict.fromkeys(_orig_pd_cols + _dpd_cols))
+    if _hidden_cols:
+        X = X.drop(columns=_hidden_cols, errors="ignore")
+    summary["excluded_orig_pd"] = _hidden_cols
 
     # ── Log transform (stateless) ──
     for col in plan.get("log_transform_cols", []):
@@ -587,6 +510,7 @@ def compute_univariate_gini(
             try:
                 vals = pd.to_numeric(X[col], errors="coerce")
                 vals = vals.fillna(vals.median()).fillna(0)
+                from sklearn.metrics import roc_auc_score
                 auc = float(roc_auc_score(y_bin, vals))
                 if auc < 0.5:
                     auc = 1.0 - auc

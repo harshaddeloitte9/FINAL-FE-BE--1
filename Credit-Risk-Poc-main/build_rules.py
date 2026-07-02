@@ -1,10 +1,19 @@
 """
 build_rules.py
-CLI tool to validate and rebuild rag_store/rules.json.
+CLI tool to rebuild rag_store/val_mdd_rules.json from the hosted RAG agent.
+
+This replaces the old development-pipeline build_rules.py. Rules are now
+exclusively MDD documentation requirements for model validation (SS1/23,
+IFRS 9) — not quantitative data checks.
 
 Usage:
     python build_rules.py               # report on existing rules
-    python build_rules.py --extract     # append LLM-extracted rules from documents
+    python build_rules.py --extract     # pull rules from the agent and append
+    python build_rules.py --reset       # wipe and reseed from curated baseline
+    python build_rules.py --extract --reset   # full rebuild from scratch
+
+The JSON is consumed by the model-validation pipeline in app.py for
+keyword-search cross-checking against an uploaded MDD.
 """
 
 import argparse
@@ -14,10 +23,9 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR      = Path(__file__).resolve().parent
 RAG_STORE_DIR = BASE_DIR / "rag_store"
-RULES_PATH = RAG_STORE_DIR / "rules.json"
-DOCS_DIR = RAG_STORE_DIR / "documents"
+RULES_PATH    = RAG_STORE_DIR / "val_mdd_rules.json"
 
 
 def load_rules() -> list[dict]:
@@ -36,60 +44,48 @@ def save_rules(rules: list[dict]) -> None:
 
 
 def report(rules: list[dict]) -> None:
-    by_source: dict[str, int] = {}
-    by_sev: dict[str, int] = {}
-    by_stage: dict[str, int] = {}
+    by_source:   dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    by_stage:    dict[str, int] = {}
     for r in rules:
-        k = r.get("source", "?")
-        by_source[k] = by_source.get(k, 0) + 1
-        k = r.get("severity", "?")
-        by_sev[k] = by_sev.get(k, 0) + 1
-        k = r.get("stage", "?")
-        by_stage[k] = by_stage.get(k, 0) + 1
+        for key, d in (("source", by_source), ("severity", by_severity), ("stage", by_stage)):
+            k = r.get(key, "?")
+            d[k] = d.get(k, 0) + 1
 
-    print(f"\n📋 Rules summary — {len(rules)} total")
+    print(f"\n📋 MDD Validation Rules — {len(rules)} total")
     print(f"  By source   : {by_source}")
-    print(f"  By severity : {by_sev}")
+    print(f"  By severity : {by_severity}")
     print(f"  By stage    : {by_stage}")
 
+    no_kw = [r.get("id", "?") for r in rules if not r.get("keywords")]
+    if no_kw:
+        print(f"\n⚠️  {len(no_kw)} rule(s) have no keywords (keyword search will mark them WARN): {no_kw[:10]}")
 
-def extract_and_append(rules: list[dict]) -> list[dict]:
-    """Run LLM extraction over documents and append novel rules."""
+
+def extract_and_append(rules: list[dict], verbose: bool = False) -> list[dict]:
+    """Query the RAG agent and append novel MDD documentation rules."""
     from rule_extractor import RuleExtractor
 
     extractor = RuleExtractor()
     existing_checks = {r.get("check", "") for r in rules}
     max_id = max(
-        (int(r["id"][1:]) for r in rules if r.get("id", "").startswith("R") and r["id"][1:].isdigit()),
+        (int(r["id"][1:]) for r in rules if r.get("id", "").startswith("V") and r["id"][1:].isdigit()),
         default=0,
     )
+
+    print("  Querying agent for MDD documentation requirements…")
+    extracted = extractor.extract_from_agent(verbose=verbose)
+
     new_rules: list[dict] = []
-
-    doc_paths = [
-        p for p in sorted(DOCS_DIR.rglob("*"))
-        if p.suffix.lower() in (".pdf", ".txt", ".md") and not p.is_dir()
-    ]
-
-    if not doc_paths:
-        print(f"  No documents found in {DOCS_DIR}")
-        return rules
-
-    for path in doc_paths:
-        print(f"  Extracting from {path.name}…")
-        extracted = extractor.extract_from_file(path)
-        for rule in extracted:
-            check = rule.get("check", "").strip()
-            if not check or check in existing_checks:
-                continue
-            max_id += 1
-            rule.setdefault("id", f"R{max_id:02d}")
-            rule.setdefault("principle", "?")
-            rule.setdefault("threshold", None)
-            rule.setdefault("rule", rule.get("rule_text", ""))
-            rule.setdefault("flag", rule.get("rule_text", "Rule violation detected"))
-            rule.setdefault("suggestion", "Review the relevant regulatory guidance.")
-            new_rules.append(rule)
-            existing_checks.add(check)
+    for rule in extracted:
+        check = rule.get("check", "").strip()
+        if not check or check in existing_checks:
+            continue
+        max_id += 1
+        rule["id"] = f"V{max_id:02d}"
+        rule.setdefault("min_keyword_hits", 2)
+        new_rules.append(rule)
+        existing_checks.add(check)
 
     print(f"  → {len(new_rules)} new rule(s) extracted")
     return rules + new_rules
@@ -97,28 +93,40 @@ def extract_and_append(rules: list[dict]) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Validate and optionally rebuild rag_store/rules.json"
+        description="Rebuild rag_store/val_mdd_rules.json from the RAG agent"
     )
-    parser.add_argument(
-        "--extract",
-        action="store_true",
-        help="Run LLM extraction over documents in rag_store/documents/ and append new rules",
-    )
+    parser.add_argument("--extract", action="store_true",
+                        help="Query the agent and append new rules")
+    parser.add_argument("--reset", action="store_true",
+                        help="Wipe existing rules and reseed from val_build_rules.py baseline before extracting")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-stage extraction details")
     args = parser.parse_args()
 
     print(f"Rules file : {RULES_PATH}")
-    print(f"Docs dir   : {DOCS_DIR}")
 
-    rules = load_rules()
+    if args.reset:
+        from val_build_rules import seed_rules
+        print("\n⚠️  --reset: rebuilding from curated seed rules.")
+        rules = seed_rules()
+        save_rules(rules)
+    else:
+        rules = load_rules()
+        if not rules:
+            from val_build_rules import seed_rules
+            print("\nNo existing rules — seeding with curated baseline.")
+            rules = seed_rules()
+            save_rules(rules)
+
     report(rules)
 
     if args.extract:
-        print("\nRunning LLM-based rule extraction…")
-        rules = extract_and_append(rules)
+        print("\nRunning agent-based rule extraction…")
+        rules = extract_and_append(rules, verbose=args.verbose)
         save_rules(rules)
         report(rules)
     else:
-        print("\nTip: run with --extract to append LLM-extracted rules from documents.")
+        print("\nTip: run with --extract to append rules from the RAG agent.")
 
 
 if __name__ == "__main__":

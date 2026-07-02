@@ -352,13 +352,22 @@ def _run_replication(
                 f"Available: {list(registry.keys())}"
             )
         model_cls = registry[model_name]["class"]
-        default_params = registry[model_name].get("default_params", {}).copy()
+        # Replicate the developer's EXACT model: start from the registry defaults,
+        # then layer the developer's submitted hyperparameters on top so the
+        # replicated model uses THEIR configuration. Without this, any param the
+        # registry doesn't set falls back to the sklearn default (e.g. RF
+        # max_depth=None, XGB scale_pos_weight=None, LightGBM class_weight=None),
+        # which is why those read "None" in the comparison table.
+        model_params = registry[model_name].get("default_params", {}).copy()
+        _submitted_hp = st.session_state.get("val_hyperparams") or {}
+        if isinstance(_submitted_hp, dict):
+            model_params.update(_submitted_hp)
         try:
             valid_keys = set(model_cls().get_params().keys())
-            default_params = {k: v for k, v in default_params.items() if k in valid_keys}
+            model_params = {k: v for k, v in model_params.items() if k in valid_keys}
         except Exception:
             pass
-        model_inst = model_cls(**default_params)
+        model_inst = model_cls(**model_params)
 
         pipeline, training_info, feature_names = train_model(
             X_train, y_train,
@@ -977,8 +986,113 @@ f"<span style='color:{_C['neutral']};font-size:0.9rem;'>⏭️ SKIP: {counts['SK
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Methodology Parameter Comparison (R4.9)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-model parameter specification.
+# Each entry: (display_label, severity_if_mismatch, comparison_mode, note)
+#   comparison_mode:
+#     "exact"   — values must be identical (strings, booleans, categorical choices)
+#     "numeric" — numeric tolerance check; threshold is a relative fraction
+#                 e.g. 0.20 means flag WARN if |Δ|/reported > 20%
+#     "optional"— mismatch is INFO only, not flagged as WARN/FAIL
+_MODEL_PARAM_SPECS: Dict[str, List[Tuple]] = {
+    "Logistic Regression": [
+        ("penalty",      "Penalty (L1/L2)",             "high",   "exact",   None),
+        ("C",            "Regularisation strength (C)", "high",   "numeric", 0.20),
+        ("solver",       "Solver",                      "medium", "exact",   None),
+        ("class_weight", "Class weight",                "high",   "exact",   None),
+    ],
+    "Decision Tree": [
+        ("max_depth",         "Max depth",                "high",   "exact",   None),
+        ("criterion",         "Criterion (Gini/Entropy)", "medium", "exact",   None),
+        ("min_samples_split", "Min samples split",        "medium", "numeric", 0.50),
+        ("min_samples_leaf",  "Min samples leaf",         "medium", "numeric", 0.50),
+    ],
+    "Random Forest": [
+        ("n_estimators",     "Number of trees",  "medium", "numeric", 0.30),
+        ("max_depth",        "Max depth",        "high",   "exact",   None),
+        ("max_features",     "Max features",     "high",   "exact",   None),
+        ("min_samples_leaf", "Min samples leaf", "medium", "numeric", 0.50),
+    ],
+    "XGBoost": [
+        ("n_estimators",     "Number of trees",                "medium", "numeric", 0.30),
+        ("learning_rate",    "Learning rate",                  "high",   "numeric", 0.25),
+        ("max_depth",        "Max depth",                      "high",   "numeric", 0.20),
+        ("scale_pos_weight", "Class weight (scale_pos_weight)", "high",  "numeric", 0.25),
+    ],
+    "LightGBM": [
+        ("n_estimators",  "Number of trees",                               "medium", "numeric", 0.30),
+        ("learning_rate", "Learning rate",                                 "high",   "numeric", 0.25),
+        ("num_leaves",    "Number of leaves",                              "high",   "numeric", 0.25),
+        ("class_weight",  "Class weight (is_unbalance / scale_pos_weight)", "high",  "exact",   None),
+    ],
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main render function — called from app.py render_model_validation()
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _render_replication_params(submitted_hp: Dict[str, Any], model_name: str = "") -> None:
+    """
+    List the model hyperparameters extracted from the submitted MDD, shown at the
+    TOP of the results (before the evaluation metrics). The model is replicated
+    using exactly these parameters, so this is a configuration summary rather than
+    a comparison.
+    """
+    import html as _html
+
+    hdr = "#### 🔧 Model Hyperparameters Extracted from MDD" + (
+        f" — {model_name}" if model_name else ""
+    )
+    st.markdown(hdr)
+
+    if not submitted_hp:
+        st.info(
+            "ℹ️ No model hyperparameters were found in the submitted MDD. The model "
+            "will be replicated using the pipeline's default configuration."
+        )
+        return
+
+    st.markdown(
+        "<p style='color:#94a3b8;font-size:0.85rem;margin-top:-0.35rem;'>"
+        "The model is replicated using exactly these parameters, as supplied in the "
+        "MDD. The evaluation metrics below are generated from a model trained with "
+        "this configuration.</p>",
+        unsafe_allow_html=True,
+    )
+
+    # Friendly labels + ordering from the model spec where available; any extra
+    # submitted params are appended afterwards.
+    spec_labels = {p[0]: p[1] for p in _MODEL_PARAM_SPECS.get(model_name, [])}
+    spec_order  = [p[0] for p in _MODEL_PARAM_SPECS.get(model_name, [])]
+    ordered_keys = [k for k in spec_order if k in submitted_hp] + \
+                   [k for k in submitted_hp if k not in spec_order]
+
+    cells = []
+    for k in ordered_keys:
+        label = spec_labels.get(k, k)
+        val = submitted_hp.get(k)
+        cells.append(
+            "<tr>"
+            f"<td style='padding:0.45rem 0.8rem;color:#e2e8f0;border-top:1px solid #334155;'>"
+            f"{_html.escape(str(label))}</td>"
+            f"<td style='padding:0.45rem 0.8rem;color:#e2e8f0;border-top:1px solid #334155;"
+            f"font-family:monospace;'>{_html.escape(str(val))}</td>"
+            "</tr>"
+        )
+
+    table = (
+        "<table style='width:100%;border-collapse:collapse;font-size:0.86rem;"
+        "background:#1e293b;border-radius:8px;overflow:hidden;margin:0.3rem 0 0.6rem 0;'>"
+        "<thead><tr style='background:#0f172a;'>"
+        "<th style='text-align:left;padding:0.55rem 0.8rem;color:#94a3b8;'>Parameter</th>"
+        "<th style='text-align:left;padding:0.55rem 0.8rem;color:#94a3b8;'>Value (from MDD)</th>"
+        "</tr></thead><tbody>" + "".join(cells) + "</tbody></table>"
+    )
+    st.markdown(table, unsafe_allow_html=True)
+
 
 def render_val_replication():
     """Stage 4 — Model Replication render function."""
@@ -1314,6 +1428,13 @@ def render_val_replication():
 
     # Summary scorecard
     _summary_scorecard(checks)
+
+    # ── Hyperparameters extracted from the MDD (model replicated using these) ──
+    _render_replication_params(
+        st.session_state.get("val_hyperparams") or {},
+        st.session_state.get("rep_model_name", ""),
+    )
+    st.divider()
 
     # Quick metrics row
     if not result["success"]:

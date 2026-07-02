@@ -158,7 +158,7 @@ def detect_column_types(df: pd.DataFrame) -> Dict[str, List[str]]:
         # ── Numeric ──
         if pd.api.types.is_numeric_dtype(dtype):
             col_is_id = col.lower() in {"id", "customer_id", "loan_id", "index", "row_id"}
-            if col_is_id and series.nunique() > 0.9 * len(series):
+            if col_is_id:
                 id_cols.append(col)
             else:
                 numeric_cols.append(col)
@@ -169,7 +169,7 @@ def detect_column_types(df: pd.DataFrame) -> Dict[str, List[str]]:
             numeric_attempt = pd.to_numeric(series, errors="coerce")
             if numeric_attempt.notna().mean() > 0.85:
                 col_is_id = col.lower() in {"id", "customer_id", "loan_id", "index", "row_id"}
-                if col_is_id and series.nunique() > 0.9 * len(series):
+                if col_is_id:
                     id_cols.append(col)
                 else:
                     numeric_cols.append(col)

@@ -194,17 +194,76 @@ def detect_column_types(df: pd.DataFrame) -> Dict[str, List[str]]:
 
 
 def detect_target_candidates(df: pd.DataFrame) -> List[str]:
+    keywords = [
+        # Default/credit risk
+        "default", "defaulted", "is_default", "def_flag",
+        "bad", "is_bad", "bad_flag",
+        "target", "label", "y",
+        # Mortgage/secured
+        "arrears", "in_arrears", "npl", "non_performing",
+        "mortgage_default", "charge_off", "charged_off",
+        "write_off", "written_off", "forbearance",
+        # Generic ML
+        "outcome", "event", "flag", "indicator",
+        "churn", "fraud", "risk",
+        # DPD-based
+        "dpd_flag", "dpd90", "dpd_90", "ever_90",
+    ]
+
     candidates = []
-    target_keywords = ["default", "target", "label", "fraud", "churn", "risk",
-                       "outcome", "status", "approved", "class", "y", "result"]
     for col in df.columns:
         col_lower = col.lower()
-        if any(kw in col_lower for kw in target_keywords):
+        if any(kw in col_lower for kw in keywords):
             candidates.append(col)
-        elif df[col].nunique() <= 5 and df[col].dtype in [int, float, object]:
-            if col not in candidates:
+
+    # Fallback: if no keyword match, look for binary (0/1) columns that aren't IDs
+    if not candidates:
+        for col in reversed(df.columns.tolist()):
+            if "id" in col.lower():
+                continue
+            col_vals = df[col].dropna().unique()
+            if set(col_vals).issubset({0, 1, 0.0, 1.0}) and len(col_vals) == 2:
                 candidates.append(col)
+
     return candidates
+
+
+def bin_continuous_target(
+    series: pd.Series,
+    n_bins: int = 5,
+    method: str = "quantile",
+    custom_edges: list = None,
+    labels: list = None,
+) -> tuple:
+    """
+    Convert a continuous target into binned categories.
+
+    Args:
+        series: the continuous target column
+        n_bins: number of bins (ignored if custom_edges provided)
+        method: "quantile" (equal frequency) or "equal_width"
+        custom_edges: optional list of bin edges, e.g. [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        labels: optional list of bin labels, e.g. ["A", "B", "C", "D", "E"]
+
+    Returns:
+        (binned_series, bin_edges_used, bin_counts_dict)
+    """
+    clean = series.dropna()
+
+    if custom_edges:
+        edges = custom_edges
+    elif method == "quantile":
+        edges = list(pd.qcut(clean, q=n_bins, retbins=True, duplicates="drop")[1])
+    else:  # equal_width
+        edges = list(pd.cut(clean, bins=n_bins, retbins=True)[1])
+
+    if labels is None:
+        labels = [f"Band_{i+1}" for i in range(len(edges) - 1)]
+
+    binned = pd.cut(series, bins=edges, labels=labels, include_lowest=True)
+    bin_counts = binned.value_counts().sort_index().to_dict()
+
+    return binned, edges, bin_counts
 
 
 def detect_task_type(series: pd.Series) -> str:

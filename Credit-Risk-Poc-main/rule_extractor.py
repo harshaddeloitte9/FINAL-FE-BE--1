@@ -1,426 +1,256 @@
 """
 rule_extractor.py
-Extracts structured compliance rules from regulatory document text using a local Ollama LLM.
+Extracts MDD documentation compliance rules from the hosted IFRS 9 / SS1-23
+agent and maps each rule to the val_mdd_rules.json schema consumed by the
+model-validation pipeline.
 
-Pipeline:
-  1. Split document into overlapping paragraphs (chunks)
-  2. Pre-filter chunks by keyword relevance score — only high-scoring chunks go to the LLM
-  3. LLM extracts full structured rules including a machine-testable logic block
-  4. build_rules.py deduplicates and assigns IDs before saving to rules.json
+Focus: what SS1/23 and IFRS 9 say MUST BE PRESENT in a Model Development
+Document (MDD) — business objective, data description, feature engineering,
+model selection rationale, assumptions, SICR criteria, governance, etc.
 
-The pre-filtering step ensures:
-  - Only paragraphs with compliance language ("shall", "must", thresholds etc.) are sent
-  - LLM token usage is reduced by ~70-80% on typical regulatory documents
-  - The quality of extracted rules is higher because noise is eliminated
+Rules split into two validation stages:
+  data_validation     — what the MDD must document about data preparation
+  conceptual_soundness — what the MDD must document about model design/methodology
+
+NOTE: verify=False is for internal testing only.
 """
 from __future__ import annotations
-import json
+import os
 import re
 import sys
-from pathlib import Path
-from typing import Optional
+from typing import Any
 
+import requests
+import urllib3
 
-# ── Relevance pre-filter ──────────────────────────────────────────────────────
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Tier-1: strong obligation language — any match is a strong relevance signal
-_OBLIGATION_PATTERNS = re.compile(
-    r"\b(shall|must|required to|is required|are required|should|need to|"
-    r"obligated|mandated|prohibited from|is prohibited|failure to|non.compliance)\b",
-    re.IGNORECASE,
+# ── Agent config ──────────────────────────────────────────────────────────────
+AGENT_URL = os.environ.get(
+    "IFRS_AGENT_URL",
+    "https://agenticai.inuatintgenw.deloitte.com/api/v1/prediction/9e0b9c8a-1633-45e6-8bf0-9e294420eb02",
 )
+AGENT_TIMEOUT = int(os.environ.get("IFRS_AGENT_TIMEOUT", "300"))
+AGENT_OVERRIDE_CONFIG: dict = {}
 
-# Tier-2: regulatory / quantitative keywords — raise the chunk score
-_REGULATORY_KEYWORDS = {
-    # IFRS 9 staging and ECL
-    "expected credit loss", "ecl", "ifrs 9", "ifrs9",
-    "stage 1", "stage 2", "stage 3", "staging",
-    "significant increase in credit risk", "sicr",
-    "credit impaired", "default", "days past due", "dpd",
-    "probability of default", "pd", "loss given default", "lgd",
-    "exposure at default", "ead", "lifetime",
-    # Model risk / SS1/23
-    "ss1/23", "model risk", "model validation", "challenger model",
-    "cross.validation", "overfitting", "data leakage",
-    "explainability", "interpretability", "shap",
-    "class imbalance", "smote", "resampling",
-    "roc.auc", "recall", "precision", "f1",
-    # General regulatory
-    "threshold", "minimum", "maximum", "limit",
-    "disclosure", "reporting", "provision", "impairment",
-    "capital requirement", "regulatory capital", "pillar",
-    "concentration risk", "credit risk", "market risk",
-    "past due", "arrears", "forbearance",
+# ── Stage taxonomy ────────────────────────────────────────────────────────────
+# Only two stages — both belong to model validation.
+# Keywords are used for keyword-search cross-checking against an uploaded MDD.
+ALLOWED_STAGES: tuple[str, ...] = ("data_validation", "conceptual_soundness")
+
+_STAGE_DESC: dict[str, str] = {
+    "data_validation": (
+        "What the MDD must document about data: data sources, observation window, "
+        "population definition, sampling methodology, exclusion criteria, default "
+        "definition, target variable construction, handling of missing data, "
+        "treatment of outliers, forward-looking macroeconomic variables, and "
+        "steps taken to prevent data leakage or survivorship bias."
+    ),
+    "conceptual_soundness": (
+        "What the MDD must document about model design and methodology: business "
+        "objective and intended use, model selection rationale and alternatives "
+        "considered, feature engineering decisions, SICR criteria and staging logic, "
+        "model assumptions and known limitations, benchmarking against simpler models, "
+        "explainability approach, sensitivity analysis, model governance and version "
+        "control, and any post-model adjustments."
+    ),
 }
 
-# Keywords that make a chunk likely irrelevant (table of contents lines, headers, etc.)
-_NOISE_PATTERNS = re.compile(
-    r"^(table of contents|contents|appendix [a-z]|page \d|\.{5,}|\d+\s*$)",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Keywords used by the app to keyword-search an uploaded MDD.
+# Each stage maps to the terms the validator expects to find in that section.
+STAGE_KEYWORDS: dict[str, list[str]] = {
+    "data_validation": [
+        "data source", "observation window", "performance window", "training data",
+        "population", "exclusion criteria", "sampling", "default definition",
+        "days past due", "dpd", "target variable", "missing data", "outlier",
+        "macroeconomic", "forward-looking", "scenario", "leakage", "survivorship bias",
+        "data dictionary", "data quality",
+    ],
+    "conceptual_soundness": [
+        "business objective", "intended use", "scope", "model selection", "rationale",
+        "justification", "challenger", "benchmark", "alternative model",
+        "feature engineering", "variable selection", "sicr", "significant increase",
+        "credit risk", "staging", "assumption", "limitation", "sensitivity",
+        "explainability", "shap", "feature importance", "governance", "version control",
+        "model owner", "review cycle",
+    ],
+}
+
+# ── Prompt builders ───────────────────────────────────────────────────────────
+
+def _build_stage_prompt(stage: str) -> str:
+    """Focused prompt for one validation stage — MDD documentation requirements only."""
+    return f"""
+You are a regulatory model-risk analyst specialising in SS1/23 and IFRS 9.
+
+From the knowledge base, list EVERY requirement that SS1/23 and IFRS 9 place on
+what a Model Development Document (MDD) must contain or demonstrate for the
+'{stage}' aspect: {_STAGE_DESC[stage]}
+
+For each requirement output exactly one block — no intro, no markdown, no numbering:
+
+RULE_START
+RULE_ID: <standard + reference, e.g. "SS1/23 Principle 3.2" or "IFRS 9 B5.5.28">
+DESCRIPTION: <one or two sentence plain-English statement of what the MDD must include or demonstrate>
+MDD_SECTION: <the MDD section where this is typically documented, e.g. "Data Description", "Model Selection">
+KEYWORDS: <comma-separated list of 3-6 words/phrases that should appear in the MDD if this requirement is met>
+SEVERITY: <high | medium | low>
+RULE_END
+
+Only output rules relevant to '{stage}'. Focus on documentation requirements —
+what must be WRITTEN IN the MDD — not on automated data checks.
+No text before the first RULE_START or after the last RULE_END.
+""".strip()
 
 
-def _score_chunk(text: str) -> float:
-    """
-    Return a relevance score [0.0, 1.0] for a text chunk.
-    Scoring heuristic:
-      - Obligation language present  → +0.45
-      - Each regulatory keyword hit  → +0.10 (capped at 0.55 total)
-      - Noise pattern present        → –0.30
-    """
-    score = 0.0
-    tl = text.lower()
+# ── Parser ────────────────────────────────────────────────────────────────────
 
-    if _OBLIGATION_PATTERNS.search(text):
-        score += 0.45
-
-    keyword_hits = sum(
-        1 for kw in _REGULATORY_KEYWORDS
-        if re.search(r"\b" + kw.replace(".", r"\.?") + r"\b", tl)
-    )
-    score += min(keyword_hits * 0.10, 0.55)
-
-    if _NOISE_PATTERNS.search(text):
-        score -= 0.30
-
-    return max(0.0, min(score, 1.0))
+def _parse_agent_rules(raw: str) -> list[dict]:
+    blocks = re.findall(r"RULE_START(.*?)RULE_END", raw, re.DOTALL)
+    parsed: list[dict] = []
+    for block in blocks:
+        def field(name: str) -> str:
+            m = re.search(rf"{name}:\s*(.+?)(?=\n[A-Z_]+:|$)", block, re.DOTALL)
+            return m.group(1).strip() if m else ""
+        parsed.append({
+            "rule_id":     field("RULE_ID"),
+            "description": field("DESCRIPTION"),
+            "mdd_section": field("MDD_SECTION"),
+            "keywords":    field("KEYWORDS"),
+            "severity":    field("SEVERITY"),
+        })
+    return parsed
 
 
-def _split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
-    """
-    Split text into overlapping chunks at paragraph boundaries where possible.
-    Overlap ensures rules that span paragraph boundaries are not lost.
-    """
-    # Normalise whitespace
-    text = re.sub(r"\r\n|\r", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+# ── Normalisation helpers ─────────────────────────────────────────────────────
 
-    # Split on double newlines (paragraph breaks) first
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
 
-    chunks: list[str] = []
-    current = ""
-    for para in paragraphs:
-        if len(current) + len(para) + 2 <= chunk_size:
-            current = (current + "\n\n" + para).strip()
-        else:
-            if current:
-                chunks.append(current)
-            # If the paragraph itself is larger than chunk_size, split it by sentences
-            if len(para) > chunk_size:
-                sentences = re.split(r"(?<=[.!?])\s+", para)
-                current = ""
-                for sent in sentences:
-                    if len(current) + len(sent) + 1 <= chunk_size:
-                        current = (current + " " + sent).strip()
-                    else:
-                        if current:
-                            chunks.append(current)
-                        current = sent
-            else:
-                current = para
+def _infer_source(rule_id: str) -> str:
+    t = (rule_id or "").lower()
+    if "ss1" in t or "ss 1" in t:
+        return "SS1/23"
+    if "ss11" in t or "ss 11" in t:
+        return "SS11/13"
+    if "ifrs 7" in t or "ifrs7" in t:
+        return "IFRS 7"
+    return "IFRS 9"
 
-    if current:
-        chunks.append(current)
+def _normalise_severity(raw: str) -> str:
+    s = (raw or "").lower().strip()
+    return s if s in ("high", "medium", "low") else "medium"
 
-    # Add overlap: prepend the tail of the previous chunk to each chunk
-    if overlap > 0 and len(chunks) > 1:
-        overlapped: list[str] = [chunks[0]]
-        for i in range(1, len(chunks)):
-            tail = chunks[i - 1][-overlap:]
-            overlapped.append((tail + "\n\n" + chunks[i]).strip())
-        return overlapped
-
-    return chunks
+def _parse_keywords(raw: str) -> list[str]:
+    """Split comma-separated keyword string into a clean list."""
+    if not raw:
+        return []
+    return [k.strip().lower() for k in raw.split(",") if k.strip()]
 
 
-def filter_relevant_chunks(
-    text: str,
-    min_score: float = 0.45,
-    chunk_size: int = 800,
-    overlap: int = 150,
-    max_chunks: int = 40,
-) -> list[tuple[str, float]]:
-    """
-    Split text into chunks and return only those above min_score, sorted by score desc.
-    Returns list of (chunk_text, score) tuples.
-
-    Args:
-        text:        Full document text
-        min_score:   Minimum relevance score to pass the filter (0.0–1.0)
-        chunk_size:  Target characters per chunk (soft limit)
-        overlap:     Characters of overlap between adjacent chunks
-        max_chunks:  Hard cap on chunks passed to LLM (cost control)
-    """
-    chunks = _split_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
-    scored = [(chunk, _score_chunk(chunk)) for chunk in chunks]
-    relevant = [(c, s) for c, s in scored if s >= min_score]
-    relevant.sort(key=lambda x: x[1], reverse=True)
-    return relevant[:max_chunks]
-
-
-# ── LLM prompt ───────────────────────────────────────────────────────────────
-
-_EXTRACTION_PROMPT = """\
-You are a regulatory compliance analyst. Read the excerpt below from '{source}' and extract every distinct compliance rule or obligation.
-
-For each rule, output exactly ONE JSON object on its own line with these keys:
-  "rule_text"          : one-sentence description of the rule
-  "check"              : snake_case identifier (e.g. "dpd_90_stage3_requirement")
-  "severity"           : one of: high / medium / low
-  "stage"              : one of: data / feature / training / evaluation
-  "field_hint"         : the data column or metric this rule checks (e.g. "days_past_due", "roc_auc", "ifrs9_stage"). Use null if not applicable.
-  "operator"           : comparison operator — one of: >=, <=, >, <, ==, !=, is_true, is_false, is_present. Use null if not applicable.
-  "threshold"          : numeric or string threshold value. Use null if not applicable.
-  "requirement_field"  : for two-field rules (e.g. DPD>=90 → stage must equal 3), the field that must satisfy the requirement. Use null if single-field.
-  "requirement_op"     : operator for requirement_field check. Use null if single-field.
-  "requirement_value"  : expected value for requirement_field. Use null if single-field.
-  "action"             : one-sentence remediation action if the rule is violated
-
-Output ONLY JSON lines — no markdown, no prose, no array brackets.
-If the excerpt contains no clear compliance rules, output nothing.
-
-Excerpt:
-{snippet}
-"""
-
-
-# ── RuleExtractor class ───────────────────────────────────────────────────────
+# ── RuleExtractor ─────────────────────────────────────────────────────────────
 
 class RuleExtractor:
     """
-    Extracts structured compliance rules from regulatory document text.
-
-    Key improvements over the original:
-    - Chunked processing: entire document is processed, not just first 3000 chars
-    - Pre-filtering: only chunks with relevance score >= min_score go to the LLM
-    - Richer output: each rule includes a machine-testable logic block
-      (field_hint, operator, threshold, requirement_*) that Agent 2 can evaluate
+    Extracts MDD documentation requirements from the hosted IFRS 9 / SS1-23 agent.
+    Produces rules in the val_mdd_rules.json schema for keyword-search validation.
     """
 
-    def __init__(self, model: str = "llama3.1", min_relevance_score: float = 0.45):
-        self.model = model
-        self.min_relevance_score = min_relevance_score
+    def __init__(self):
+        pass
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
-
-    def _call_llm(self, prompt: str) -> str:
-        """Call the local Ollama LLM and return raw text content."""
-        import ollama as _ollama
-        try:
-            response = _ollama.chat(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return (
-                response.message.content
-                if hasattr(response, "message")
-                else response["message"]["content"]
-            )
-        except Exception as e:
-            print(f"[RuleExtractor] LLM call failed: {e}", file=sys.stderr)
-            return ""
-
-    def _parse_llm_output(self, content: str, source: str) -> list[dict]:
-        """Parse LLM output lines into rule dicts. Malformed lines are skipped."""
-        rules = []
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    rule = json.loads(line)
-                    rule["source"] = source
-                    rules.append(rule)
-                except json.JSONDecodeError:
-                    pass
-        return rules
-
-    def _build_logic_block(self, rule: dict) -> dict | None:
-        """
-        Convert the flat LLM-output fields into the nested logic block that
-        Agent 2's check_rules_from_agent1() expects.
-
-        Single-field rule (e.g. roc_auc >= 0.70):
-          logic = {field_hint, operator, threshold}
-
-        Two-field rule (e.g. days_past_due >= 90 → ifrs9_stage == 3):
-          logic = {field_hint, operator, threshold,
-                   requirement: {field_hint, operator, value}}
-        """
-        field_hint = rule.get("field_hint")
-        operator   = rule.get("operator")
-        threshold  = rule.get("threshold")
-
-        # Need at minimum a field and an operator to be machine-testable
-        if not field_hint or not operator:
-            return None
-
-        logic: dict = {
-            "field_hint": field_hint,
-            "operator":   operator,
-            "threshold":  threshold,
-        }
-
-        req_field = rule.get("requirement_field")
-        req_op    = rule.get("requirement_op")
-        req_val   = rule.get("requirement_value")
-        if req_field and req_op and req_val is not None:
-            logic["requirement"] = {
-                "field_hint": req_field,
-                "operator":   req_op,
-                "value":      req_val,
-            }
-
-        return logic
-
-    def _normalise_rule(self, raw: dict, source: str) -> dict:
-        """
-        Normalise a raw LLM output dict into the canonical rule format
-        expected by both build_rules.py and Agent 2.
-        """
-        logic = self._build_logic_block(raw)
-        return {
-            # Identity / provenance
-            "source":               source,
-            "check":                raw.get("check", ""),
-            "stage":                raw.get("stage", "evaluation"),
-            "severity":             raw.get("severity", "medium"),
-            # Human-readable content
-            "rule":                 raw.get("rule_text", ""),
-            "flag":                 raw.get("rule_text", "Compliance rule violated"),
-            "suggestion":           raw.get("action", "Review the relevant regulatory guidance."),
-            "principle":            raw.get("principle", "?"),
-            # Machine-testable block — None if LLM could not supply field/operator
-            "checkable_against_data": logic is not None,
-            "logic":                logic,
-            # Placeholders filled by build_rules.py
-            "id":                   None,
-            "threshold":            raw.get("threshold"),
-        }
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def extract_from_text(
-        self,
-        text: str,
-        source: str,
-        chunk_size: int = 800,
-        overlap: int = 150,
-        max_chunks: int = 40,
-        verbose: bool = False,
-    ) -> list[dict]:
-        """
-        Extract compliance rules from a block of text.
-
-        Steps:
-          1. Split into overlapping chunks
-          2. Score each chunk for regulatory relevance
-          3. Send only chunks above self.min_relevance_score to the LLM
-          4. Parse, build logic blocks, normalise
-          5. Deduplicate by check identifier within this call
-
-        Args:
-            text:       Full document text
-            source:     Label used in rule provenance (e.g. filename)
-            chunk_size: Soft character limit per chunk
-            overlap:    Overlap between adjacent chunks in characters
-            max_chunks: Hard cap on how many chunks are sent to the LLM
-            verbose:    Print per-chunk scoring if True
-
-        Returns:
-            List of normalised rule dicts ready for build_rules.py
-        """
-        relevant_chunks = filter_relevant_chunks(
-            text,
-            min_score=self.min_relevance_score,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            max_chunks=max_chunks,
+    def _call_agent(self, prompt: str, timeout: int | None = None) -> str:
+        payload: dict = {"question": prompt}
+        if AGENT_OVERRIDE_CONFIG:
+            payload["overrideConfig"] = AGENT_OVERRIDE_CONFIG
+        resp = requests.post(
+            AGENT_URL, json=payload, verify=False,
+            timeout=timeout or AGENT_TIMEOUT,
         )
+        resp.raise_for_status()
+        try:
+            body = resp.json()
+        except ValueError:
+            return resp.text.strip()
+        return self._find_text(body)
 
-        if not relevant_chunks:
-            print(
-                f"[RuleExtractor] No relevant chunks found in '{source}' "
-                f"(min_score={self.min_relevance_score}). "
-                "Consider lowering min_relevance_score or checking the document content.",
-                file=sys.stderr,
-            )
-            return []
+    @staticmethod
+    def _find_text(obj) -> str:
+        if isinstance(obj, str):
+            return obj.strip()
+        if isinstance(obj, dict):
+            for key in ("text", "output", "answer", "response", "result", "content", "message"):
+                if key in obj:
+                    found = RuleExtractor._find_text(obj[key])
+                    if found:
+                        return found
+        if isinstance(obj, list):
+            for item in obj:
+                found = RuleExtractor._find_text(item)
+                if found:
+                    return found
+        return ""
 
-        if verbose:
-            print(
-                f"[RuleExtractor] {source}: {len(relevant_chunks)} relevant chunks "
-                f"(of {len(_split_into_chunks(text, chunk_size, overlap))} total) "
-                f"will be sent to LLM",
-                file=sys.stderr,
-            )
+    def _normalise(self, raw: dict, stage: str) -> dict:
+        rule_id     = (raw.get("rule_id") or "").strip()
+        description = (raw.get("description") or "").strip()
+        mdd_section = (raw.get("mdd_section") or "").strip()
+        keywords    = _parse_keywords(raw.get("keywords", ""))
+        severity    = _normalise_severity(raw.get("severity", ""))
+        source      = _infer_source(rule_id)
+        check       = _slugify(rule_id) or _slugify(description[:48])
 
-        all_rules: list[dict] = []
-        seen_checks: set[str] = set()
+        # Supplement with stage default keywords if agent returned none
+        if not keywords:
+            keywords = STAGE_KEYWORDS.get(stage, [])[:6]
 
-        for i, (chunk, score) in enumerate(relevant_chunks):
-            if verbose:
-                preview = chunk[:60].replace("\n", " ")
-                print(
-                    f"[RuleExtractor]   chunk {i+1}/{len(relevant_chunks)} "
-                    f'score={score:.2f} — "{preview}..."',
-                    file=sys.stderr,
-                )
+        return {
+            "id":               None,            # assigned by val_build_rules
+            "stage":            stage,
+            "check_id_hint":    "2.x" if stage == "data_validation" else "3.x",
+            "check":            check,
+            "severity":         severity,
+            "source":           source,
+            "principle":        rule_id or "?",
+            "rule":             description,
+            "flag":             f"MDD missing required documentation: {description[:80]}" if description else "MDD documentation requirement not satisfied.",
+            "suggestion":       f"Add a '{mdd_section}' section to the MDD." if mdd_section else "Update the MDD to satisfy this requirement.",
+            "mdd_section_hint": mdd_section,
+            "keywords":         keywords,
+            "min_keyword_hits": max(1, min(2, len(keywords) // 2)),
+        }
 
-            prompt = _EXTRACTION_PROMPT.format(source=source, snippet=chunk)
-            raw_content = self._call_llm(prompt)
-            raw_rules = self._parse_llm_output(raw_content, source)
-
-            for raw in raw_rules:
-                check = raw.get("check", "").strip()
-                if not check or check in seen_checks:
-                    continue
-                seen_checks.add(check)
-                all_rules.append(self._normalise_rule(raw, source))
-
-        return all_rules
-
-    def extract_from_file(
+    def extract_from_agent(
         self,
-        path: Path,
-        source: Optional[str] = None,
-        max_pages: int = 30,
         verbose: bool = False,
+        per_call_timeout: int = 180,
     ) -> list[dict]:
         """
-        Extract rules from a PDF or plain-text file.
-
-        For PDFs, max_pages limits how many pages are read (default 30, up from 10,
-        because pre-filtering means the LLM only sees relevant chunks regardless of doc length).
-
-        Args:
-            path:      Path to the file
-            source:    Override the source label (defaults to filename)
-            max_pages: Maximum pages to read from PDFs
-            verbose:   Pass-through to extract_from_text
-
-        Returns:
-            List of normalised rule dicts
+        Query the agent once per validation stage and return normalised rules.
+        Deduplicates by `check` key across both stages.
         """
-        src_label = source or path.name
-        suffix = path.suffix.lower()
+        merged: dict[str, dict] = {}
 
-        try:
-            if suffix == ".pdf":
-                from pypdf import PdfReader
-                reader = PdfReader(str(path))
-                pages = reader.pages[:max_pages]
-                text = "\n".join(p.extract_text() or "" for p in pages)
-            elif suffix in (".txt", ".md"):
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            else:
-                print(
-                    f"[RuleExtractor] Unsupported file type: {path.suffix}",
-                    file=sys.stderr,
-                )
-                return []
-        except Exception as e:
-            print(f"[RuleExtractor] Could not read {path}: {e}", file=sys.stderr)
-            return []
+        for stage in ALLOWED_STAGES:
+            prompt = _build_stage_prompt(stage)
+            try:
+                raw_text = self._call_agent(prompt, timeout=per_call_timeout)
+            except requests.exceptions.RequestException as e:
+                print(f"[RuleExtractor] stage '{stage}' request failed ({e}) — skipping.", file=sys.stderr)
+                continue
 
-        return self.extract_from_text(text, src_label, verbose=verbose)
+            parsed = _parse_agent_rules(raw_text)
+            added = 0
+            for raw in parsed:
+                norm = self._normalise(raw, stage)
+                c = norm["check"]
+                if c and c not in merged:
+                    merged[c] = norm
+                    added += 1
+
+            if verbose:
+                print(f"[RuleExtractor] stage '{stage}': {len(parsed)} block(s), +{added} new, {len(merged)} total", file=sys.stderr)
+
+        if not merged:
+            print("[RuleExtractor] No rules extracted.", file=sys.stderr)
+        return list(merged.values())

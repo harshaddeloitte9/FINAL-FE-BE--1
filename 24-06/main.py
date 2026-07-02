@@ -1,17 +1,26 @@
 """
 main.py - FastAPI backend for the Credit Risk ML POC
 
-Exposes the existing pipeline logic as REST endpoints while preserving
-business logic from the original Streamlit app.
+Thin REST wrapper that exposes the latest pipeline logic from the
+Credit-Risk-Poc-main source-of-truth project.
 """
 
 import base64
 import io
 import json
+import importlib.util
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Union
+
+BACKEND_DIR = Path(__file__).resolve().parent
+SOURCE_OF_TRUTH_DIR = Path(__file__).resolve().parent.parent / "Credit-Risk-Poc-main"
+for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +29,12 @@ import pandas as pd
 import numpy as np
 import joblib
 
-from agent2 import Agent2
+_local_agent2_spec = importlib.util.spec_from_file_location("local_agent2", Path(__file__).resolve().parent / "agent2.py")
+if _local_agent2_spec is None or _local_agent2_spec.loader is None:
+    raise ImportError("Could not load local Agent2 from 24-06/agent2.py")
+_local_agent2_module = importlib.util.module_from_spec(_local_agent2_spec)
+_local_agent2_spec.loader.exec_module(_local_agent2_module)
+Agent2 = _local_agent2_module.Agent2
 from build_rules import RULES_PATH
 
 from utils import (
@@ -29,34 +43,240 @@ from utils import (
 )
 from preprocessing import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
+    get_feature_names_from_fitted_preprocessor,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
-    compute_univariate_gini, resolve_ead_configuration,
+    compute_univariate_gini,
 )
+try:
+    from feature_engineering import resolve_ead_configuration
+except ImportError:
+    _legacy_fe_path = Path(__file__).resolve().parent / "feature_engineering.py"
+    _legacy_fe_spec = importlib.util.spec_from_file_location("legacy_feature_engineering", _legacy_fe_path)
+    if _legacy_fe_spec is None or _legacy_fe_spec.loader is None:
+        raise
+    _legacy_fe = importlib.util.module_from_spec(_legacy_fe_spec)
+    _legacy_fe_spec.loader.exec_module(_legacy_fe)
+    resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
 from train import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
-from evaluate import (
-    compute_binary_metrics, compute_regression_metrics,
-    compute_heteroscedasticity_check, compute_roc_curve, compute_pr_curve,
-    compute_threshold_analysis, compute_score_distribution, compute_gain_chart,
-)
+import evaluate as eval_engine
+
+compute_binary_metrics = eval_engine.compute_binary_metrics
+compute_regression_metrics = eval_engine.compute_regression_metrics
+compute_heteroscedasticity_check = eval_engine.compute_heteroscedasticity_check
+
+_legacy_eval_path = Path(__file__).resolve().parent / "evaluate.py"
+_legacy_eval_spec = importlib.util.spec_from_file_location("legacy_evaluate", _legacy_eval_path)
+if _legacy_eval_spec is None or _legacy_eval_spec.loader is None:
+    raise ImportError(f"Could not load evaluation helpers from {_legacy_eval_path}")
+_legacy_eval = importlib.util.module_from_spec(_legacy_eval_spec)
+_legacy_eval_spec.loader.exec_module(_legacy_eval)
+
+compute_roc_curve = getattr(eval_engine, "compute_roc_curve", _legacy_eval.compute_roc_curve)
+compute_pr_curve = getattr(eval_engine, "compute_pr_curve", _legacy_eval.compute_pr_curve)
+compute_threshold_analysis = getattr(eval_engine, "compute_threshold_analysis", _legacy_eval.compute_threshold_analysis)
+compute_score_distribution = getattr(eval_engine, "compute_score_distribution", _legacy_eval.compute_score_distribution)
+compute_gain_chart = getattr(eval_engine, "compute_gain_chart", _legacy_eval.compute_gain_chart)
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
 )
+from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication
+
+_validation_agent2_path = SOURCE_OF_TRUTH_DIR / "validation_agent2.py"
+_validation_agent2_spec = importlib.util.spec_from_file_location("source_validation_agent2", _validation_agent2_path)
+if _validation_agent2_spec is None or _validation_agent2_spec.loader is None:
+    raise ImportError(f"Could not load ValidationAgent2 from {_validation_agent2_path}")
+_validation_agent2_module = importlib.util.module_from_spec(_validation_agent2_spec)
+_validation_agent2_spec.loader.exec_module(_validation_agent2_module)
+ValidationAgent2 = _validation_agent2_module.ValidationAgent2
+
+
+app = FastAPI()
+
+
+def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
+    agent = ValidationAgent2()
+    return agent.run_all_checks(val_df if val_df is not None else pd.DataFrame(), intake_json or {}, mdd_text or "")
+    
+def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
+    demo_mode = "flawed" if mode.lower() == "flawed" else "clean"
+    if demo_mode == "flawed":
+        model_data = {
+            "model_name": "PD_Model_Internal_v1",
+            "model_owner": "Unknown",
+            "owning_team": "Risk",
+            "lead_validator": "Reeyaz Miglani",
+            "model_type": "PD (Probability of Default)",
+            "model_version": "v1.0",
+            "model_tier": "Tier 1 — High Risk",
+            "model_purpose": "Credit risk model.",
+            "target_col": "default",
+            "algorithm": "XGBoost",
+            "default_definition": "Internal default indicator",
+            "calibration_method": "Not specified",
+            "macro_variables_mentioned": False,
+            "model_inventory_registered": False,
+            "independence_confirmed": False,
+        }
+        reported_metrics = {
+            "roc_auc": 0.78,
+            "gini": 0.56,
+            "ks": 0.48,
+            "cv_mean_auc": 0.73,
+            "accuracy": 0.79,
+            "precision": 0.61,
+            "recall": 0.72,
+            "f1": 0.65,
+        }
+        mdd_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "flawed_mdd.txt"
+        hyperparams_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "flawed_params.json"
+        demo_label = "Demo B"
+    else:
+        model_data = {
+            "model_name": "PD_XGBoost_RetailCredit_v2",
+            "model_owner": "Sarah Chen",
+            "owning_team": "Retail Credit Risk",
+            "lead_validator": "Reeyaz Miglani",
+            "model_type": "PD (Probability of Default)",
+            "model_version": "v2.1.0",
+            "model_tier": "Tier 2 — Medium Risk",
+            "model_purpose": (
+                "This model estimates the probability of default for unsecured retail credit customers. "
+                "Used for IFRS 9 ECL staging, credit decisioning, and risk appetite reporting. "
+                "Scope: personal loan portfolio only. Out of scope: mortgages, business lending."
+            ),
+            "default_definition": "90 days past due (IFRS 9 / CRR Art.178)",
+            "calibration_method": "Platt scaling (TTC)",
+            "macro_variables_mentioned": True,
+            "model_inventory_registered": True,
+            "independence_confirmed": True,
+        }
+        reported_metrics = {
+            "roc_auc": 0.82,
+            "gini": 0.64,
+            "ks": 0.58,
+            "cv_mean_auc": 0.80,
+            "accuracy": 0.85,
+            "precision": 0.72,
+            "recall": 0.71,
+            "f1": 0.72,
+        }
+        mdd_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "clean_mdd.txt"
+        hyperparams_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "clean_params.json"
+        demo_label = "Demo A"
+
+    try:
+        mdd_text = mdd_file.read_text(encoding="utf-8")
+    except Exception:
+        mdd_text = ""
+    try:
+        hyperparams = json.loads(hyperparams_file.read_text(encoding="utf-8"))
+    except Exception:
+        hyperparams = {}
+
+    return {
+        "demo_mode": demo_mode,
+        "demo_label": demo_label,
+        "val_intake_data": {**model_data, "mdd_text": mdd_text},
+        "val_mdd_text": mdd_text,
+        "val_mdd_reported_metrics": reported_metrics,
+        "val_hyperparams": hyperparams,
+        "chk_inventory": True,
+        "chk_tier": True,
+        "chk_artifacts": True,
+        "chk_prev_findings": True,
+        "chk_reg_scope": True,
+        "chk_independence": True,
+        "chk_plan_approved": True,
+        "chk_attestation": True,
+        "display": {
+            "title": "Stage 1 — Intake & Governance",
+            "description": "Capture model metadata, upload all required artifacts, and complete the governance attestation checklist before proceeding to automated validation stages.",
+            "modelMetadata": {
+                "title": "Model metadata",
+                "description": "Key registration details supplied by the development team.",
+                "registeredLabel": "Registered",
+                "items": [
+                    ["Model ID", "CR-PD-XGB-027"],
+                    ["Model name", "Retail PD — XGBoost Champion"],
+                    ["Owner", "A. Khurana · Risk Validation"],
+                    ["Developer", "Credit Risk Modelling, EMEA"],
+                    ["Version", "v1.7.6"],
+                    ["Risk tier", "Tier 2 — Material"],
+                    ["Last validated", "12 Apr 2026"],
+                    ["Next review", "12 Jul 2026"],
+                ],
+            },
+            "targetDefinition": {
+                "title": "Target definition",
+                "expression": "default_12m ∈ {0, 1}",
+                "detail": "positive class = 90+ DPD within 12m",
+                "baseRateLabel": "Base rate",
+                "baseRate": "4.7%",
+                "sampleSizeLabel": "Sample size",
+                "sampleSize": "219,486",
+            },
+            "riskTier": {
+                "title": "Risk tier",
+                "value": "Tier 2",
+                "description": "Material — quarterly independent validation required.",
+            },
+            "artifacts": [
+                {"fileName": "retail_pd_validation.csv", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 · 09:13", "required": True},
+                {"fileName": "retail_pd_mdd.pdf", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 · 09:15", "required": True},
+                {"fileName": "training_pipeline.zip", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 · 09:17", "required": True},
+                {"fileName": "data_profile.xlsx", "status": "Optional", "timestamp": "Pending review", "required": False},
+                {"fileName": "assumptions_limitations.pdf", "status": "Optional", "timestamp": "Pending review", "required": False},
+                {"fileName": "performance_report.xlsx", "status": "Optional", "timestamp": "Pending review", "required": False},
+            ],
+            "artifactSummary": "3 required · 3 optional",
+            "artifactTitle": "Artifact inventory",
+            "artifactDescription": "Uploaded evidence to support subsequent validation stages.",
+            "governance": {
+                "title": "Governance attestation",
+                "description": "Confirm the model and validation plan are ready to proceed.",
+                "status": "Pending review",
+                "checklist": [
+                    "Model is registered in the model inventory",
+                    "Risk tier assignment has been documented",
+                    "Submitted artifacts cover dataset, MDD, and training code",
+                    "Previous validation findings (if any) have been reviewed",
+                    "Regulatory scope (IFRS 9 / SS1/23 / SS11/13) is identified",
+                    "Independent validation team has no conflict of interest",
+                    "Validation plan has been approved by the Head of Model Risk",
+                ],
+            },
+            "nextStep": {
+                "description": "Once intake is confirmed, proceed to Stage 2 data validation and automated checks.",
+                "label": "Proceed to Stage 2",
+                "path": "/validation/data-quality",
+            },
+        },
+    }
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/validation/intake")
+async def validation_intake(mode: str = "clean") -> Dict[str, Any]:
+    return _build_validation_intake_snapshot(mode)
 
 @app.post("/data/feature-decision-log")
 async def feature_decision_log(
@@ -222,6 +442,45 @@ def _from_base64(encoded: str) -> Any:
         raise HTTPException(status_code=400, detail=f"Failed to load artifact: {exc}")
 
 
+def _infer_target_column(df: pd.DataFrame, requested_target: Optional[str] = None) -> Optional[str]:
+    if requested_target is not None:
+        if requested_target not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Target column '{requested_target}' not found")
+        return requested_target
+
+    target_candidates = detect_target_candidates(df)
+    priority_names = {"default", "target", "label", "y", "loan_status"}
+    for col in df.columns.astype(str):
+        col_lower = col.lower()
+        if col_lower in priority_names:
+            return col
+
+    if target_candidates:
+        preferred = None
+        for candidate in target_candidates:
+            candidate_lower = candidate.lower()
+            if any(keyword in candidate_lower for keyword in ("default", "target", "label", "y", "outcome", "flag", "risk")):
+                preferred = candidate
+                break
+        if preferred is not None:
+            return preferred
+        return target_candidates[0]
+
+    for col in df.columns.astype(str):
+        col_lower = col.lower()
+        if col_lower in {"loan_status", "default", "target", "label", "y"}:
+            return col
+
+    for col in reversed(df.columns.tolist()):
+        if "id" in col.lower():
+            continue
+        col_vals = df[col].dropna().unique()
+        if set(col_vals).issubset({0, 1, 0.0, 1.0}) and len(col_vals) == 2:
+            return col
+
+    return None
+
+
 def _build_data_profile(
     df: pd.DataFrame,
     target_col: Optional[str] = None,
@@ -229,15 +488,14 @@ def _build_data_profile(
 ) -> Dict[str, Any]:
     col_types = detect_column_types(df)
     target_candidates = detect_target_candidates(df)
+    resolved_target_col = _infer_target_column(df, target_col)
     task_type = None
-    if target_col is not None:
-        if target_col not in df.columns:
-            raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
-        task_type = detect_task_type(df[target_col])
+    if resolved_target_col is not None:
+        task_type = detect_task_type(df[resolved_target_col])
 
     leakage_risk_cols: List[str] = []
-    if target_col is not None and task_type == "binary":
-        target_numeric = pd.to_numeric(df[target_col], errors="coerce")
+    if resolved_target_col is not None and task_type == "binary":
+        target_numeric = pd.to_numeric(df[resolved_target_col], errors="coerce")
         if target_numeric.notna().sum() >= 2:
             for col in col_types.get("numeric", []):
                 if col == target_col:
@@ -278,14 +536,36 @@ def _build_data_profile(
         missing_by_column[col] = {"count": count, "percentage": pct}
 
     duplicate_rows = int(df.duplicated().sum())
+    duplicate_rate = round((duplicate_rows / len(df) * 100) if len(df) else 0.0, 4)
     numeric_feature_count = len(col_types.get("numeric", []))
     categorical_feature_count = len(col_types.get("categorical", []))
 
+    outlier_analysis: Dict[str, Any] = {}
+    for col in list(col_types.get("numeric", []))[:8]:
+        try:
+            series = pd.to_numeric(df[col], errors="coerce").dropna()
+            if series.empty:
+                continue
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            lower = q1 - 1.5 * iqr
+            upper = q3 + 1.5 * iqr
+            outliers = ((series < lower) | (series > upper)).sum()
+            outlier_frac = round(float(outliers / len(series)), 4) if len(series) else 0.0
+            outlier_analysis[col] = {
+                "outlier_count": int(outliers),
+                "outlier_fraction": outlier_frac,
+                "has_outliers": bool(outlier_frac > 0.02),
+            }
+        except Exception:
+            continue
+
     class_distribution: Optional[Dict[str, int]] = None
-    if target_col is not None and target_col in df.columns:
+    if resolved_target_col is not None and resolved_target_col in df.columns:
         class_distribution = {
             str(k): int(v)
-            for k, v in df[target_col].value_counts(dropna=False).to_dict().items()
+            for k, v in df[resolved_target_col].value_counts(dropna=False).to_dict().items()
         }
 
     # For large datasets, sample data for expensive computations
@@ -360,10 +640,43 @@ def _build_data_profile(
             "Sample Values": sample_values,
         })
 
+    target_summary: Dict[str, Any] = {}
+    if resolved_target_col is not None and resolved_target_col in df.columns:
+        target_values = df[resolved_target_col].dropna()
+        task_label = "Unknown"
+        if task_type == "binary":
+            task_label = "Binary classification"
+        elif task_type == "multiclass":
+            task_label = "Multiclass classification"
+        elif task_type == "regression":
+            task_label = "Regression"
+
+        imbalance_ratio: Optional[float] = None
+        is_imbalanced = False
+        if len(target_values) > 0:
+            counts = target_values.value_counts(dropna=False)
+            if len(counts) >= 2 and counts.min() > 0:
+                imbalance_ratio = round(float(counts.max() / counts.min()), 2)
+                is_imbalanced = imbalance_ratio > 3
+
+        target_summary = {
+            "selected_target": resolved_target_col,
+            "task_type": task_type,
+            "task_label": task_label,
+            "target_candidates": target_candidates,
+            "imbalance_ratio": imbalance_ratio,
+            "is_imbalanced": is_imbalanced,
+            "suggestion": (
+                "Imbalanced target distribution detected; consider class weighting or resampling."
+                if is_imbalanced else "Target distribution appears balanced for the current profile."
+            ),
+        }
+
     profile = {
         "shape": list(df.shape),
         "columns": df.columns.astype(str).tolist(),
         "col_types": col_types,
+        "target_col": resolved_target_col,
         "target_candidates": target_candidates,
         "task_type": task_type,
         "dataset_name": dataset_name,
@@ -373,18 +686,21 @@ def _build_data_profile(
         "missing_percentage": missing_percentage,
         "missing_by_column": missing_by_column,
         "duplicate_rows": duplicate_rows,
+        "duplicate_rate": duplicate_rate,
         "numeric_feature_count": numeric_feature_count,
         "categorical_feature_count": categorical_feature_count,
         "class_distribution": class_distribution,
+        "outlier_analysis": outlier_analysis,
         "correlation_matrix": correlation_matrix,
         "summary_stats": summary_stats,
         "column_type_table": column_type_table,
         "distribution_histograms": distribution_histograms,
         "data_dictionary": data_dictionary,
         "data_preview": _serialize_dataframe(df, max_rows=10)["preview"],
+        "target_summary": target_summary,
     }
 
-    if target_col is not None:
+    if resolved_target_col is not None:
         agent = _load_agent2()
         if agent is not None:
             try:
@@ -393,12 +709,21 @@ def _build_data_profile(
                     "n_rows": len(df),
                     "n_cols": len(df.columns),
                     "missing_pct": round(float(df.isna().mean().mean()), 4),
-                    "target_col": target_col,
+                    "target_col": resolved_target_col,
                 })
                 profile["agent2_flags_data"] = agent.get_stage_summary("data")["flags"]
                 profile["agent2_report"] = agent.get_full_report()
-            except Exception:
-                profile["agent2_error"] = "Agent2 data check failed"
+            except Exception as exc:
+                profile["agent2_error"] = f"Agent2 data check failed: {exc}"
+                profile["agent2_flags_data"] = []
+                profile["agent2_report"] = {
+                    "metadata": {"generated_at": None, "rules_source": "rag_store/rules.json", "stages_checked": [], "total_rules": 0, "rules_passed": 0, "rules_flagged": 0, "compliance_score": 0},
+                    "summary": {"high_severity": 0, "medium_severity": 0, "low_severity": 0, "overall_status": "WARN"},
+                    "flags_by_stage": {"data": []},
+                    "flags_by_source": {},
+                    "all_flags": [],
+                    "model_tier": None,
+                }
 
     return profile
 
@@ -415,8 +740,15 @@ async def upload_data(
     synthetic_samples: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
-    dataset_name = file.filename if file is not None else None
-    return _build_data_profile(df, dataset_name=dataset_name)
+    dataset_name = file.filename if file is not None else "Synthetic Credit Dataset"
+    profile = _build_data_profile(df, dataset_name=dataset_name)
+    if synthetic_samples and synthetic_samples > 0 and file is None:
+        profile["csv_text"] = df.to_csv(index=False)
+        profile["source_type"] = "synthetic"
+        profile["synthetic_samples"] = int(synthetic_samples)
+    else:
+        profile["source_type"] = "file"
+    return profile
 
 
 @app.post("/data/profile")
@@ -440,36 +772,117 @@ async def preprocess_data(
     csv_text: Optional[str] = Form(None),
     target_col: str = Form(...),
     synthetic_samples: Optional[int] = Form(None),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     col_types = detect_column_types(df)
     if target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    test_size = float(test_size)
+    val_size = float(val_size)
+    if not 0 < test_size < 1:
+        raise HTTPException(status_code=400, detail="test_size must be between 0 and 1")
+    if not 0 < val_size < 1:
+        raise HTTPException(status_code=400, detail="val_size must be between 0 and 1")
+    if test_size + val_size >= 1:
+        raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
+
     task_type = detect_task_type(df[target_col])
     X, y, clean_info = finalize_xy(df, col_types, target_col)
+
+    # Preserve original preprocessing reporting semantics:
+    # build the preprocessing strategy on the full cleaned dataset before splitting.
+    prep_report = build_preprocessing_report(X.assign(**{target_col: y}), col_types, target_col)
+
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(
-        X, y, test_size=0.15, val_size=0.15,
-        task_type=task_type, random_state=42,
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
     )
-    prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
     preprocessor = rebuild_preprocessor_for(X_train, col_types, target_col, prep_report)
+    preprocessor.fit(X_train)
+    processed_matrix = preprocessor.transform(X_train)
+    processed_feature_names = get_feature_names_from_fitted_preprocessor(preprocessor)
+    processed_df = pd.DataFrame(processed_matrix, columns=processed_feature_names)
+    processed_df[target_col] = y_train.reset_index(drop=True)
+
+    def _summary_row(column: str, feature_type: str, scaler: str, imputer: str, encoding: str, outlier_strategy: str):
+        return {
+            "feature": column,
+            "type": feature_type,
+            "scaler": scaler,
+            "imputer": imputer,
+            "encoding": encoding,
+            "outlier_strategy": outlier_strategy,
+        }
+
+    strategy_summary = []
+    for col, info in prep_report.get("numeric", {}).items():
+        scaler = "Robust" if info.get("scaler") == "robust" else "Standard"
+        imputer = info.get("imputer", "mean").capitalize()
+        encoding = "-"
+        outlier_strategy = "Robust scaling" if info.get("has_outliers") else "Standard scaling"
+        strategy_summary.append(_summary_row(col, "Numeric", scaler, imputer, encoding, outlier_strategy))
+
+    for col, info in prep_report.get("categorical", {}).items():
+        scaler = "-"
+        imputer = "Mode" if info.get("missing_pct", 0) >= 0 else "Mode"
+        encoding = "OneHot" if info.get("encoding") == "onehot" else "Ordinal"
+        outlier_strategy = "-"
+        strategy_summary.append(_summary_row(col, "Categorical", scaler, imputer, encoding, outlier_strategy))
+
+    for col in prep_report.get("boolean", {}):
+        strategy_summary.append(_summary_row(col, "Boolean", "-", "-", "-", "-"))
+
+    for col in prep_report.get("datetime", {}):
+        strategy_summary.append(_summary_row(col, "Datetime", "-", "-", "-", "-"))
+
     feature_names = list(X_train.columns)
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
+
+    class_distribution_chart = []
+    for split_name in ["train", "val", "test"]:
+        class_dist = split_stats.get(f"{split_name}_class_dist", {}) or {}
+        for cls, prop in class_dist.items():
+            class_distribution_chart.append({
+                "split": split_name.capitalize(),
+                "class": str(cls),
+                "proportion": float(prop),
+            })
+
+    summary_metrics = {
+        "features_basic": X_train.shape[1],
+        "numeric_columns": len(prep_report.get("numeric", {})),
+        "categorical_columns": len(prep_report.get("categorical", {})),
+        "duplicates_removed": clean_info.get("duplicates_removed", 0),
+        "ecl_only_cols_dropped": clean_info.get("ecl_only_cols_dropped", []),
+    }
+
     return {
         "col_types": col_types,
         "target_col": target_col,
         "feature_names": feature_names,
+        "processed_feature_names": processed_feature_names,
         "x_shape": list(X_train.shape),
         "y_shape": list(y_train.shape),
         "feature_count": X_train.shape[1],
-        "duplicates_removed": clean_info.get("duplicates_removed", 0),
         "numeric_feature_count": len(prep_report.get("numeric", {})),
         "categorical_feature_count": len(prep_report.get("categorical", {})),
+        "duplicates_removed": clean_info.get("duplicates_removed", 0),
+        "ecl_only_cols_dropped": clean_info.get("ecl_only_cols_dropped", []),
+        "split_config": {"test_size": test_size, "val_size": val_size, "random_seed": int(random_seed)},
         "split_stats": split_stats,
+        "class_distribution_chart": class_distribution_chart,
+        "summary_metrics": summary_metrics,
         "x_preview": _serialize_dataframe(X_train, max_rows=5)["preview"],
+        "processed_dataset_preview": _serialize_dataframe(processed_df, max_rows=5)["preview"],
+        "target_preview": y_train.head(5).replace({pd.NA: None}).tolist(),
         "y_preview": y_train.head(5).replace({pd.NA: None}).tolist(),
         "preprocessing_report": prep_report,
-        "preprocessor_artifact": _to_base64(preprocessor),
+        "preprocessing_strategy_summary": strategy_summary,
+        "processed_dataset_csv": processed_df.to_csv(index=False),
     }
 
 
@@ -513,14 +926,47 @@ async def feature_engineering(
         ye_months=str(ead_years_months).lower() in {"true", "1", "yes"},
         tm_months=str(ead_term_months).lower() in {"true", "1", "yes"},
     )
+    engineered_feature_names = list(X_engineered.columns.astype(str))
+    dropped_features = [col for col in fe_summary.get("removed", []) if col in X_train.columns]
+    selected_features = engineered_feature_names
+    encoding_summary = {
+        "log_transform_columns": plan.get("log_transform_cols", []),
+        "interaction_pairs": plan.get("interaction_pairs", []),
+        "binning_columns": plan.get("binning_cols", [])[:5],
+        "frequency_encoding_columns": plan.get("freq_encoding_cols", []),
+        "woe_columns": plan.get("woe_cols", []),
+        "low_variance_columns": plan.get("low_variance_cols", []),
+        "low_iv_columns": plan.get("low_iv_cols", []),
+    }
+    feature_engineering_report = {
+        "applied_steps": plan.get("applied_steps", []),
+        "summary": fe_summary,
+        "multicollinearity": plan.get("multicollinearity", {}),
+        "gini_scores": gini_scores,
+        "ead_configuration": ead_configuration,
+    }
+    feature_importance_summary = {
+        "mi_scores": plan.get("mi_scores", {}),
+        "gini_scores": gini_scores,
+        "iv_scores": plan.get("iv_scores", {}),
+    }
+
     return {
         "col_types": col_types,
         "target_col": target_col,
         "task_type": task_type,
         "feature_engineering_plan": plan,
         "feature_engineering_summary": fe_summary,
+        "engineered_feature_names": engineered_feature_names,
+        "selected_features": selected_features,
+        "dropped_features": dropped_features,
+        "encoding_summary": encoding_summary,
+        "feature_engineering_report": feature_engineering_report,
+        "feature_importance_summary": feature_importance_summary,
         "x_engineered_shape": list(X_engineered.shape),
         "x_engineered_preview": _serialize_dataframe(X_engineered, max_rows=5)["preview"],
+        "final_engineered_dataset_preview": _serialize_dataframe(X_engineered, max_rows=5)["preview"],
+        "x_engineered_csv": X_engineered.to_csv(index=False),
         "gini_scores": gini_scores,
         "ead_configuration": ead_configuration,
         "available_numeric_columns": [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])],

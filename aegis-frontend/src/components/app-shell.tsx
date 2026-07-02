@@ -1,6 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
-  LayoutDashboard,
   UploadCloud,
   Database,
   ShieldCheck,
@@ -29,6 +28,13 @@ import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean };
+type ModelTab = { to: string; label: string; key: "pd" | "lgd" | "ead" };
+
+const modelTabs: ModelTab[] = [
+  { to: "/pd", label: "PD Model", key: "pd" },
+  { to: "/lgd", label: "LGD Model", key: "lgd" },
+  { to: "/ead", label: "EAD Model", key: "ead" },
+];
 
 const developmentNav: NavItem[] = [
   { to: "/data-upload", label: "Data Upload", icon: UploadCloud },
@@ -45,8 +51,7 @@ const developmentNav: NavItem[] = [
 ];
 
 const validationNav: NavItem[] = [
-  { to: "/validation", label: "Overview", icon: LayoutDashboard, exact: true },
-  { to: "/validation/intake", label: "Intake & Governance", icon: FileText },
+  { to: "/validation/intake", label: "Intake & Governance", icon: FileText, exact: true },
   { to: "/validation/data-quality", label: "Data Validation", icon: Database },
   { to: "/validation/conceptual", label: "Conceptual Soundness", icon: BookOpen },
   { to: "/validation/challenger", label: "Replication & Benchmarking", icon: GitCompareArrows },
@@ -56,7 +61,12 @@ const validationNav: NavItem[] = [
   { to: "/validation/findings", label: "Findings & Final Report", icon: ClipboardCheck },
 ];
 
-const developmentPaths = developmentNav.map((n) => n.to);
+const developmentPaths = [
+  ...developmentNav.map((n) => n.to),
+  "/pd",
+  "/lgd",
+  "/ead",
+];
 
 function resolveWorkspace(pathname: string): "landing" | "development" | "validation" {
   if (pathname === "/") return "landing";
@@ -65,13 +75,38 @@ function resolveWorkspace(pathname: string): "landing" | "development" | "valida
   return "landing";
 }
 
+function resolveActiveModelTab(pathname: string): ModelTab["key"] {
+  if (pathname.startsWith("/lgd")) return "lgd";
+  if (pathname.startsWith("/ead")) return "ead";
+  if (pathname.startsWith("/pd") || [
+    "/data-upload",
+    "/profiling",
+    "/preprocessing",
+    "/features",
+    "/models",
+    "/training",
+    "/evaluation",
+    "/explainability",
+    "/ecl-provisions",
+    "/assistant",
+    "/settings",
+    "/development",
+  ].includes(pathname)) {
+    return "pd";
+  }
+  return "pd";
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const workspace = resolveWorkspace(pathname);
 
   const isLanding = workspace === "landing";
+  // Hide the shared model tabs on the Data Upload page per UX request
+  const showModelTabs = workspace === "development" && pathname !== "/data-upload";
   const nav = workspace === "validation" ? validationNav : developmentNav;
+  const activeModelTab = resolveActiveModelTab(pathname);
   const workspaceLabel = workspace === "validation" ? "Model Validation" : workspace === "development" ? "Model Development" : "Workspace";
 
   return (
@@ -240,6 +275,30 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </header>
+
+        {showModelTabs && (
+          <div className="border-b border-border/70 bg-background/80 px-4 md:px-8">
+            <div className="mx-auto flex max-w-7xl flex-wrap gap-2 py-3">
+              {modelTabs.map((tab) => {
+                const active = activeModelTab === tab.key;
+                return (
+                  <Link
+                    key={tab.to}
+                    to={tab.to}
+                    className={cn(
+                      "rounded-full border px-4 py-2 text-sm font-medium transition-colors",
+                      active
+                        ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                        : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                    )}
+                  >
+                    {tab.label}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
       </div>

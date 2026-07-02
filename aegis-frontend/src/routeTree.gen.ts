@@ -14,11 +14,14 @@ import { Route as TrainingRouteImport } from './routes/training'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ProfilingRouteImport } from './routes/profiling'
 import { Route as PreprocessingRouteImport } from './routes/preprocessing'
+import { Route as PdRouteImport } from './routes/pd'
 import { Route as ModelsRouteImport } from './routes/models'
+import { Route as LgdRouteImport } from './routes/lgd'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as ExplainabilityRouteImport } from './routes/explainability'
 import { Route as EvaluationRouteImport } from './routes/evaluation'
 import { Route as EclProvisionsRouteImport } from './routes/ecl-provisions'
+import { Route as EadRouteImport } from './routes/ead'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
 import { Route as AssistantRouteImport } from './routes/assistant'
@@ -58,9 +61,19 @@ const PreprocessingRoute = PreprocessingRouteImport.update({
   path: '/preprocessing',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PdRoute = PdRouteImport.update({
+  id: '/pd',
+  path: '/pd',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ModelsRoute = ModelsRouteImport.update({
   id: '/models',
   path: '/models',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LgdRoute = LgdRouteImport.update({
+  id: '/lgd',
+  path: '/lgd',
   getParentRoute: () => rootRouteImport,
 } as any)
 const FeaturesRoute = FeaturesRouteImport.update({
@@ -81,6 +94,11 @@ const EvaluationRoute = EvaluationRouteImport.update({
 const EclProvisionsRoute = EclProvisionsRouteImport.update({
   id: '/ecl-provisions',
   path: '/ecl-provisions',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EadRoute = EadRouteImport.update({
+  id: '/ead',
+  path: '/ead',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DevelopmentRoute = DevelopmentRouteImport.update({
@@ -154,11 +172,14 @@ export interface FileRoutesByFullPath {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ead': typeof EadRoute
   '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/lgd': typeof LgdRoute
   '/models': typeof ModelsRoute
+  '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
   '/settings': typeof SettingsRoute
@@ -179,11 +200,14 @@ export interface FileRoutesByTo {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ead': typeof EadRoute
   '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/lgd': typeof LgdRoute
   '/models': typeof ModelsRoute
+  '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
   '/settings': typeof SettingsRoute
@@ -204,11 +228,14 @@ export interface FileRoutesById {
   '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
+  '/ead': typeof EadRoute
   '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/lgd': typeof LgdRoute
   '/models': typeof ModelsRoute
+  '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
   '/settings': typeof SettingsRoute
@@ -231,11 +258,14 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ead'
     | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/lgd'
     | '/models'
+    | '/pd'
     | '/preprocessing'
     | '/profiling'
     | '/settings'
@@ -256,11 +286,14 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ead'
     | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/lgd'
     | '/models'
+    | '/pd'
     | '/preprocessing'
     | '/profiling'
     | '/settings'
@@ -280,11 +313,14 @@ export interface FileRouteTypes {
     | '/assistant'
     | '/data-upload'
     | '/development'
+    | '/ead'
     | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/lgd'
     | '/models'
+    | '/pd'
     | '/preprocessing'
     | '/profiling'
     | '/settings'
@@ -306,11 +342,14 @@ export interface RootRouteChildren {
   AssistantRoute: typeof AssistantRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
+  EadRoute: typeof EadRoute
   EclProvisionsRoute: typeof EclProvisionsRoute
   EvaluationRoute: typeof EvaluationRoute
   ExplainabilityRoute: typeof ExplainabilityRoute
   FeaturesRoute: typeof FeaturesRoute
+  LgdRoute: typeof LgdRoute
   ModelsRoute: typeof ModelsRoute
+  PdRoute: typeof PdRoute
   PreprocessingRoute: typeof PreprocessingRoute
   ProfilingRoute: typeof ProfilingRoute
   SettingsRoute: typeof SettingsRoute
@@ -355,11 +394,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PreprocessingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/pd': {
+      id: '/pd'
+      path: '/pd'
+      fullPath: '/pd'
+      preLoaderRoute: typeof PdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/models': {
       id: '/models'
       path: '/models'
       fullPath: '/models'
       preLoaderRoute: typeof ModelsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/lgd': {
+      id: '/lgd'
+      path: '/lgd'
+      fullPath: '/lgd'
+      preLoaderRoute: typeof LgdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/features': {
@@ -388,6 +441,13 @@ declare module '@tanstack/react-router' {
       path: '/ecl-provisions'
       fullPath: '/ecl-provisions'
       preLoaderRoute: typeof EclProvisionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ead': {
+      id: '/ead'
+      path: '/ead'
+      fullPath: '/ead'
+      preLoaderRoute: typeof EadRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/development': {
@@ -517,11 +577,14 @@ const rootRouteChildren: RootRouteChildren = {
   AssistantRoute: AssistantRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
+  EadRoute: EadRoute,
   EclProvisionsRoute: EclProvisionsRoute,
   EvaluationRoute: EvaluationRoute,
   ExplainabilityRoute: ExplainabilityRoute,
   FeaturesRoute: FeaturesRoute,
+  LgdRoute: LgdRoute,
   ModelsRoute: ModelsRoute,
+  PdRoute: PdRoute,
   PreprocessingRoute: PreprocessingRoute,
   ProfilingRoute: ProfilingRoute,
   SettingsRoute: SettingsRoute,

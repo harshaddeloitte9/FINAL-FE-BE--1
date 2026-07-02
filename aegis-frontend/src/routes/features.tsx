@@ -4,7 +4,7 @@ import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Loader, ArrowLeft, ArrowRight } from "lucide-react";
+import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download } from "lucide-react";
 
 export const Route = createFileRoute("/features")({
   head: () => ({ meta: [{ title: "Feature Engineering — Aegis Credit" }] }),
@@ -17,8 +17,16 @@ interface FeatureEngineeringResponse {
   task_type?: string;
   feature_engineering_plan?: any;
   feature_engineering_summary?: any;
+  engineered_feature_names?: string[];
+  selected_features?: string[];
+  dropped_features?: string[];
+  encoding_summary?: Record<string, any>;
+  feature_engineering_report?: Record<string, any>;
+  feature_importance_summary?: Record<string, any>;
   x_engineered_shape?: number[];
   x_engineered_preview?: any[];
+  final_engineered_dataset_preview?: any[];
+  x_engineered_csv?: string;
   gini_scores?: Record<string, number>;
   ead_configuration?: {
     mode?: string;
@@ -40,14 +48,6 @@ function Features() {
   const [engineeringResult, setEngineeringResult] = useState<FeatureEngineeringResponse | null>(null);
   const [vifSortKey, setVifSortKey] = useState<"feature" | "value">("value");
   const [vifSortAsc, setVifSortAsc] = useState(false);
-  const [eadMode, setEadMode] = useState<"outstanding_balance" | "estimate">("outstanding_balance");
-  const [eadCol, setEadCol] = useState<string>("");
-  const [loanCol, setLoanCol] = useState<string>("");
-  const [interestCol, setInterestCol] = useState<string>("");
-  const [yearsCol, setYearsCol] = useState<string>("");
-  const [termCol, setTermCol] = useState<string>("");
-  const [yearsMonths, setYearsMonths] = useState(false);
-  const [termMonths, setTermMonths] = useState(false);
 
   useEffect(() => {
     if (!file || !profile) {
@@ -74,14 +74,6 @@ function Features() {
         const form = new FormData();
         form.append("file", file);
         form.append("target_col", target_col);
-        form.append("ead_mode", eadMode);
-        form.append("ead_col", eadCol || "");
-        form.append("ead_loan_col", loanCol || "");
-        form.append("ead_interest_col", interestCol || "");
-        form.append("ead_years_col", yearsCol || "");
-        form.append("ead_term_col", termCol || "");
-        form.append("ead_years_months", yearsMonths ? "true" : "false");
-        form.append("ead_term_months", termMonths ? "true" : "false");
 
         const result = await formUpload<FeatureEngineeringResponse>("/data/feature-engineering", form);
         setEngineeringResult(result);
@@ -94,13 +86,26 @@ function Features() {
     };
 
     runFeatureEngineering();
-  }, [file, profile, eadMode, eadCol, loanCol, interestCol, yearsCol, termCol, yearsMonths, termMonths]);
+  }, [file, profile]);
 
   const plan = engineeringResult?.feature_engineering_plan ?? {};
   const summary = engineeringResult?.feature_engineering_summary ?? {};
 
   const addedFeatures = Array.isArray(summary.added) ? summary.added : [];
   const removedFeatures = Array.isArray(summary.removed) ? summary.removed : [];
+  const engineeredFeatureNames = Array.isArray(engineeringResult?.engineered_feature_names) ? engineeringResult.engineered_feature_names : [];
+  const selectedFeatures = Array.isArray(engineeringResult?.selected_features) && engineeringResult.selected_features.length > 0
+    ? engineeringResult.selected_features
+    : engineeredFeatureNames;
+  const droppedFeatures = Array.isArray(engineeringResult?.dropped_features) && engineeringResult.dropped_features.length > 0
+    ? engineeringResult.dropped_features
+    : removedFeatures;
+  const encodingSummary = engineeringResult?.encoding_summary && typeof engineeringResult.encoding_summary === "object"
+    ? engineeringResult.encoding_summary
+    : {};
+  const featureEngineeringReport = engineeringResult?.feature_engineering_report && typeof engineeringResult.feature_engineering_report === "object"
+    ? engineeringResult.feature_engineering_report
+    : {};
   const transformedSteps = Array.isArray(summary.transformed) ? summary.transformed : [];
   const appliedSteps = Array.isArray(plan.applied_steps) ? plan.applied_steps : [];
   const miScores = plan.mi_scores && typeof plan.mi_scores === "object" ? plan.mi_scores : {};
@@ -145,6 +150,19 @@ function Features() {
     }
   };
 
+  const downloadEngineeredDataset = () => {
+    if (!engineeringResult?.x_engineered_csv) return;
+    const blob = new Blob([engineeringResult.x_engineered_csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "engineered_dataset.csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const vifRows = useMemo(() => {
     return Object.entries(vifMap).map(([feature, value]) => ({ feature, value: Number(value) }));
   }, [vifMap]);
@@ -182,39 +200,6 @@ function Features() {
     () => Object.entries(engineeringResult?.gini_scores ?? {}).map(([feature, score]) => ({ feature, score: Number(score) })),
     [engineeringResult],
   );
-
-  useEffect(() => {
-    const selected = engineeringResult?.ead_configuration?.selected;
-    if (!selected) {
-      return;
-    }
-    if (selected.outstanding_balance_col) {
-      setEadCol(selected.outstanding_balance_col);
-    }
-    if (selected.loan_amount) {
-      setLoanCol(selected.loan_amount);
-    }
-    if (selected.interest_rate) {
-      setInterestCol(selected.interest_rate);
-    }
-    if (selected.years_elapsed) {
-      setYearsCol(selected.years_elapsed);
-    }
-    if (selected.term) {
-      setTermCol(selected.term);
-    }
-    if (typeof selected.years_elapsed_is_months === "boolean") {
-      setYearsMonths(selected.years_elapsed_is_months);
-    }
-    if (typeof selected.term_is_months === "boolean") {
-      setTermMonths(selected.term_is_months);
-    }
-    if (selected.outstanding_balance_col) {
-      setEadMode("outstanding_balance");
-    } else if (selected.loan_amount || selected.interest_rate || selected.years_elapsed || selected.term) {
-      setEadMode("estimate");
-    }
-  }, [engineeringResult]);
 
   const canProceed = !!engineeringResult && !loading && !error;
 
@@ -324,6 +309,36 @@ function Features() {
             <h2 className="text-base font-semibold">Feature Engineering Plan</h2>
             <p className="text-xs text-muted-foreground">The same transformations learned on the training split and applied to validation/test.</p>
           </div>
+          <button
+            type="button"
+            className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
+            onClick={downloadEngineeredDataset}
+          >
+            <Download className="h-4 w-4" />
+            Download engineered dataset
+          </button>
+        </div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <div className="rounded-xl border border-border bg-background p-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Selected features</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {selectedFeatures.length > 0 ? selectedFeatures.slice(0, 20).map((feature: string) => (
+                <span key={feature} className="rounded-full border border-border bg-primary/10 px-2 py-1 font-mono text-[10px]">
+                  {feature}
+                </span>
+              )) : <span className="text-sm text-muted-foreground">No selected features available.</span>}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-background p-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Dropped features</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {droppedFeatures.length > 0 ? droppedFeatures.map((feature: string) => (
+                <span key={feature} className="rounded-full border border-border bg-muted/40 px-2 py-1 font-mono text-[10px]">
+                  {feature}
+                </span>
+              )) : <span className="text-sm text-muted-foreground">No features were dropped.</span>}
+            </div>
+          </div>
         </div>
         <div className="mt-4 space-y-3 text-sm">
           {appliedSteps.length > 0 ? (
@@ -350,116 +365,26 @@ function Features() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">Exposure at Default (EAD) source for ECL</h2>
-            <p className="text-xs text-muted-foreground">This mirrors the original Streamlit step and is used for downstream ECL calculations.</p>
-          </div>
-        </div>
-        <div className="mt-4 space-y-4 text-sm">
-          <div className="rounded-xl border border-border bg-background p-3">
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Does your dataset contain an outstanding balance column?</label>
-            <div className="mt-2 space-y-2">
-              <label className="flex items-center gap-2 rounded border border-border px-3 py-2">
-                <input
-                  type="radio"
-                  checked={eadMode === "outstanding_balance"}
-                  onChange={() => setEadMode("outstanding_balance")}
-                />
-                <span>Yes — select it</span>
-              </label>
-              <label className="flex items-center gap-2 rounded border border-border px-3 py-2">
-                <input
-                  type="radio"
-                  checked={eadMode === "estimate"}
-                  onChange={() => setEadMode("estimate")}
-                />
-                <span>No — estimate it from loan amount, interest, elapsed time, term</span>
-              </label>
+      {Object.keys(encodingSummary).length > 0 && (
+        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-semibold">Encoding summary</h2>
+              <p className="text-xs text-muted-foreground">The feature engineering report captures the transformations chosen for this dataset.</p>
             </div>
           </div>
-
-          {eadMode === "outstanding_balance" ? (
-            <div className="grid gap-3 md:grid-cols-1">
-              <label className="space-y-2 text-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Outstanding balance column</span>
-                <select
-                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                  value={eadCol}
-                  onChange={(event) => setEadCol(event.target.value)}
-                >
-                  <option value="">Select a numeric column</option>
-                  {numericColumns.map((col) => (
-                    <option key={col} value={col}>
-                      {col}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="space-y-2 text-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Loan amount</span>
-                <select className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={loanCol} onChange={(event) => setLoanCol(event.target.value)}>
-                  <option value="">Select a column</option>
-                  {numericColumns.map((col) => <option key={col} value={col}>{col}</option>)}
-                </select>
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Interest rate</span>
-                <select className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={interestCol} onChange={(event) => setInterestCol(event.target.value)}>
-                  <option value="">Select a column</option>
-                  {numericColumns.map((col) => <option key={col} value={col}>{col}</option>)}
-                </select>
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Elapsed time</span>
-                <select className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={yearsCol} onChange={(event) => setYearsCol(event.target.value)}>
-                  <option value="">Select a column</option>
-                  {numericColumns.map((col) => <option key={col} value={col}>{col}</option>)}
-                </select>
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Total loan term</span>
-                <select className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={termCol} onChange={(event) => setTermCol(event.target.value)}>
-                  <option value="">Select a column</option>
-                  {numericColumns.map((col) => <option key={col} value={col}>{col}</option>)}
-                </select>
-              </label>
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-3 text-sm">
-            <label className="flex items-center gap-2 rounded border border-border px-3 py-2">
-              <input type="checkbox" checked={yearsMonths} onChange={(event) => setYearsMonths(event.target.checked)} />
-              <span>Elapsed time is in months</span>
-            </label>
-            <label className="flex items-center gap-2 rounded border border-border px-3 py-2">
-              <input type="checkbox" checked={termMonths} onChange={(event) => setTermMonths(event.target.checked)} />
-              <span>Loan term is in months</span>
-            </label>
-          </div>
-
-          {engineeringResult?.ead_configuration && (
-            <div className="rounded-xl border border-border bg-background p-3 text-sm">
-              <div className="font-medium text-xs">{engineeringResult.ead_configuration.method || "EAD configuration"}</div>
-              {engineeringResult.ead_configuration.available === false && engineeringResult.ead_configuration.missing_columns?.length ? (
-                <div className="mt-2 text-[11px] text-red-600">
-                  Missing required columns: {engineeringResult.ead_configuration.missing_columns.join(", ")}
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {Object.entries(encodingSummary).map(([key, value]) => (
+              <div key={key} className="rounded-xl border border-border bg-background p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{key.replace(/_/g, " ")}</div>
+                <div className="mt-2 text-sm text-muted-foreground">
+                  {Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value)}
                 </div>
-              ) : engineeringResult.ead_configuration.summary && Object.keys(engineeringResult.ead_configuration.summary).length > 0 ? (
-                <div className="mt-2 text-[11px] text-muted-foreground">
-                  Mean {engineeringResult.ead_configuration.summary.mean ?? "n/a"}, median {engineeringResult.ead_configuration.summary.median ?? "n/a"}
-                </div>
-              ) : (
-                <div className="mt-2 text-[11px] text-muted-foreground">Configuration ready for ECL downstream processing.</div>
-              )}
-            </div>
-          )}
-        </div>
-      </section>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         {(appliedSteps.length > 0 || transformedSteps.length > 0) && (
@@ -716,7 +641,7 @@ function Features() {
         </section>
       )}
 
-      {engineeringResult.x_engineered_preview && Array.isArray(engineeringResult.x_engineered_preview) && engineeringResult.x_engineered_preview.length > 0 && (
+      {(engineeringResult.final_engineered_dataset_preview && Array.isArray(engineeringResult.final_engineered_dataset_preview) && engineeringResult.final_engineered_dataset_preview.length > 0) || (engineeringResult.x_engineered_preview && Array.isArray(engineeringResult.x_engineered_preview) && engineeringResult.x_engineered_preview.length > 0) ? (
         <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
           <div className="flex items-center justify-between gap-4">
             <div>
@@ -728,13 +653,13 @@ function Features() {
             <table className="min-w-full border-collapse text-sm">
               <thead>
                 <tr>
-                  {Object.keys(engineeringResult.x_engineered_preview[0]).map((key: string) => (
+                  {Object.keys((engineeringResult.final_engineered_dataset_preview && Array.isArray(engineeringResult.final_engineered_dataset_preview) && engineeringResult.final_engineered_dataset_preview.length > 0 ? engineeringResult.final_engineered_dataset_preview : engineeringResult.x_engineered_preview ?? [])[0] ?? {}).map((key: string) => (
                     <th key={key} className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">{key}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {engineeringResult.x_engineered_preview.map((row: any, rowIndex: number) => (
+                {(engineeringResult.final_engineered_dataset_preview && Array.isArray(engineeringResult.final_engineered_dataset_preview) && engineeringResult.final_engineered_dataset_preview.length > 0 ? engineeringResult.final_engineered_dataset_preview : engineeringResult.x_engineered_preview ?? []).map((row: any, rowIndex: number) => (
                   <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : ""}>
                     {Object.values(row).map((cell: any, cellIndex: number) => (
                       <td key={cellIndex} className="border-b border-border px-3 py-2 font-mono text-xs">{String(cell)}</td>
@@ -745,9 +670,16 @@ function Features() {
             </table>
           </div>
         </section>
-      )}
+      ) : null}
 
       <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
+          onClick={downloadDecisionLog}
+        >
+          <Download className="h-4 w-4" />
+          Download feature decision log
+        </button>
         <button
           className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
           onClick={() => navigate("/preprocessing")}
