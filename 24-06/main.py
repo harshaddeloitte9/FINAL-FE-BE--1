@@ -1013,7 +1013,7 @@ async def recommend_models_endpoint(
         n_features = X_train_engineered.shape[1]
         if task_type == "binary":
             vc = y_train.value_counts()
-            class_imbalance_ratio = float(vc.max() / vc.min()) if vc.min() > 0 else 1.0
+            class_imbalance_ratio = float(vc.max() / vc.min()) if vc.min() > 0 else 5.0
     else:
         if n_samples is None or n_features is None or task_type is None:
             raise HTTPException(status_code=400, detail="Either dataset or numeric summary values are required")
@@ -1032,6 +1032,7 @@ async def recommend_models_endpoint(
             "train_features": int(n_features),
             "imbalance_ratio": float(class_imbalance_ratio),
         },
+        "task_type": task_type,
         "feature_engineering_summary": fe_summary if 'fe_summary' in locals() else None,
     }
 
@@ -1066,9 +1067,12 @@ async def train_model_endpoint(
     )
     prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
     fe_summary = None
+    plan = None
     if use_feature_engineering:
         plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
         X_train, fe_summary = apply_feature_engineering(X_train, plan)
+        X_val, _ = apply_feature_engineering(X_val, plan)
+        X_test, _ = apply_feature_engineering(X_test, plan)
     if manual_params:
         try:
             manual_params_dict = json.loads(manual_params)
@@ -1105,13 +1109,68 @@ async def train_model_endpoint(
         task_type=task_type,
     )
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
+
+    # Evaluate on hold-out test set to mirror the original Streamlit training workflow.
+    y_pred = pipeline.predict(X_test)
+    y_proba = None
+    if hasattr(pipeline, "predict_proba"):
+        try:
+            y_proba = pipeline.predict_proba(X_test)
+        except Exception:
+            y_proba = None
+
+    if task_type == "binary":
+        metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
+        hetero_input = y_proba if y_proba is not None else y_pred
+        roc_curve = compute_roc_curve(y_test.values, y_proba) if y_proba is not None else []
+        pr_curve = compute_pr_curve(y_test.values, y_proba) if y_proba is not None else []
+        threshold_analysis = compute_threshold_analysis(y_test.values, y_proba) if y_proba is not None else []
+        score_distribution = compute_score_distribution(y_test.values, y_proba) if y_proba is not None else []
+        gain_chart = compute_gain_chart(y_test.values, y_proba)
+    else:
+        metrics = compute_regression_metrics(y_test.values, y_pred)
+        hetero_input = y_pred
+        roc_curve = []
+        pr_curve = []
+        threshold_analysis = []
+        score_distribution = []
+        gain_chart = []
+
+    hetero_check = compute_heteroscedasticity_check(y_test.values, hetero_input, task_type=task_type)
+    evaluation_data = {
+        "metrics": metrics,
+        "heteroscedasticity_check": hetero_check,
+        "threshold": 0.5,
+        "task_type": task_type,
+        "roc_curve": roc_curve,
+        "pr_curve": pr_curve,
+        "threshold_analysis": threshold_analysis,
+        "score_distribution": score_distribution,
+        "gain_chart": gain_chart,
+    }
+
     return {
         "task_type": task_type,
         "model_name": model_name,
         "real_feature_names": real_feature_names,
+        "training_config": {
+            "model_name": model_name,
+            "test_size": test_size,
+            "val_size": val_size,
+            "random_seed": random_seed,
+            "use_cv": use_cv,
+            "cv_folds": cv_folds,
+            "use_hyperopt": use_hyperopt,
+            "use_class_weight": use_class_weight,
+            "scale_pos_weight": scale_pos_weight,
+            "use_feature_engineering": use_feature_engineering,
+            "manual_params": manual_params_dict or {},
+        },
         "training_info": training_info,
         "split_stats": split_stats,
         "feature_engineering_summary": fe_summary,
+        "evaluation_metrics": metrics,
+        "evaluation_data": evaluation_data,
         "model_artifact": _to_base64(pipeline),
     }
 

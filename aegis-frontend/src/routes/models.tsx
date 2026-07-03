@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
-import { CheckCircle2, Sparkles, ArrowLeft, ArrowRight, BarChart3, Shield } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { formUpload } from "@/lib/api";
@@ -26,12 +26,12 @@ interface ModelCard extends ModelRecommendation {
 }
 
 function ModelSelection() {
-  const { profile, file, recommendations, setRecommendations, setSelectedModel, selectedModel } = useDataset();
+  const { profile, file, recommendations, setRecommendations, setSelectedModel, selectedModel, compareModels, setCompareModels } = useDataset();
   const [trainingStats, setTrainingStats] = useState<{train_n: number; train_features: number; imbalance_ratio: number} | null>(null);
+  const [recommendationTaskType, setRecommendationTaskType] = useState<string | null>(null);
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [modelsToCompare, setModelsToCompare] = useState<string[]>([]);
   const fetchRef = useRef(false);
 
   // Compute dataset summary metrics
@@ -90,6 +90,9 @@ function ModelSelection() {
         if (response?.training) {
           setTrainingStats(response.training as any);
         }
+            if (response?.task_type) {
+          setRecommendationTaskType(response.task_type);
+        }
 
         const recs = response?.recommendations ?? response?.recommendations_list ?? response?.data ?? null;
         if (recs && Array.isArray(recs)) {
@@ -103,8 +106,24 @@ function ModelSelection() {
           }));
 
           setRecommendations(transformed);
-          if (!selectedModel && transformed.length > 0) {
+
+          const currentModelName = selectedModel?.name;
+          const hasCurrentSelection = currentModelName
+            ? transformed.some((m) => m.name === currentModelName)
+            : false;
+
+          if (!hasCurrentSelection && transformed.length > 0) {
             setSelectedModel(transformed[0]);
+          }
+
+          const validCompareModels = (compareModels ?? []).filter((name) =>
+            transformed.some((m) => m.name === name),
+          );
+
+          if (validCompareModels.length === 0 && transformed.length > 0) {
+            setCompareModels(transformed.slice(0, Math.min(3, transformed.length)).map((m) => m.name));
+          } else if (validCompareModels.length !== (compareModels ?? []).length) {
+            setCompareModels(validCompareModels);
           }
         } else {
           setError("No recommendations returned by backend.");
@@ -123,22 +142,19 @@ function ModelSelection() {
     return () => {
       isMounted = false;
     };
-    // Intentionally exclude selectedModel and recommendations to avoid re-fetch on selection/result changes
-  }, [file, profile, setRecommendations, setSelectedModel]);
+  }, [file, profile, recommendations, selectedModel, compareModels, setRecommendations, setSelectedModel, setCompareModels]);
 
   const handleSelectModel = useCallback((model: ModelCard) => {
     setSelectedModel(model);
   }, [setSelectedModel]);
 
   const toggleModelToCompare = useCallback((modelName: string) => {
-    setModelsToCompare((prev) => {
-      if (prev.includes(modelName)) {
-        return prev.filter((m) => m !== modelName);
-      } else {
-        return [...prev, modelName];
-      }
-    });
-  }, []);
+    const current = compareModels ?? [];
+    const next = current.includes(modelName)
+      ? current.filter((m) => m !== modelName)
+      : [...current, modelName];
+    setCompareModels(next);
+  }, [compareModels, setCompareModels]);
 
   if (!profile) {
     return (
@@ -159,20 +175,11 @@ function ModelSelection() {
         description="Models ranked by suitability for your dataset — with explanations."
       />
 
-      {/* Dataset Summary */}
       {datasetSummary && (
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">Sample count</div>
-            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.sampleCount.toLocaleString()}</div>
-          </div>
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">Feature count</div>
-            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.featureCount}</div>
-          </div>
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">Class imbalance</div>
-            <div className="mt-2 text-2xl font-semibold tabular-nums">{datasetSummary.imbalanceRatio.toFixed(2)}x</div>
+        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="text-sm text-muted-foreground">Dataset summary</div>
+          <div className="mt-2 text-lg font-semibold">
+            Dataset: {datasetSummary.sampleCount.toLocaleString()} samples × {datasetSummary.featureCount} features | Imbalance ratio: {datasetSummary.imbalanceRatio.toFixed(1)}:1
           </div>
         </section>
       )}
@@ -197,53 +204,26 @@ function ModelSelection() {
 
       {transformedModels.length > 0 && (
         <>
-          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-3 mb-4">
-              <BarChart3 className="h-5 w-5 text-primary" />
-              <h2 className="text-base font-semibold">Models to Compare</h2>
-            </div>
-            <p className="mb-4 text-sm text-muted-foreground">
-              Select additional models to include in comparative evaluation. The champion (selected above) is always included.
-            </p>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              {transformedModels.map((model) => (
-                <label
-                  key={model.name}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/40"
-                >
-                  <input
-                    type="checkbox"
-                    checked={modelsToCompare.includes(model.name)}
-                    onChange={() => toggleModelToCompare(model.name)}
-                    className="rounded border-border"
-                  />
-                  <span className="text-sm font-medium">{model.name}</span>
-                </label>
-              ))}
-            </div>
-          </section>
-
           <section>
             <h2 className="mb-4 text-base font-semibold">Recommended Models</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              These candidates are ranked by suitability and can be compared on the same split after training.
+            </p>
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
               {transformedModels.map((m, index) => {
-                const rankBadge = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][Math.min(index, 4)];
+                const rankBadge = `Rank ${index + 1}`;
                 return (
                   <div
                     key={m.name}
-                    className={cn(
-                      "relative flex cursor-pointer flex-col rounded-2xl border bg-card p-6 shadow-elegant transition-all hover:-translate-y-1",
-                      m.selected ? "border-primary/60 ring-2 ring-primary/20" : "border-border hover:border-primary/40",
-                    )}
-                    onClick={() => handleSelectModel(m)}
+                    className="relative flex flex-col rounded-2xl border border-border bg-card p-6 shadow-elegant"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-2">
                         <div className="flex items-center gap-2">
-                          <span className="text-lg">{rankBadge}</span>
+                          <span className="text-sm uppercase tracking-wider text-muted-foreground">{rankBadge}</span>
                           <h3 className="text-base font-semibold">{m.name}</h3>
                         </div>
-                        {m.icon && <div className="text-sm text-muted-foreground">{m.icon}</div>}
+                        {/* model icon omitted to remove emoji from UI */}
                       </div>
                       <div className="text-right">
                         <div className="text-2xl font-semibold tabular-nums">{m.score}/10</div>
@@ -251,40 +231,20 @@ function ModelSelection() {
                       </div>
                     </div>
 
-                    <div className="mt-4 inline-flex w-fit items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary">
-                      {m.selected ? <Sparkles className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
-                      {m.selected ? "Champion (selected)" : "Challenger"}
-                    </div>
-
-                    <p className="mt-4 text-sm text-muted-foreground">{m.description || "Recommended for this dataset profile."}</p>
+                    <p className="mt-4 text-sm text-muted-foreground">{m.description}</p>
 
                     <dl className="mt-4 space-y-3 text-sm">
                       <div>
                         <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
                         <dd className="mt-1 text-foreground/90">{m.why || m.description}</dd>
                       </div>
-                      <div>
-                        <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
-                        <dd className="mt-1 text-foreground/90">
-                          {m.best_for?.length ? m.best_for.join(" · ") : "—"}
-                        </dd>
-                      </div>
+                      {m.best_for?.length ? (
+                        <div>
+                          <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
+                          <dd className="mt-1 text-foreground/90">{m.best_for.join(" · ")}</dd>
+                        </div>
+                      ) : null}
                     </dl>
-
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSelectModel(m);
-                      }}
-                      className={cn(
-                        "mt-5 w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
-                        m.selected
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-border bg-background hover:border-primary/40 hover:bg-primary-soft",
-                      )}
-                    >
-                      {m.selected ? "Selected" : "Select model"}
-                    </button>
                   </div>
                 );
               })}
@@ -292,43 +252,57 @@ function ModelSelection() {
           </section>
 
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="mb-4 flex items-center gap-3">
-              <Shield className="h-5 w-5 text-primary" />
-              <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <h3 className="mb-2 text-sm font-semibold">Champion Model</h3>
-                <p className="text-sm text-muted-foreground">
-                  {selectedModel ? (
-                    <>
-                      <strong>{selectedModel.name}</strong> has been selected as the primary model for risk assessment. This model will be trained on your dataset and used for generating predictions and risk scores.
-                    </>
-                  ) : (
-                    "Select a champion model above to proceed with training and evaluation."
-                  )}
-                </p>
-              </div>
-              <div>
-                <h3 className="mb-2 text-sm font-semibold">Comparative Evaluation</h3>
-                <p className="text-sm text-muted-foreground">
-                  {modelsToCompare.length > 0 ? (
-                    <>
-                      You have selected <strong>{modelsToCompare.length} challenger model(s)</strong> for comparison: {modelsToCompare.join(", ")}. These will be evaluated alongside the champion model to validate robustness.
-                    </>
-                  ) : (
-                    "Optionally select challenger models above for comparative evaluation against the champion."
-                  )}
-                </p>
-              </div>
-              <div>
-                <h3 className="mb-2 text-sm font-semibold">Next Steps</h3>
-                <p className="text-sm text-muted-foreground">
-                  Proceed to training to fit the champion model on your {datasetSummary?.sampleCount.toLocaleString()} samples. Model evaluation will follow, including performance metrics, feature importance, and SHAP-based explainability.
-                </p>
-              </div>
+            <h2 className="mb-4 text-base font-semibold">Select model to train</h2>
+            <select
+              value={selectedModel?.name ?? transformedModels[0]?.name}
+              onChange={(e) => {
+                const next = transformedModels.find((m) => m.name === e.target.value);
+                if (next) setSelectedModel(next);
+              }}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+            >
+              {transformedModels.map((model) => (
+                <option key={model.name} value={model.name}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-2 text-sm text-muted-foreground">
+              The top-ranked model is pre-selected. You can change this.
+            </p>
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h2 className="mb-4 text-base font-semibold">Models to compare after training split</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              These models will be trained with lightweight defaults on the same split for comparison.
+            </p>
+            <div className="space-y-3">
+              {transformedModels.map((model) => (
+                <label key={model.name} className="flex items-center gap-3 rounded-xl border border-border bg-background px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={(compareModels ?? []).includes(model.name)}
+                    onChange={() => toggleModelToCompare(model.name)}
+                    className="h-4 w-4 rounded border-border accent-primary"
+                  />
+                  <span className="text-sm">{model.name}</span>
+                </label>
+              ))}
             </div>
           </section>
+
+          {recommendationTaskType === "binary" && (
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
+              <p className="mt-3 text-sm text-muted-foreground">
+                In credit risk, <strong>Recall</strong> is the most critical metric because failing to identify a truly risky customer (false negative) is far more costly than incorrectly flagging a safe one.
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                We optimize for: <strong>ROC-AUC → Recall → PR-AUC → F1</strong>
+              </p>
+            </section>
+          )}
 
           <div className="flex gap-3 pt-4">
             <Button variant="outline" onClick={() => navigate({ to: "/preprocessing" })} className="gap-2">

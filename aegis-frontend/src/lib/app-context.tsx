@@ -31,6 +31,7 @@ type TrainingResult = {
   task_type: string;
   model_name: string;
   real_feature_names: string[];
+  training_config?: Record<string, any>;
   training_info: Record<string, any>;
   split_stats: Record<string, any>;
   feature_engineering_summary?: Record<string, any> | null;
@@ -44,6 +45,7 @@ type DatasetState = {
   profile?: DatasetProfile | null;
   recommendations?: ModelRecommendation[] | null;
   selectedModel?: ModelRecommendation | null;
+  compareModels?: string[] | null;
   preprocessingResult?: Record<string, any> | null;
   featureEngineeringResult?: Record<string, any> | null;
   trainingConfig?: TrainingConfig | null;
@@ -60,6 +62,7 @@ type DatasetState = {
   setTrainingResult: (result: TrainingResult | null) => void;
   setComparisonResults: (results: ComparisonResult[] | null) => void;
   setSelectedComparisonModel: (modelName: string | null) => void;
+  setCompareModels: (models: string[] | null) => void;
 };
 
 const DatasetContext = React.createContext<DatasetState | null>(null);
@@ -69,6 +72,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = React.useState<DatasetProfile | null>(null);
   const [recommendations, setRecommendations] = React.useState<ModelRecommendation[] | null>(null);
   const [selectedModel, setSelectedModelState] = React.useState<ModelRecommendation | null>(null);
+  const [compareModels, setCompareModelsState] = React.useState<string[] | null>(null);
   const [preprocessingResult, setPreprocessingResultState] = React.useState<Record<string, any> | null>(null);
   const [featureEngineeringResult, setFeatureEngineeringResultState] = React.useState<Record<string, any> | null>(null);
   const [trainingConfig, setTrainingConfigState] = React.useState<TrainingConfig | null>(null);
@@ -94,6 +98,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
         trainingConfig?: TrainingConfig | null;
         trainingResult?: TrainingResult | null;
         comparisonResults?: ComparisonResult[] | null;
+        compareModels?: string[] | null;
+        selectedModel?: ModelRecommendation | null;
         selectedComparisonModel?: string | null;
       };
 
@@ -105,6 +111,12 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       }
       if (parsed.comparisonResults) {
         setComparisonResultsState(parsed.comparisonResults);
+      }
+      if (parsed.compareModels) {
+        setCompareModelsState(parsed.compareModels);
+      }
+      if (parsed.selectedModel) {
+        setSelectedModelState(parsed.selectedModel);
       }
       if (parsed.selectedComparisonModel) {
         setSelectedComparisonModelState(parsed.selectedComparisonModel);
@@ -123,17 +135,20 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       trainingConfig,
       trainingResult,
       comparisonResults,
+      compareModels,
+      selectedModel,
       selectedComparisonModel,
     };
 
     window.localStorage.setItem("aegis_dataset_state", JSON.stringify(persisted));
-  }, [trainingConfig, trainingResult, comparisonResults, selectedComparisonModel, isHydrated]);
+  }, [trainingConfig, trainingResult, comparisonResults, compareModels, selectedModel, selectedComparisonModel, isHydrated]);
 
   const setUploadResult = React.useCallback((f: File | null, p: DatasetProfile | null) => {
     setFile(f);
     setProfile(p);
     setRecommendations(null);
     setSelectedModelState(null);
+    setCompareModelsState(null);
     setPreprocessingResultState(null);
     setFeatureEngineeringResultState(null);
     setTrainingConfigState(null);
@@ -148,6 +163,10 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
 
   const setSelectedModel = React.useCallback((model: ModelRecommendation | null) => {
     setSelectedModelState(model);
+  }, []);
+
+  const setCompareModels = React.useCallback((models: string[] | null) => {
+    setCompareModelsState(models);
   }, []);
 
   const setPreprocessingResult = React.useCallback((result: Record<string, any> | null) => {
@@ -180,6 +199,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       profile,
       recommendations,
       selectedModel,
+      compareModels,
       preprocessingResult,
       featureEngineeringResult,
       trainingConfig,
@@ -190,6 +210,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setProfile: setProfileState,
       setRecommendations,
       setSelectedModel,
+      setCompareModels,
       setPreprocessingResult,
       setFeatureEngineeringResult,
       setTrainingConfig,
@@ -202,6 +223,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       profile,
       recommendations,
       selectedModel,
+      compareModels,
       preprocessingResult,
       featureEngineeringResult,
       trainingConfig,
@@ -211,6 +233,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setUploadResult,
       setRecommendations,
       setSelectedModel,
+      setCompareModels,
       setPreprocessingResult,
       setFeatureEngineeringResult,
       setTrainingConfig,

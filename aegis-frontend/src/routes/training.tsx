@@ -6,6 +6,15 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { useEffect, useState, useMemo } from "react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  ResponsiveContainer,
+} from "recharts";
 
 export const Route = createFileRoute("/training")({
   head: () => ({ meta: [{ title: "Training — Aegis Credit" }] }),
@@ -47,6 +56,8 @@ function Training() {
     file,
     selectedModel,
     recommendations,
+    compareModels,
+    setCompareModels,
     trainingConfig,
     trainingResult,
     comparisonResults,
@@ -78,10 +89,11 @@ function Training() {
   const [modelArtifact, setModelArtifact] = useState<string | null>(trainingResult?.model_artifact ?? null);
   const [taskType, setTaskType] = useState<string | null>(trainingResult?.task_type ?? null);
   const [trainingModelName, setTrainingModelName] = useState<string | null>(trainingResult?.model_name ?? selectedModel?.name ?? null);
+  const [trainingConfigResult, setTrainingConfigResult] = useState<Record<string, any> | null>(trainingResult?.training_config ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelComparison, setModelComparison] = useState<boolean>(false);
-  const [modelsToCompare, setModelsToCompare] = useState<string[]>([]);
+  const [modelsToCompare, setModelsToCompare] = useState<string[]>(compareModels ?? []);
 
   // Hyperparameter preset controls
   const [hyperparams, setHyperparams] = useState<Record<string, any>>({
@@ -94,7 +106,7 @@ function Training() {
     reg_alpha: 0.0,
   });
 
-  // Calculate live split statistics
+  // Calculate live split statistics for UI before backend training returns the exact split
   const totalSamples = profile?.shape?.[0] ?? 0;
   const splitStats_live = useMemo(() => {
     if (!totalSamples) return null;
@@ -112,6 +124,8 @@ function Training() {
       test_pct: testN / totalSamples,
     };
   }, [totalSamples, config.test_size, config.val_size]);
+
+  const displaySplitStats = splitStats ?? splitStats_live;
 
   // Handle training execution
   const trainModel = async (modelName: string) => {
@@ -141,22 +155,17 @@ function Training() {
       throw new Error("Training response missing required fields.");
     }
 
-    const evalForm = new FormData();
-    evalForm.append("model_artifact", trainResponse.model_artifact);
-    evalForm.append("file", file);
-    evalForm.append("target_col", profile.target_col || "loan_status");
-
-    const evalResponse = await formUpload("/models/evaluate", evalForm);
-
     return {
       model_name: modelName,
       task_type: trainResponse.task_type ?? "binary",
+      real_feature_names: trainResponse.real_feature_names ?? [],
+      training_config: trainResponse.training_config ?? null,
       training_info: trainResponse.training_info,
       split_stats: trainResponse.split_stats,
       feature_engineering_summary: trainResponse.feature_engineering_summary ?? null,
       model_artifact: trainResponse.model_artifact,
-      evaluation_metrics: evalResponse?.metrics ?? null,
-      evaluation_data: evalResponse ?? null,
+      evaluation_metrics: trainResponse.evaluation_metrics ?? null,
+      evaluation_data: trainResponse.evaluation_data ?? null,
     };
   };
 
@@ -178,11 +187,13 @@ function Training() {
       setModelArtifact(result.model_artifact);
       setTaskType(result.task_type);
       setTrainingModelName(result.model_name);
+      setTrainingConfigResult(result.training_config ?? null);
       setComparisonResults([{ model_name: result.model_name, ...result.evaluation_metrics, training_time_s: result.training_info.training_time_s }]);
       setTrainingResult({
         task_type: result.task_type,
         model_name: result.model_name,
-        real_feature_names: [],
+        real_feature_names: result.real_feature_names ?? [],
+        training_config: result.training_config ?? null,
         training_info: result.training_info,
         split_stats: result.split_stats,
         feature_engineering_summary: result.feature_engineering_summary,
@@ -237,10 +248,12 @@ function Training() {
           setModelArtifact(result.model_artifact);
           setTaskType(result.task_type);
           setTrainingModelName(result.model_name);
+          setTrainingConfigResult(result.training_config ?? null);
           setTrainingResult({
             task_type: result.task_type,
             model_name: result.model_name,
-            real_feature_names: [],
+            real_feature_names: result.real_feature_names ?? [],
+            training_config: result.training_config ?? null,
             training_info: result.training_info,
             split_stats: result.split_stats,
             feature_engineering_summary: result.feature_engineering_summary,
@@ -262,17 +275,55 @@ function Training() {
   };
 
   // Calculate class imbalance for recommendations
+  const usedTrainingConfig = trainingConfigResult ?? trainingResult?.training_config ?? config;
+
   const classImbalance = useMemo(() => {
-    if (!profile?.class_distribution) return 1.0;
-    const values = Object.values(profile.class_distribution) as number[];
+    const trainingDist = splitStats?.train_class_dist ?? profile?.class_distribution;
+    if (!trainingDist) return 1.0;
+    const values = Object.values(trainingDist) as number[];
     if (values.length < 2) return 1.0;
-    const sorted = values.sort((a, b) => b - a);
+    const sorted = [...values].sort((a, b) => b - a);
     return sorted[0] / (sorted[1] || 1);
-  }, [profile?.class_distribution]);
+  }, [splitStats?.train_class_dist, profile?.class_distribution]);
+
+  const classLabels = useMemo(() => {
+    if (splitStats?.train_class_dist) {
+      return Object.keys(splitStats.train_class_dist);
+    }
+    return [];
+  }, [splitStats]);
+
+  const splitClassData = useMemo(() => {
+    if (!splitStats?.train_class_dist || !splitStats?.val_class_dist || !splitStats?.test_class_dist) {
+      return [];
+    }
+
+    return [
+      { split: "Train", dist: splitStats.train_class_dist },
+      { split: "Val", dist: splitStats.val_class_dist },
+      { split: "Test", dist: splitStats.test_class_dist },
+    ].map((item) => {
+      const row: Record<string, number | string> = { split: item.split };
+      classLabels.forEach((label) => {
+        row[label] = Number(item.dist?.[label] ?? 0);
+      });
+      return row;
+    });
+  }, [splitStats, classLabels]);
 
   useEffect(() => {
     setTrainingConfig(config);
   }, [config, setTrainingConfig]);
+
+  useEffect(() => {
+    if (compareModels && compareModels.length > 0) {
+      setModelsToCompare(compareModels);
+    }
+  }, [compareModels]);
+
+  useEffect(() => {
+    setCompareModels(modelsToCompare);
+  }, [modelsToCompare, setCompareModels]);
 
   if (!selectedModel) {
     return (
@@ -310,9 +361,9 @@ function Training() {
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <div className="flex items-center gap-2 mb-4">
           <BarChart3 className="h-5 w-5 text-primary" />
-          <h2 className="text-base font-semibold">Data Split Configuration</h2>
+          <h2 className="text-base font-semibold">Data Split (configured in Step 3 — before feature engineering)</h2>
         </div>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Train Size */}
           <div>
@@ -335,9 +386,9 @@ function Training() {
                 }}
                 className="flex-1"
               />
-              <span className="text-sm font-mono w-12 text-right">{(splitStats_live?.train_pct ?? 0).toFixed(0)}%</span>
+              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.train_pct ?? 0).toFixed(0)}%</span>
             </div>
-            {splitStats_live && <p className="text-xs text-muted-foreground mt-1">{splitStats_live.train_n.toLocaleString()} samples</p>}
+            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.train_n.toLocaleString()} samples</p>}
           </div>
 
           {/* Val Size */}
@@ -353,9 +404,9 @@ function Training() {
                 onChange={(e) => setConfig(prev => ({ ...prev, val_size: parseFloat(e.target.value) }))}
                 className="flex-1"
               />
-              <span className="text-sm font-mono w-12 text-right">{(splitStats_live?.val_pct ?? 0).toFixed(0)}%</span>
+              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.val_pct ?? 0).toFixed(0)}%</span>
             </div>
-            {splitStats_live && <p className="text-xs text-muted-foreground mt-1">{splitStats_live.val_n.toLocaleString()} samples</p>}
+            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.val_n.toLocaleString()} samples</p>}
           </div>
 
           {/* Test Size */}
@@ -371,9 +422,9 @@ function Training() {
                 onChange={(e) => setConfig(prev => ({ ...prev, test_size: parseFloat(e.target.value) }))}
                 className="flex-1"
               />
-              <span className="text-sm font-mono w-12 text-right">{(splitStats_live?.test_pct ?? 0).toFixed(0)}%</span>
+              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.test_pct ?? 0).toFixed(0)}%</span>
             </div>
-            {splitStats_live && <p className="text-xs text-muted-foreground mt-1">{splitStats_live.test_n.toLocaleString()} samples</p>}
+            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.test_n.toLocaleString()} samples</p>}
           </div>
         </div>
 
@@ -390,22 +441,49 @@ function Training() {
             <p className="text-xs text-muted-foreground mt-1">Ensures reproducible splits</p>
           </div>
         </div>
+        <p className="mt-4 text-sm text-muted-foreground">
+          Feature engineering will be re-learned on the training split and then applied to validation/test without using their labels. To change the split ratio or seed, return to Model Selection.
+        </p>
       </section>
 
       {/* Class Distribution Visualization */}
-      {splitStats_live && profile?.class_distribution && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h2 className="text-base font-semibold mb-4">Class Distribution</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {Object.entries(profile.class_distribution).map(([label, count]) => (
-              <div key={label} className="bg-muted rounded-lg p-4">
-                <div className="text-xs uppercase tracking-wider text-muted-foreground">Class {label}</div>
-                <div className="mt-2 text-2xl font-semibold">{(count as number).toLocaleString()}</div>
-                <div className="mt-2 h-2 bg-primary/20 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: `${Math.min((count as number) / (Math.max(...Object.values(profile.class_distribution) as number[]) || 1) * 100, 100)}%` }} />
-                </div>
+{splitStats && classLabels.length > 0 && (
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold mb-4">Class Distribution per Split</h2>
+              <div className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={splitClassData} margin={{ top: 10, right: 12, left: -12, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                    <XAxis dataKey="split" stroke="#9ca3af" />
+                    <YAxis stroke="#9ca3af" />
+                    <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} formatter={(value: any) => value.toLocaleString?.() ?? value} />
+                    {classLabels.map((label, index) => (
+                      <Bar
+                        key={label}
+                        dataKey={label}
+                        stackId="a"
+                        fill={index === 0 ? "#22c55e" : index === 1 ? "#ef4444" : index === 2 ? "#3b82f6" : "#f59e0b"}
+                      />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
-            ))}
+              <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                {(() => {
+                  const distributionSource = splitStats?.train_class_counts
+                    ? Object.entries(splitStats.train_class_counts).map(([label, count]) => ({ label, count: Number(count) }))
+                    : [];
+              const maxCount = Math.max(...distributionSource.map((item) => item.count), 1);
+              return distributionSource.map(({ label, count }) => (
+                <div key={label} className="bg-muted rounded-lg p-4">
+                  <div className="text-xs uppercase tracking-wider text-muted-foreground">Class {label}</div>
+                  <div className="mt-2 text-2xl font-semibold">{count.toLocaleString()}</div>
+                  <div className="mt-2 h-2 bg-primary/20 rounded-full overflow-hidden">
+                    <div className="h-full bg-primary" style={{ width: `${Math.min((count / maxCount) * 100, 100)}%` }} />
+                  </div>
+                </div>
+              ));
+            })()}
           </div>
           {classImbalance > 1.5 && (
             <div className="mt-4 p-3 bg-orange-500/10 border border-orange-200 rounded-lg flex gap-2">
@@ -637,14 +715,16 @@ function Training() {
           <AccordionContent className="px-6 pt-0 pb-6">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 text-sm">
               <div><strong>Model:</strong> {selectedModel.name}</div>
-              <div><strong>Random Seed:</strong> {config.random_seed}</div>
-              <div><strong>Train / Val / Test:</strong> {((1 - config.test_size - config.val_size) * 100).toFixed(0)}% / {(config.val_size * 100).toFixed(0)}% / {(config.test_size * 100).toFixed(0)}%</div>
-              <div><strong>CV:</strong> {config.use_cv ? `Yes (${config.cv_folds} folds)` : "No"}</div>
-              <div><strong>Hyperopt:</strong> {config.use_hyperopt ? "Yes" : "No"}</div>
-              <div><strong>Feature engineering:</strong> {config.use_feature_engineering ? "Enabled" : "Disabled"}</div>
-              <div><strong>Class Weight:</strong> {config.use_class_weight ? `Yes${selectedModel.name === "XGBoost" ? ` (scale: ${config.scale_pos_weight.toFixed(1)})` : ""}` : "No"}</div>
-              {Object.keys(config.manual_params).length > 0 && (
-                <div className="md:col-span-2"><strong>Manual Params:</strong> <code className="rounded bg-background px-2 py-1 text-xs">{JSON.stringify(config.manual_params)}</code></div>
+              <div><strong>Random Seed:</strong> {usedTrainingConfig.random_seed}</div>
+              <div><strong>Train / Val / Test:</strong> {((1 - usedTrainingConfig.test_size - usedTrainingConfig.val_size) * 100).toFixed(0)}% / {(usedTrainingConfig.val_size * 100).toFixed(0)}% / {(usedTrainingConfig.test_size * 100).toFixed(0)}%</div>
+              <div><strong>CV:</strong> {usedTrainingConfig.use_cv ? `Yes (${usedTrainingConfig.cv_folds} folds)` : "No"}</div>
+              <div><strong>Hyperopt:</strong> {usedTrainingConfig.use_hyperopt ? "Yes" : "No"}</div>
+              <div><strong>Feature engineering:</strong> {usedTrainingConfig.use_feature_engineering ? "Enabled" : "Disabled"}</div>
+              <div><strong>Class Weight:</strong> {(usedTrainingConfig.use_class_weight || (selectedModel.name === "XGBoost" && usedTrainingConfig.scale_pos_weight !== 1))
+                ? `Yes${selectedModel.name === "XGBoost" ? ` (scale: ${usedTrainingConfig.scale_pos_weight.toFixed(1)})` : ""}`
+                : "No"}</div>
+              {Object.keys(usedTrainingConfig.manual_params || {}).length > 0 && (
+                <div className="md:col-span-2"><strong>Manual Params:</strong> <code className="rounded bg-background px-2 py-1 text-xs">{JSON.stringify(usedTrainingConfig.manual_params)}</code></div>
               )}
             </div>
           </AccordionContent>

@@ -63,6 +63,7 @@ def compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test) -> Dict[
     for split_name, y_split in [("train", y_train), ("val", y_val), ("test", y_test)]:
         if y_split.nunique() <= 10:
             stats[f"{split_name}_class_dist"] = y_split.value_counts(normalize=True).to_dict()
+            stats[f"{split_name}_class_counts"] = y_split.value_counts().to_dict()
     return stats
 
 
