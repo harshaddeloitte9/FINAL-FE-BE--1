@@ -105,7 +105,7 @@ app.add_middleware(
         "http://localhost:8080",
         "http://localhost:3000",
         "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],
+    ],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
