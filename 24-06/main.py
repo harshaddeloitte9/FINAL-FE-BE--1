@@ -273,17 +273,7 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-
-        # Vercel frontend
-        "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],
+    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
