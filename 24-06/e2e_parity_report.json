@@ -1,0 +1,37 @@
+{
+  "accuracy": {
+    "local": 0.0,
+    "api": 0.0,
+    "pass": true
+  },
+  "precision": {
+    "local": 0.0,
+    "api": 0.0,
+    "pass": true
+  },
+  "recall": {
+    "local": 0.0,
+    "api": 0.0,
+    "pass": true
+  },
+  "f1": {
+    "local": 0.0,
+    "api": 0.0,
+    "pass": true
+  },
+  "roc_auc": {
+    "local": null,
+    "api": null,
+    "pass": true
+  },
+  "pr_auc": {
+    "local": 0.0,
+    "api": 0.0,
+    "pass": true
+  },
+  "ks_statistic": {
+    "local": null,
+    "api": null,
+    "pass": true
+  }
+}
