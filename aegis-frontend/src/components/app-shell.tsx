@@ -22,7 +22,6 @@ import {
   BarChart3,
   Activity,
   ClipboardCheck,
-  Calculator,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
@@ -45,7 +44,6 @@ const developmentNav: NavItem[] = [
   { to: "/training", label: "Model Training", icon: Cpu },
   { to: "/evaluation", label: "Model Evaluation", icon: LineChart },
   { to: "/explainability", label: "Explainability", icon: Sparkles },
-  { to: "/ecl-provisions", label: "ECL & Provisions", icon: Calculator },
   { to: "/assistant", label: "AI Assistant", icon: MessageSquare },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
@@ -87,7 +85,6 @@ function resolveActiveModelTab(pathname: string): ModelTab["key"] {
     "/training",
     "/evaluation",
     "/explainability",
-    "/ecl-provisions",
     "/assistant",
     "/settings",
     "/development",

@@ -62,7 +62,14 @@ except ImportError:
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
 from train import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
-import evaluate as eval_engine
+# Prefer the source-of-truth evaluation helpers from the original Streamlit app
+_source_eval_path = SOURCE_OF_TRUTH_DIR / "evaluate.py"
+_source_eval_spec = importlib.util.spec_from_file_location("source_evaluate", _source_eval_path)
+if _source_eval_spec is None or _source_eval_spec.loader is None:
+    raise ImportError(f"Could not load source-of-truth evaluate from {_source_eval_path}")
+_source_eval = importlib.util.module_from_spec(_source_eval_spec)
+_source_eval_spec.loader.exec_module(_source_eval)
+eval_engine = _source_eval
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -80,6 +87,17 @@ compute_pr_curve = getattr(eval_engine, "compute_pr_curve", _legacy_eval.compute
 compute_threshold_analysis = getattr(eval_engine, "compute_threshold_analysis", _legacy_eval.compute_threshold_analysis)
 compute_score_distribution = getattr(eval_engine, "compute_score_distribution", _legacy_eval.compute_score_distribution)
 compute_gain_chart = getattr(eval_engine, "compute_gain_chart", _legacy_eval.compute_gain_chart)
+compute_lift_chart = getattr(eval_engine, "compute_lift_chart", _legacy_eval.compute_lift_chart)
+compute_temporal_stability_summary = getattr(
+    eval_engine, "compute_temporal_stability_summary", _legacy_eval.compute_temporal_stability_summary
+)
+_to_scores = getattr(eval_engine, "_to_scores", getattr(_legacy_eval, "_to_scores", None))
+plot_roc_curve = getattr(eval_engine, "plot_roc_curve", None)
+plot_pr_curve = getattr(eval_engine, "plot_pr_curve", None)
+plot_confusion_matrix = getattr(eval_engine, "plot_confusion_matrix", None)
+plot_score_distribution = getattr(eval_engine, "plot_score_distribution", None)
+plot_threshold_analysis = getattr(eval_engine, "plot_threshold_analysis", None)
+plot_lift_chart = getattr(eval_engine, "plot_lift_chart", None)
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
 )
@@ -100,7 +118,71 @@ app = FastAPI()
 def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
     agent = ValidationAgent2()
     return agent.run_all_checks(val_df if val_df is not None else pd.DataFrame(), intake_json or {}, mdd_text or "")
-    
+
+
+def _detect_temporal_date_columns(df: pd.DataFrame) -> List[str]:
+    date_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    if date_cols:
+        return date_cols
+    for c in df.select_dtypes(include="object").columns:
+        try:
+            parsed = pd.to_datetime(df[c], errors="coerce")
+            if parsed.notna().mean() > 0.8:
+                date_cols.append(c)
+        except Exception:
+            continue
+    return date_cols
+
+
+def _build_temporal_analysis(df: pd.DataFrame, y_true: np.ndarray, y_proba: np.ndarray) -> Dict[str, Any]:
+    date_columns = _detect_temporal_date_columns(df)
+    if not date_columns:
+        return {
+            "date_columns": [],
+            "default_date_column": None,
+            "default_frequency": "Quarterly",
+            "frequency_options": ["Monthly", "Quarterly", "Half-Yearly", "Yearly"],
+            "summary": None,
+            "plot_data": [],
+        }
+
+    default_date_column = date_columns[0]
+    frequency_options = ["Monthly", "Quarterly", "Half-Yearly", "Yearly"]
+    freq_map = {
+        "Monthly": "ME",
+        "Quarterly": "QE",
+        "Half-Yearly": "6ME",
+        "Yearly": "YE",
+    }
+    plot_data_by_freq: Dict[str, Any] = {}
+    summaries: Dict[str, Any] = {}
+    for freq_name in frequency_options:
+        freq_key = freq_map[freq_name]
+        dates = df[default_date_column]
+        summary = compute_temporal_stability_summary(dates, y_true, y_proba, freq=freq_key)
+        plot_data = []
+        for row in summary.get("by_period", []):
+            plot_data.append({
+                "period": row["period"],
+                "actual_rate": row["actual_rate"],
+                "predicted_rate": row["predicted_rate"],
+                "gap": row["gap"],
+                "flagged": row["flagged"],
+            })
+        plot_data_by_freq[freq_name] = plot_data
+        summaries[freq_name] = summary
+    return {
+        "date_columns": date_columns,
+        "default_date_column": default_date_column,
+        "default_frequency": "Quarterly",
+        "frequency_options": frequency_options,
+        "summary": summaries.get("Quarterly"),
+        "plot_data": plot_data_by_freq.get("Quarterly", []),
+        "plot_data_by_freq": plot_data_by_freq,
+        "summaries_by_freq": summaries,
+    }
+
+
 def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
     demo_mode = "flawed" if mode.lower() == "flawed" else "clean"
     if demo_mode == "flawed":
@@ -1126,7 +1208,19 @@ async def train_model_endpoint(
         pr_curve = compute_pr_curve(y_test.values, y_proba) if y_proba is not None else []
         threshold_analysis = compute_threshold_analysis(y_test.values, y_proba) if y_proba is not None else []
         score_distribution = compute_score_distribution(y_test.values, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_test.values, y_proba)
+        score_distribution_points = [
+            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
+            for score, target in zip(_to_scores(y_proba), y_test.values)
+        ] if y_proba is not None else []
+        gain_chart = compute_gain_chart(y_test.values, y_proba) if y_proba is not None else []
+        lift_chart = compute_lift_chart(y_test.values, y_proba) if y_proba is not None else []
+        positive_rate = float(np.mean(y_test.values))
+        roc_curve_figure = plot_roc_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
+        pr_curve_figure = plot_pr_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
+        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
+        threshold_analysis_figure = plot_threshold_analysis(y_test.values, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
+        score_distribution_figure = plot_score_distribution(y_test.values, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
+        lift_chart_figure = plot_lift_chart(y_test.values, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
     else:
         metrics = compute_regression_metrics(y_test.values, y_pred)
         hetero_input = y_pred
@@ -1134,9 +1228,20 @@ async def train_model_endpoint(
         pr_curve = []
         threshold_analysis = []
         score_distribution = []
+        score_distribution_points = []
         gain_chart = []
+        lift_chart = []
+        positive_rate = None
+        roc_curve_figure = None
+        pr_curve_figure = None
+        confusion_matrix_figure = None
+        threshold_analysis_figure = None
+        score_distribution_figure = None
+        lift_chart_figure = None
 
     hetero_check = compute_heteroscedasticity_check(y_test.values, hetero_input, task_type=task_type)
+    df_test = df.loc[X_test.index] if hasattr(X_test, "index") else df
+    temporal_analysis = _build_temporal_analysis(df_test, y_test.values, y_proba if y_proba is not None else y_pred)
     evaluation_data = {
         "metrics": metrics,
         "heteroscedasticity_check": hetero_check,
@@ -1146,7 +1251,17 @@ async def train_model_endpoint(
         "pr_curve": pr_curve,
         "threshold_analysis": threshold_analysis,
         "score_distribution": score_distribution,
+        "score_distribution_points": score_distribution_points,
+        "positive_rate": positive_rate,
         "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "roc_curve_figure": roc_curve_figure,
+        "pr_curve_figure": pr_curve_figure,
+        "confusion_matrix_figure": confusion_matrix_figure,
+        "threshold_analysis_figure": threshold_analysis_figure,
+        "score_distribution_figure": score_distribution_figure,
+        "lift_chart_figure": lift_chart_figure,
+        "temporal_analysis": temporal_analysis,
     }
 
     return {
@@ -1205,7 +1320,19 @@ async def evaluate_model(
         pr_curve = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
         threshold_analysis = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
         score_distribution = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_true, y_proba)
+        score_distribution_points = [
+            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
+            for score, target in zip(_to_scores(y_proba), y_true)
+        ] if y_proba is not None else []
+        gain_chart = compute_gain_chart(y_true, y_proba) if y_proba is not None else []
+        lift_chart = compute_lift_chart(y_true, y_proba) if y_proba is not None else []
+        positive_rate = float(np.mean(y_true))
+        roc_curve_figure = plot_roc_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
+        pr_curve_figure = plot_pr_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
+        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
+        threshold_analysis_figure = plot_threshold_analysis(y_true, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
+        score_distribution_figure = plot_score_distribution(y_true, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
+        lift_chart_figure = plot_lift_chart(y_true, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
     else:
         metrics = compute_regression_metrics(y_true, y_pred)
         hetero_input = y_pred
@@ -1213,9 +1340,55 @@ async def evaluate_model(
         pr_curve = []
         threshold_analysis = []
         score_distribution = []
+        score_distribution_points = []
         gain_chart = []
+        lift_chart = []
+        positive_rate = None
+        roc_curve_figure = None
+        pr_curve_figure = None
+        confusion_matrix_figure = None
+        threshold_analysis_figure = None
+        score_distribution_figure = None
+        lift_chart_figure = None
+        metrics = compute_regression_metrics(y_true, y_pred)
+        hetero_input = y_pred
+        roc_curve = []
+        pr_curve = []
+        threshold_analysis = []
+        score_distribution = []
+        score_distribution_points = []
+        gain_chart = []
+        lift_chart = []
+        positive_rate = None
     hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
+    temporal_analysis = _build_temporal_analysis(df, y_true, y_proba if y_proba is not None else y_pred)
+    evaluation_data = {
+        "metrics": metrics,
+        "heteroscedasticity_check": hetero_check,
+        "threshold": threshold,
+        "task_type": task_type,
+        "roc_curve": roc_curve,
+        "pr_curve": pr_curve,
+        "threshold_analysis": threshold_analysis,
+        "score_distribution": score_distribution,
+        "score_distribution_points": score_distribution_points,
+        "positive_rate": positive_rate,
+        "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "roc_curve_figure": roc_curve_figure,
+        "pr_curve_figure": pr_curve_figure,
+        "confusion_matrix_figure": confusion_matrix_figure,
+        "threshold_analysis_figure": threshold_analysis_figure,
+        "score_distribution_figure": score_distribution_figure,
+        "lift_chart_figure": lift_chart_figure,
+        "temporal_analysis": temporal_analysis,
+    }
+
+    # Return both the flat metrics and the nested evaluation_data to match the
+    # original Streamlit app's payload shape consumed by the React UI.
     return {
+        "evaluation_metrics": metrics,
+        "evaluation_data": evaluation_data,
         "metrics": metrics,
         "heteroscedasticity_check": hetero_check,
         "threshold": threshold,
@@ -1225,6 +1398,8 @@ async def evaluate_model(
         "threshold_analysis": threshold_analysis,
         "score_distribution": score_distribution,
         "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "temporal_analysis": temporal_analysis,
     }
 
 
@@ -1261,17 +1436,36 @@ async def explain_model(
             .to_dict(orient="records")
         )
         reasoning = None
+        sample_shap = []
+        sample_features = None
         if 0 <= sample_idx < len(X_df):
             try:
                 model_proba = pipeline.predict_proba(X) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
             except Exception:
                 model_proba = np.zeros((len(X_df), 2))
             reasoning = generate_prediction_reasoning(shap_values, X_df, model_proba, sample_idx, threshold=0.5)
+            row = X_df.iloc[sample_idx]
+            sample_features = row.to_dict()
+            shap_row = shap_values[sample_idx]
+            sample_shap = (
+                pd.DataFrame({
+                    "Feature": X_df.columns.tolist(),
+                    "SHAP": shap_row,
+                    "Value": row.values,
+                })
+                .assign(AbsSHAP=lambda df: np.abs(df["SHAP"]))
+                .sort_values("AbsSHAP", ascending=False)
+                .head(12)
+                .sort_values("SHAP", ascending=True)
+                .to_dict(orient="records")
+            )
         shap_info = {
             "shap_available": True,
             "shap_mean_abs": mean_abs,
             "sample_idx": sample_idx,
             "sample_reasoning": reasoning,
+            "sample_features": sample_features,
+            "sample_shap": sample_shap,
         }
     return {
         "feature_importance": importance,

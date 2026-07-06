@@ -19,6 +19,35 @@ from sklearn.metrics import (
 )
 
 
+def _to_scores(y_proba) -> np.ndarray:
+    """Return 1-D probability scores regardless of whether y_proba is 1-D or 2-D."""
+    arr = np.asarray(y_proba)
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim == 2:
+        if arr.shape[1] == 1:
+            return arr[:, 0]
+        if arr.shape[1] >= 2:
+            return arr[:, 1]
+    return arr
+
+
+def compute_ks_statistic(y_true: np.ndarray, y_proba) -> Dict[str, Any]:
+    """Kolmogorov-Smirnov statistic between positive and negative score distributions."""
+    y_true = np.asarray(y_true)
+    scores = _to_scores(y_proba)
+    pos_scores = scores[y_true == 1]
+    neg_scores = scores[y_true == 0]
+    if len(pos_scores) == 0 or len(neg_scores) == 0:
+        return {"ks_statistic": None, "ks_pvalue": None}
+    from scipy.stats import ks_2samp
+    result = ks_2samp(pos_scores, neg_scores)
+    return {
+        "ks_statistic": round(float(result.statistic), 4),
+        "ks_pvalue": round(float(result.pvalue), 4),
+    }
+
+
 # ─────────────────────────────────────────────
 # Binary Classification Metrics
 # ─────────────────────────────────────────────
@@ -30,7 +59,18 @@ def compute_binary_metrics(
     threshold: float = 0.5,
 ) -> Dict[str, Any]:
     """Compute full binary classification metric suite."""
-    y_pred_thresh = (y_proba[:, 1] >= threshold) if y_proba is not None else y_pred
+    if y_proba is not None:
+        arr = np.asarray(y_proba)
+        if arr.ndim == 2 and arr.shape[1] == 1:
+            scores = arr[:, 0]
+        elif arr.ndim == 2 and arr.shape[1] >= 2:
+            scores = arr[:, 1]
+        else:
+            scores = arr
+        y_pred_thresh = (scores >= threshold).astype(int)
+    else:
+        y_pred_thresh = y_pred
+        scores = None
 
     metrics = {
         "accuracy": round(accuracy_score(y_true, y_pred_thresh), 4),
@@ -42,11 +82,103 @@ def compute_binary_metrics(
         "threshold_used": threshold,
     }
 
-    if y_proba is not None:
-        metrics["roc_auc"] = round(roc_auc_score(y_true, y_proba[:, 1]), 4)
-        metrics["pr_auc"] = round(average_precision_score(y_true, y_proba[:, 1]), 4)
+    if scores is not None:
+        try:
+            roc_auc_value = roc_auc_score(y_true, scores)
+            metrics["roc_auc"] = round(float(roc_auc_value), 4) if not np.isnan(roc_auc_value) else None
+        except Exception:
+            metrics["roc_auc"] = None
+        try:
+            metrics["pr_auc"] = round(average_precision_score(y_true, scores), 4)
+        except Exception:
+            metrics["pr_auc"] = None
+        metrics.update(compute_ks_statistic(y_true, scores))
 
     return metrics
+
+
+def compute_roc_curve(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Return ROC points as a list of {fpr, tpr} dicts."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    fpr, tpr, _ = roc_curve(y_true, scores)
+    return [{"fpr": float(x), "tpr": float(y)} for x, y in zip(fpr.tolist(), tpr.tolist())]
+
+
+def compute_pr_curve(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Return PR points as a list of {recall, precision} dicts."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    precision, recall, _ = precision_recall_curve(y_true, scores)
+    return [{"recall": float(r), "precision": float(p)} for p, r in zip(precision.tolist(), recall.tolist())]
+
+
+def compute_threshold_analysis(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Evaluate precision/recall/F1 across a fixed threshold grid."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    thresholds = np.linspace(0.0, 1.0, 21)
+    rows = []
+    for threshold in thresholds:
+        y_pred_t = (scores >= threshold).astype(int)
+        rows.append({
+            "threshold": float(round(threshold, 2)),
+            "precision": float(precision_score(y_true, y_pred_t, zero_division=0)),
+            "recall": float(recall_score(y_true, y_pred_t, zero_division=0)),
+            "f1": float(f1_score(y_true, y_pred_t, zero_division=0)),
+        })
+    return rows
+
+
+def compute_score_distribution(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
+    """Summarize score distribution by score deciles for the frontend chart."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    bins = np.linspace(0.0, 1.0, 11)
+    rows = []
+    for i in range(len(bins) - 1):
+        left, right = bins[i], bins[i + 1]
+        mask = (scores >= left) & (scores < right)
+        if i == len(bins) - 2:
+            mask = (scores >= left) & (scores <= right)
+        counts = np.sum(mask)
+        if counts == 0:
+            continue
+        good = int(np.sum((y_true[mask] == 0).astype(int)))
+        bad = int(np.sum((y_true[mask] == 1).astype(int)))
+        rows.append({
+            "bin": f"{left:.1f}-{right:.1f}",
+            "good": good,
+            "bad": bad,
+        })
+    return rows
+
+
+def compute_gain_chart(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None, n_deciles: int = 10) -> List[Dict[str, float]]:
+    """Return cumulative gain by decile in the same shape the UI expects."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    actual = np.asarray(y_true).astype(int)
+    order = np.argsort(scores)[::-1]
+    scores = scores[order]
+    actual = actual[order]
+    total_actual = int(actual.sum())
+    results = []
+    for i in range(n_deciles + 1):
+        pct = i / n_deciles
+        cutoff = int(len(actual) * pct)
+        cum_actual = int(actual[:cutoff].sum()) if cutoff > 0 else 0
+        results.append({
+            "decile": int(pct * 100),
+            "model": float(round(cum_actual / total_actual * 100 if total_actual > 0 else 0.0, 2)),
+            "baseline": float(round(pct * 100, 2)),
+        })
+    return results
 
 
 def compute_regression_metrics(
@@ -77,7 +209,10 @@ def compute_heteroscedasticity_check(
     y_true = np.asarray(y_true)
     scores = np.asarray(y_pred_or_proba)
     if scores.ndim == 2:
-        scores = scores[:, 1]
+        if scores.shape[1] == 1:
+            scores = scores[:, 0]
+        else:
+            scores = scores[:, 1]
 
     residuals = y_true - scores
     abs_resid = np.abs(residuals)
