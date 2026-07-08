@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Union
 
 BACKEND_DIR = Path(__file__).resolve().parent
-SOURCE_OF_TRUTH_DIR = Path(__file__).resolve().parent.parent / "Credit-Risk-Poc-main"
+SOURCE_OF_TRUTH_DIR = BACKEND_DIR.parent / "Credit-Risk-Poc"
 for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -113,6 +113,10 @@ ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
 
 app = FastAPI()
+
+# In-memory store for a submitted intake snapshot. This persists while the
+# backend process runs and is used to populate `/validation/intake`.
+VALIDATION_INTAKE_SUBMISSION: Optional[Dict[str, Any]] = None
 
 
 def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
@@ -259,6 +263,19 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
     except Exception:
         hyperparams = {}
 
+    # If an intake has been submitted via the API, merge that into the snapshot
+    global VALIDATION_INTAKE_SUBMISSION
+    if VALIDATION_INTAKE_SUBMISSION:
+        submitted = VALIDATION_INTAKE_SUBMISSION
+        # map submitted fields onto model_data where present
+        for k in ("model_name", "model_owner", "owning_team", "lead_validator", "model_type", "model_version", "model_tier", "model_purpose"):
+            if submitted.get(k) is not None:
+                model_data_key = k
+                model_data[model_data_key] = submitted.get(k)
+        # override MDD text if provided
+        if submitted.get("mdd_text"):
+            mdd_text = submitted.get("mdd_text")
+
     return {
         "demo_mode": demo_mode,
         "demo_label": demo_label,
@@ -359,6 +376,49 @@ app.add_middleware(
 @app.get("/validation/intake")
 async def validation_intake(mode: str = "clean") -> Dict[str, Any]:
     return _build_validation_intake_snapshot(mode)
+
+
+@app.post("/validation/parse-mdd")
+async def validation_parse_mdd(mdd_file: Optional[UploadFile] = File(None)) -> Dict[str, Any]:
+    """Parse an uploaded Model Development Document (PDF / DOCX / TXT) and
+    return its extracted text and any auto-detected reported metrics.
+
+    This mirrors Streamlit's `parse_mdd_file` + `extract_metrics_from_mdd` used
+    in the original app. It's exposed because the React frontend needs a
+    lightweight parse endpoint that does not trigger a full replication run.
+    """
+    if mdd_file is None:
+        raise HTTPException(status_code=400, detail="mdd_file is required")
+    try:
+        mdd_text = parse_mdd_file(mdd_file)
+        metrics = extract_metrics_from_mdd(mdd_text)
+        return {"mdd_text": mdd_text, "metrics": metrics}
+    except RuntimeError as rexc:
+        raise HTTPException(status_code=400, detail=str(rexc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not parse MDD: {exc}")
+
+
+@app.post("/validation/submit-intake")
+async def validation_submit_intake(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Accept a JSON payload representing the Intake form and persist it
+    in-memory for the lifetime of the backend process. Returns the stored
+    snapshot so the frontend can confirm submission.
+
+    This endpoint is added because the original Streamlit app stored intake
+    in session state; exposing a small POST endpoint reproduces the same
+    behaviour for the React frontend without changing subsequent validation
+    APIs.
+    """
+    global VALIDATION_INTAKE_SUBMISSION
+    # Minimal validation: ensure required fields exist
+    required = ["model_name", "mdd_text"]
+    for r in required:
+        if not payload.get(r):
+            # Do not fail on missing non-critical fields; return helpful message
+            return {"status": "error", "detail": f"Missing required field: {r}"}
+    VALIDATION_INTAKE_SUBMISSION = payload
+    return {"status": "ok", "saved": VALIDATION_INTAKE_SUBMISSION}
 
 @app.post("/data/feature-decision-log")
 async def feature_decision_log(
