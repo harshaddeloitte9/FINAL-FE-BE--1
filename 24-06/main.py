@@ -1050,7 +1050,24 @@ async def feature_engineering(
     ead_term_col: Optional[str] = Form(None),
     ead_years_months: Optional[str] = Form(None),
     ead_term_months: Optional[str] = Form(None),
+    model_family: str = Form("linear"),
+    transform_choices: Optional[str] = Form(None),
+    confirmed_remove_cols: Optional[str] = Form(None),
+    woe_pending_drop: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
+    try:
+        transform_choices_dict = json.loads(transform_choices) if transform_choices else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"transform_choices must be valid JSON: {exc}")
+    try:
+        confirmed_remove_cols_list = json.loads(confirmed_remove_cols) if confirmed_remove_cols else None
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"confirmed_remove_cols must be valid JSON: {exc}")
+    try:
+        woe_pending_drop_list = json.loads(woe_pending_drop) if woe_pending_drop else []
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"woe_pending_drop must be valid JSON: {exc}")
+
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     col_types = detect_column_types(df)
     if target_col not in df.columns:
@@ -1061,7 +1078,12 @@ async def feature_engineering(
         X, y, test_size=0.15, val_size=0.15,
         task_type=task_type, random_state=42,
     )
-    plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+    plan = analyze_for_feature_engineering(
+        X_train, y_train, col_types, task_type, model_family, transform_choices_dict,
+    )
+    if confirmed_remove_cols_list is not None:
+        plan["confirmed_remove_cols"] = confirmed_remove_cols_list
+    plan["woe_pending_drop"] = woe_pending_drop_list
     X_engineered, fe_summary = apply_feature_engineering(X_train, plan)
     numeric_cols = [c for c in col_types.get("numeric", []) if c in X_train.columns]
     gini_scores = compute_univariate_gini(X_train, y_train, numeric_cols) if task_type == "binary" else {}
@@ -1120,6 +1142,10 @@ async def feature_engineering(
         "gini_scores": gini_scores,
         "ead_configuration": ead_configuration,
         "available_numeric_columns": [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])],
+        "interaction_features": plan.get("interaction_features", []),
+        "interaction_scores": plan.get("interaction_scores", {}),
+        "feature_scores": plan.get("feature_scores", {}),
+        "transform_recommendations": plan.get("transform_recommendations", {}),
     }
 
 
