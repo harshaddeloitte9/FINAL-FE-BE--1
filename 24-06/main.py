@@ -44,6 +44,8 @@ from utils import (
 from preprocessing import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
+    classify_missing_treatment, select_imputation_strategy, SemanticImputer,
+    REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
@@ -772,6 +774,24 @@ async def data_profile(
     return profile
 
 
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert numpy scalar types to native Python so dict/list
+    structures built from pandas/numpy computations serialize cleanly."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, pd.DataFrame):
+        return _json_safe(obj.to_dict(orient="records"))
+    return obj
+
+
 @app.post("/data/preprocess")
 async def preprocess_data(
     file: Optional[UploadFile] = File(None),
@@ -781,6 +801,12 @@ async def preprocess_data(
     test_size: float = Form(0.15),
     val_size: float = Form(0.15),
     random_seed: int = Form(42),
+    # ── Confirmed reviewer choices (all optional; sensible "accept the
+    #    platform's proposal" defaults apply when omitted) ──
+    treatment_overrides: Optional[str] = Form(None),  # JSON {col: treatment}
+    drop_cols: Optional[str] = Form(None),             # JSON [col, ...]
+    transform_choices: Optional[str] = Form(None),     # JSON {col: "none"|"log1p"|"yeo_johnson"}
+    strategy_override: Optional[str] = Form(None),     # "mice" | "knn" | "median"
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     col_types = detect_column_types(df)
@@ -796,17 +822,117 @@ async def preprocess_data(
     if test_size + val_size >= 1:
         raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
 
+    def _parse_json_form(raw: Optional[str], default):
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {exc}")
+
+    _treatment_overrides: Dict[str, str] = _parse_json_form(treatment_overrides, {})
+    _drop_cols: List[str] = _parse_json_form(drop_cols, [])
+    _transform_choices: Dict[str, str] = _parse_json_form(transform_choices, {})
+
     task_type = detect_task_type(df[target_col])
     X, y, clean_info = finalize_xy(df, col_types, target_col)
 
-    # Preserve original preprocessing reporting semantics:
-    # build the preprocessing strategy on the full cleaned dataset before splitting.
-    prep_report = build_preprocessing_report(X.assign(**{target_col: y}), col_types, target_col)
-
+    # Split FIRST — every statistic learned below (missing-value treatment
+    # proposal, imputation strategy, skew/transform recommendations, the
+    # fitted preprocessor) comes from the TRAINING split only. This matches
+    # /models/train and the Streamlit reference app's leakage-safe design;
+    # the previous version of this endpoint built its report from the full
+    # pre-split dataset, which this fixes.
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(
         X, y, test_size=test_size, val_size=val_size,
         task_type=task_type, random_state=random_seed,
     )
+
+    # ── Phase 1: PROPOSE — classify_missing_treatment() on TRAIN only.
+    #    Nothing is applied yet; this is purely diagnostic. ──
+    missing_treatment_proposal = classify_missing_treatment(X_train, col_types)
+
+    # ── Phase 2: resolve the CONFIRMED treatment per column ──
+    # A column resolved to "review_flag" (>40% missing) that the reviewer
+    # chose to KEEP (not in drop_cols) can't stay "review_flag" — that
+    # treatment means "leave untouched", so it needs a real, recalibrated
+    # treatment instead. See classify_missing_treatment's force_include_cols
+    # docstring.
+    treatment_map: Dict[str, Dict[str, Any]] = {}
+    recalibrated_cols: List[Dict[str, str]] = []
+    for col, info in missing_treatment_proposal.items():
+        if col in _drop_cols:
+            continue
+        resolved_treatment = _treatment_overrides.get(col, info["treatment"])
+
+        if resolved_treatment == "review_flag":
+            recalibrated = classify_missing_treatment(
+                X_train[[col]], col_types, force_include_cols=[col]
+            )
+            if col in recalibrated:
+                treatment_map[col] = {
+                    **recalibrated[col],
+                    "reason": (
+                        f"Recalibrated — kept despite "
+                        f"{info['evidence'].get('missing_pct', 0):.1%} missing (over the "
+                        f"{int(REVIEW_MISSING_THRESHOLD * 100)}% review threshold). "
+                        f"{recalibrated[col]['reason']}"
+                    ),
+                }
+                recalibrated_cols.append({"column": col, "treatment": treatment_map[col]["treatment"]})
+                continue
+            treatment_map[col] = {
+                "treatment": "statistical", "reason": info["reason"], "evidence": info["evidence"],
+            }
+            continue
+
+        if col in _treatment_overrides:
+            treatment_map[col] = {
+                "treatment": resolved_treatment,
+                "reason": f"Manually overridden by reviewer (platform proposed: {info['treatment']}).",
+                "evidence": info["evidence"],
+            }
+        else:
+            treatment_map[col] = info
+
+    # ── Phase 3: joint imputation strategy for the "statistical" block ──
+    statistical_cols = [c for c, v in treatment_map.items() if v["treatment"] == "statistical"]
+    imputation_strategy = select_imputation_strategy(X_train, statistical_cols)
+    if strategy_override in ("mice", "knn", "median") and statistical_cols:
+        imputation_strategy = {
+            "method": strategy_override,
+            "reason": (
+                f"Manually overridden by reviewer "
+                f"(platform proposed: {imputation_strategy['method']})."
+            ),
+            "diagnostics": imputation_strategy.get("diagnostics", {}),
+        }
+
+    # ── Phase 4: fit SemanticImputer on TRAIN only, apply unchanged to val/test ──
+    col_types_for_fit = {k: [c for c in v if c not in _drop_cols] for k, v in col_types.items()}
+    imputer = SemanticImputer(
+        col_types=col_types_for_fit, treatment_map=treatment_map, strategy_choice=imputation_strategy,
+    )
+    imputer.fit(X_train)
+    X_train = imputer.transform(X_train)
+    X_val = imputer.transform(X_val)
+    X_test = imputer.transform(X_test)
+
+    _drop_cols_present = [c for c in _drop_cols if c in X_train.columns]
+    if _drop_cols_present:
+        X_train = X_train.drop(columns=_drop_cols_present)
+        X_val = X_val.drop(columns=[c for c in _drop_cols_present if c in X_val.columns], errors="ignore")
+        X_test = X_test.drop(columns=[c for c in _drop_cols_present if c in X_test.columns], errors="ignore")
+
+    # ── Phase 5: preprocessing report (scaler/encoder strategy + skew/transform
+    #    recommendations) on the now-imputed TRAIN split. transform_choices is
+    #    what actually drives the fitted ColumnTransformer below — nothing
+    #    here auto-applies a log/Yeo-Johnson transform on its own. ──
+    prep_report = build_preprocessing_report(
+        X_train.assign(**{target_col: y_train}), col_types, target_col,
+        transform_choices=_transform_choices,
+    )
+
     preprocessor = rebuild_preprocessor_for(X_train, col_types, target_col, prep_report)
     preprocessor.fit(X_train)
     processed_matrix = preprocessor.transform(X_train)
@@ -814,36 +940,43 @@ async def preprocess_data(
     processed_df = pd.DataFrame(processed_matrix, columns=processed_feature_names)
     processed_df[target_col] = y_train.reset_index(drop=True)
 
-    def _summary_row(column: str, feature_type: str, scaler: str, imputer: str, encoding: str, outlier_strategy: str):
+    def _summary_row(column: str, feature_type: str, scaler: str, imputer_label: str, encoding: str, outlier_strategy: str, transform: str):
         return {
             "feature": column,
             "type": feature_type,
             "scaler": scaler,
-            "imputer": imputer,
+            "imputer": imputer_label,
             "encoding": encoding,
             "outlier_strategy": outlier_strategy,
+            "transform": transform,
         }
 
     strategy_summary = []
     for col, info in prep_report.get("numeric", {}).items():
         scaler = "Robust" if info.get("scaler") == "robust" else "Standard"
-        imputer = info.get("imputer", "mean").capitalize()
+        imputer_label = info.get("imputer", "mean").capitalize()
         encoding = "-"
         outlier_strategy = "Robust scaling" if info.get("has_outliers") else "Standard scaling"
-        strategy_summary.append(_summary_row(col, "Numeric", scaler, imputer, encoding, outlier_strategy))
+        confirmed_t = _transform_choices.get(col, "none")
+        rec_t = (info.get("transform_recommendation") or {}).get("transform", "none")
+        transform_label = (
+            f"{confirmed_t.replace('_', '-').title()} (confirmed)" if confirmed_t in ("log1p", "yeo_johnson")
+            else (f"Suggested: {rec_t.replace('_', '-').title()}" if rec_t in ("log1p", "yeo_johnson") else "-")
+        )
+        strategy_summary.append(_summary_row(col, "Numeric", scaler, imputer_label, encoding, outlier_strategy, transform_label))
 
     for col, info in prep_report.get("categorical", {}).items():
         scaler = "-"
-        imputer = "Mode" if info.get("missing_pct", 0) >= 0 else "Mode"
+        imputer_label = "Mode"
         encoding = "OneHot" if info.get("encoding") == "onehot" else "Ordinal"
         outlier_strategy = "-"
-        strategy_summary.append(_summary_row(col, "Categorical", scaler, imputer, encoding, outlier_strategy))
+        strategy_summary.append(_summary_row(col, "Categorical", scaler, imputer_label, encoding, outlier_strategy, "-"))
 
     for col in prep_report.get("boolean", {}):
-        strategy_summary.append(_summary_row(col, "Boolean", "-", "-", "-", "-"))
+        strategy_summary.append(_summary_row(col, "Boolean", "-", "-", "-", "-", "-"))
 
     for col in prep_report.get("datetime", {}):
-        strategy_summary.append(_summary_row(col, "Datetime", "-", "-", "-", "-"))
+        strategy_summary.append(_summary_row(col, "Datetime", "-", "-", "-", "-", "-"))
 
     feature_names = list(X_train.columns)
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
@@ -889,6 +1022,17 @@ async def preprocess_data(
         "preprocessing_report": prep_report,
         "preprocessing_strategy_summary": strategy_summary,
         "processed_dataset_csv": processed_df.to_csv(index=False),
+        # ── New: the interactive missing-value + transform workflow ──
+        "missing_treatment_proposal": _json_safe(missing_treatment_proposal),
+        "applied_treatment_map": _json_safe(treatment_map),
+        "imputation_strategy": _json_safe(imputation_strategy),
+        "recalibrated_columns": recalibrated_cols,
+        "dropped_columns": _drop_cols_present,
+        "transform_recommendations": _json_safe(prep_report.get("transform_recommendations", {})),
+        "applied_transform_choices": _transform_choices,
+        "missing_value_limitation_note": MISSING_VALUE_LIMITATION_NOTE,
+        "review_missing_threshold": REVIEW_MISSING_THRESHOLD,
+        "original_dataset_csv": df.to_csv(index=False),
     }
 
 
