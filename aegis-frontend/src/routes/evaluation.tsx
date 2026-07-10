@@ -1,24 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
-import { apiUrl } from "@/lib/api";
-import {
-  AreaChart,
-  Area,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  BarChart,
-  Bar,
-} from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import PlotlyChart from "@/components/plotly-chart";
 import { ArrowLeft, ArrowRight, Download, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/evaluation")({
   head: () => ({ meta: [{ title: "Evaluation — Aegis Credit" }] }),
@@ -26,22 +13,14 @@ export const Route = createFileRoute("/evaluation")({
 });
 
 function makeCsvRows(metrics: Record<string, any>) {
-  return Object.entries(metrics).map(([key, value]) => {
-    let formatted = value;
-    if (typeof value === "object" && value !== null) {
-      try {
-        formatted = JSON.stringify(value);
-      } catch {
-        formatted = String(value);
-      }
-    }
-    return [key, String(formatted)];
-  });
+  return Object.entries(metrics)
+    .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+    .map(([key, value]) => [key, String(value)]);
 }
 
 function downloadCsv(metrics: Record<string, any>, fileName: string) {
   const rows = makeCsvRows(metrics);
-  const csv = ["metric,value", ...rows.map(([key, value]) => `${JSON.stringify(key)},${JSON.stringify(value)}`)].join("\n");
+  const csv = ["Metric,Value", ...rows.map(([key, value]) => `${JSON.stringify(key)},${JSON.stringify(value)}`)].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -93,32 +72,56 @@ function formatReplicatedValue(value: unknown) {
   return String(value);
 }
 
-function Card({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
+function formatMetricValue(value: unknown) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "N/A";
+  }
+  if (typeof value === "number") {
+    return value.toFixed(3);
+  }
+  return String(value);
+}
+
+function Card({ title, sub, children, className }: { title: string; sub?: string; children: React.ReactNode; className?: string }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+    <div className={`rounded-xl border border-border bg-card p-6 shadow-elegant ${className ?? ""}`.trim()}>
       <h3 className="text-sm font-semibold">{title}</h3>
       {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
-      <div className="mt-4 h-56">{children}</div>
+      <div className="mt-4">{children}</div>
     </div>
   );
 }
 
 function Evaluation() {
   const navigate = useNavigate();
-  const { trainingResult, file, profile, trainingConfig } = useDataset();
-  const [complianceFlags, setComplianceFlags] = useState<Record<string, any>[] | null>(null);
-  const [complianceScore, setComplianceScore] = useState<number | null>(null);
-  const [complianceLoading, setComplianceLoading] = useState(false);
-  const [complianceError, setComplianceError] = useState<string | null>(null);
-  const [replicationResult, setReplicationResult] = useState<Record<string, any> | null>(null);
-  const [replicationChecks, setReplicationChecks] = useState<Record<string, any>[]>([]);
-  const [replicationLoading, setReplicationLoading] = useState(false);
-  const [replicationError, setReplicationError] = useState<string | null>(null);
+  const { trainingResult } = useDataset();
+  const [activeTab, setActiveTab] = useState<"roc" | "pr" | "confusion" | "score" | "threshold" | "lift" | "residual" | "temporal">("roc");
+  const [temporalDateColumn, setTemporalDateColumn] = useState<string | null>(null);
+  const [temporalFrequency, setTemporalFrequency] = useState<string>("Quarterly");
 
-  const evaluationMetrics = trainingResult?.evaluation_metrics;
-  const evaluationData = trainingResult?.evaluation_data;
-  const modelArtifact = trainingResult?.model_artifact;
-  const threshold = evaluationMetrics?.threshold_used ?? evaluationData?.threshold ?? 0.5;
+  const evaluationMetrics = trainingResult?.evaluation_metrics && typeof trainingResult.evaluation_metrics === "object"
+    ? trainingResult.evaluation_metrics
+    : null;
+  const evaluationData = trainingResult?.evaluation_data && typeof trainingResult.evaluation_data === "object"
+    ? trainingResult.evaluation_data
+    : null;
+  const modelArtifact = typeof trainingResult?.model_artifact === "string" ? trainingResult.model_artifact : null;
+  const taskType = typeof trainingResult?.task_type === "string" ? trainingResult.task_type : "binary";
+  const threshold = typeof evaluationMetrics?.threshold_used === "number"
+    ? evaluationMetrics.threshold_used
+    : typeof evaluationData?.threshold === "number"
+      ? evaluationData.threshold
+      : 0.5;
+
+  const complianceLoading = false;
+  const complianceError: string | null = null;
+  const complianceScore: number | string | null = null;
+  const complianceFlags: Array<{ rule_id: string; flag: string }> = [];
+  const replicationLoading = false;
+  const replicationError: string | null = null;
+  const replicationResult = null as { metrics?: Record<string, any> } | null;
+  const replicationMetrics: Record<string, any> = (replicationResult?.metrics ?? {}) as Record<string, any>;
+  const replicationChecks: Array<{ id: string; title: string; status: string }> = [];
 
   const confusion = useMemo(() => {
     const matrix = evaluationMetrics?.confusion_matrix;
@@ -138,104 +141,87 @@ function Evaluation() {
     ] as const;
   }, [evaluationMetrics?.confusion_matrix]);
 
-  const gain = useMemo(() => evaluationData?.gain_chart ?? [], [evaluationData?.gain_chart]);
-  const thresholds = useMemo(() => evaluationData?.threshold_analysis ?? [], [evaluationData?.threshold_analysis]);
-  const rocCurve = useMemo(() => evaluationData?.roc_curve ?? [], [evaluationData?.roc_curve]);
-  const prCurve = useMemo(() => evaluationData?.pr_curve ?? [], [evaluationData?.pr_curve]);
-  const scoreDistribution = useMemo(() => evaluationData?.score_distribution ?? [], [evaluationData?.score_distribution]);
-
-  useEffect(() => {
-    if (!evaluationMetrics || !trainingResult) {
-      return;
+  const rocFigure = useMemo(() => evaluationData?.roc_curve_figure ?? null, [evaluationData?.roc_curve_figure]);
+  const prFigure = useMemo(() => evaluationData?.pr_curve_figure ?? null, [evaluationData?.pr_curve_figure]);
+  const confusionMatrixFigure = useMemo(() => evaluationData?.confusion_matrix_figure ?? null, [evaluationData?.confusion_matrix_figure]);
+  const thresholdFigure = useMemo(() => evaluationData?.threshold_analysis_figure ?? null, [evaluationData?.threshold_analysis_figure]);
+  const scoreDistributionFigure = useMemo(() => evaluationData?.score_distribution_figure ?? null, [evaluationData?.score_distribution_figure]);
+  const liftChartFigure = useMemo(() => evaluationData?.lift_chart_figure ?? null, [evaluationData?.lift_chart_figure]);
+  const heteroscedasticityCheck = useMemo(() => evaluationData?.heteroscedasticity_check ?? null, [evaluationData?.heteroscedasticity_check]);
+  const temporalAnalysis = useMemo(() => evaluationData?.temporal_analysis ?? null, [evaluationData?.temporal_analysis]);
+  const temporalRows = useMemo(() => {
+    if (!temporalAnalysis) {
+      return [] as Array<{ period: string; actual_rate: number; predicted_rate: number; gap: number; flagged: boolean }>;
     }
 
-    const payload = {
-      stage: "evaluation",
-      payload: {
-        metrics: evaluationMetrics,
-        training_info: trainingResult.training_info ?? {},
-        threshold,
-        explainability_done: false,
-        heteroscedasticity_check: evaluationData?.heteroscedasticity_check ?? null,
-        pd_output_present: true,
-        staging_logic_present: true,
-        sicr_flagged: true,
-        ecl_estimated: true,
-        concentration_analysis: true,
-        exposure_reported: true,
-        past_due_breakdown: true,
-        shap_available: false,
-      },
-    };
-
-    setComplianceLoading(true);
-    setComplianceError(null);
-    fetch(apiUrl("/validation/compliance"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const errorText = await res.text();
-          throw new Error(errorText || "Failed to fetch compliance results.");
-        }
-        return res.json();
-      })
-      .then((body) => {
-        setComplianceFlags(body.flags ?? []);
-        setComplianceScore(body.report?.metadata?.compliance_score ?? null);
-      })
-      .catch((error) => {
-        console.error("Evaluation compliance fetch failed", error);
-        setComplianceError("Unable to load compliance summary.");
-      })
-      .finally(() => {
-        setComplianceLoading(false);
-      });
-  }, [evaluationMetrics, evaluationData?.heteroscedasticity_check, threshold, trainingResult]);
-
-  useEffect(() => {
-    if (!trainingResult || !file || !profile?.target_col) {
-      return;
+    if (temporalFrequency === "Quarterly") {
+      return temporalAnalysis.plot_data ?? [];
     }
 
-    const replicationPayload = new FormData();
-    replicationPayload.append("file", file);
-    replicationPayload.append("target_col", profile.target_col);
-    replicationPayload.append("model_name", trainingResult.model_name);
-    replicationPayload.append("seeds", "42,43,44,45,46");
-    replicationPayload.append("test_size", String(trainingConfig?.test_size ?? 0.15));
-    replicationPayload.append("val_size", String(trainingConfig?.val_size ?? 0.15));
-    replicationPayload.append("random_seed", String(trainingConfig?.random_seed ?? 42));
-    replicationPayload.append("cv_folds", String(trainingConfig?.cv_folds ?? 5));
+    return temporalAnalysis.plot_data_by_freq?.[temporalFrequency] ?? [];
+  }, [temporalAnalysis, temporalFrequency]);
 
-    setReplicationLoading(true);
-    setReplicationError(null);
+  const temporalSummary = useMemo(() => {
+    if (!temporalAnalysis) {
+      return null;
+    }
 
-    fetch(apiUrl("/validation/replication"), {
-      method: "POST",
-      body: replicationPayload,
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const errorText = await res.text();
-          throw new Error(errorText || "Failed to fetch replication results.");
-        }
-        return res.json();
-      })
-      .then((body) => {
-        setReplicationResult(body.report?.replication?.result ?? null);
-        setReplicationChecks(body.report?.replication?.checks ?? []);
-      })
-      .catch((error) => {
-        console.error("Evaluation replication fetch failed", error);
-        setReplicationError("Unable to load replication results.");
-      })
-      .finally(() => {
-        setReplicationLoading(false);
+    if (temporalFrequency === "Quarterly") {
+      return temporalAnalysis.summary ?? null;
+    }
+
+    return temporalAnalysis.summaries_by_freq?.[temporalFrequency] ?? null;
+  }, [temporalAnalysis, temporalFrequency]);
+
+  const summaryMetricRows = useMemo(() => {
+    if (taskType !== "binary") {
+      return [
+        { label: "R²", value: evaluationMetrics?.r2 },
+        { label: "MAE", value: evaluationMetrics?.mae },
+        { label: "MSE", value: evaluationMetrics?.mse },
+        { label: "RMSE", value: evaluationMetrics?.rmse },
+      ];
+    }
+
+    return [
+      { label: "Accuracy", value: evaluationMetrics?.accuracy },
+      { label: "Precision", value: evaluationMetrics?.precision },
+      { label: "Recall", value: evaluationMetrics?.recall },
+      { label: "F1 score", value: evaluationMetrics?.f1 },
+      { label: "ROC AUC", value: evaluationMetrics?.roc_auc },
+      { label: "PR AUC", value: evaluationMetrics?.pr_auc },
+    ];
+  }, [evaluationMetrics, taskType]);
+
+  const classificationReportRows = useMemo(() => {
+    const report = evaluationMetrics?.classification_report;
+    if (!report || typeof report !== "object") {
+      return [] as Array<{ label: string; precision?: number; recall?: number; f1?: number; support?: number }>;
+    }
+
+    return Object.entries(report)
+      .filter(([, value]) => value && typeof value === "object" && "precision" in value)
+      .map(([label, value]) => {
+        const row = value as Record<string, unknown>;
+        return {
+          label,
+          precision: typeof row.precision === "number" ? row.precision : undefined,
+          recall: typeof row.recall === "number" ? row.recall : undefined,
+          f1: typeof row.f1 === "number" ? row.f1 : undefined,
+          support: typeof row.support === "number" ? row.support : undefined,
+        };
       });
-  }, [trainingResult, file, profile?.target_col, trainingConfig?.test_size, trainingConfig?.val_size, trainingConfig?.random_seed, trainingConfig?.cv_folds]);
+  }, [evaluationMetrics?.classification_report]);
+
+  useMemo(() => {
+    if (!temporalAnalysis || temporalDateColumn) {
+      return;
+    }
+    const available = temporalAnalysis.date_columns ?? [];
+    if (available.length > 0) {
+      setTemporalDateColumn(available[0]);
+    }
+  }, [temporalAnalysis, temporalDateColumn]);
 
   if (!trainingResult) {
     return (
@@ -279,98 +265,203 @@ function Evaluation() {
       />
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-[1.2fr_420px]">
-        <div className="space-y-6">
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card title="ROC curve" sub={evaluationMetrics?.roc_auc ? `AUC ${evaluationMetrics.roc_auc}` : "Probability output unavailable"}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={rocCurve}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="fpr" tickLine={false} axisLine={false} fontSize={11} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Area type="monotone" dataKey="tpr" stroke="oklch(0.6 0.18 135)" fill="oklch(0.76 0.18 130)" fillOpacity={0.3} />
-                  <Line type="linear" dataKey="fpr" stroke="oklch(0.6 0.01 240)" strokeDasharray="4 4" dot={false} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </Card>
-
-            <Card title="Precision–Recall" sub={evaluationMetrics?.pr_auc ? `Average precision ${evaluationMetrics.pr_auc}` : "Probability output unavailable"}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={prCurve}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="recall" tickLine={false} axisLine={false} fontSize={11} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Area type="monotone" dataKey="precision" stroke="oklch(0.6 0.18 135)" fill="oklch(0.76 0.18 130)" fillOpacity={0.3} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </Card>
+          <div className="space-y-6">
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-lg bg-background/60 p-1">
+              {(["roc","pr","confusion","score","threshold","lift","residual","temporal"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setActiveTab(t)}
+                  className={`px-3 py-1 text-sm rounded ${activeTab===t?"bg-primary text-white":"text-muted-foreground"}`}>
+                  {t === "roc" ? "ROC Curve" : t === "pr" ? "PR Curve" : t === "confusion" ? "Confusion" : t === "score" ? "Score Dist" : t === "threshold" ? "Thresholds" : t === "lift" ? "Lift" : t === "residual" ? "Residuals" : "Temporal"}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}`}>
-              <div className="grid h-full grid-cols-2 gap-3">
-                {confusion.map(([label, n, tone]) => (
-                  <div
-                    key={label}
-                    className={
-                      "flex flex-col justify-between rounded-xl border p-4 " +
-                      (tone === "primary"
-                        ? "border-primary/30 bg-primary-soft"
-                        : tone === "warning"
-                          ? "border-warning/40 bg-warning/15"
-                          : "border-destructive/30 bg-destructive/10")
-                    }
-                  >
-                    <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</span>
-                    <span className="text-2xl font-semibold tabular-nums">{Number(n).toLocaleString()}</span>
+          <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+            <Card title="Hold-out performance" sub="Key evaluation metrics from the test split">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {summaryMetricRows.map((metric) => (
+                  <div key={metric.label} className="rounded-lg border border-border bg-background/70 p-3">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{metric.label}</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums">{formatMetricValue(metric.value)}</div>
                   </div>
                 ))}
               </div>
             </Card>
 
-            <Card title="Cumulative gain" sub="Model vs baseline by decile">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={gain}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="decile" tickLine={false} axisLine={false} fontSize={11} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Line type="monotone" dataKey="model" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                  <Line type="monotone" dataKey="baseline" stroke="oklch(0.6 0.01 240)" strokeDasharray="4 4" dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+            <Card title="Classification report" sub="Per-class precision, recall, F1 and support">
+              <div className="overflow-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                      <th className="py-2 pr-3">Class</th>
+                      <th className="py-2 pr-3">Precision</th>
+                      <th className="py-2 pr-3">Recall</th>
+                      <th className="py-2 pr-3">F1</th>
+                      <th className="py-2">Support</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {classificationReportRows.length > 0 ? (
+                      classificationReportRows.map((row) => (
+                        <tr key={row.label} className="border-b border-border/60 text-sm">
+                          <td className="py-2 pr-3 font-medium">{row.label}</td>
+                          <td className="py-2 pr-3">{formatMetricValue(row.precision)}</td>
+                          <td className="py-2 pr-3">{formatMetricValue(row.recall)}</td>
+                          <td className="py-2 pr-3">{formatMetricValue(row.f1)}</td>
+                          <td className="py-2">{formatMetricValue(row.support)}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="py-3 text-sm text-muted-foreground">Classification report will appear after a completed binary classification run.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </Card>
           </div>
 
           <div className="grid gap-6 lg:grid-cols-2">
-            <Card title="Threshold analysis" sub="Precision · Recall · F1 across cut-offs">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={thresholds}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="threshold" tickLine={false} axisLine={false} fontSize={11} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Line type="monotone" dataKey="precision" stroke="oklch(0.6 0.18 135)" dot={false} strokeWidth={2} />
-                  <Line type="monotone" dataKey="recall" stroke="oklch(0.6 0.22 27)" dot={false} strokeWidth={2} />
-                  <Line type="monotone" dataKey="f1" stroke="oklch(0.55 0.02 240)" dot={false} strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
-            </Card>
+            {activeTab === "roc" && (
+              <Card title="ROC curve" sub={evaluationMetrics?.roc_auc ? `AUC ${evaluationMetrics.roc_auc}` : "Probability output unavailable"}>
+                {rocFigure ? (
+                  <PlotlyChart figure={rocFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">ROC curve requires probability predictions from a binary classification model.</p>
+                )}
+              </Card>
+            )}
 
-            <Card title="Score distribution" sub="Hold-out set">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={scoreDistribution}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="bin" tickLine={false} axisLine={false} fontSize={11} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Bar dataKey="good" stackId="a" fill="oklch(0.76 0.18 130)" />
-                  <Bar dataKey="bad" stackId="a" fill="oklch(0.6 0.22 27)" />
-                </BarChart>
-              </ResponsiveContainer>
-            </Card>
+            {activeTab === "pr" && (
+              <Card title="Precision–Recall" sub={evaluationMetrics?.pr_auc ? `Average precision ${evaluationMetrics.pr_auc}` : "Probability output unavailable"}>
+                {prFigure ? (
+                  <PlotlyChart figure={prFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Precision–Recall curve requires probability predictions from a binary classification model.</p>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "confusion" && (
+              <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}`}>
+                {confusionMatrixFigure ? (
+                  <PlotlyChart figure={confusionMatrixFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Confusion matrix requires a binary classification prediction threshold.</p>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "lift" && (
+              <Card title="Gain & lift" sub="Cumulative gain and lift by decile">
+                {liftChartFigure ? (
+                  <PlotlyChart figure={liftChartFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Gain and lift charts require probability predictions from a binary classification model.</p>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "threshold" && (
+              <Card title="Threshold analysis" sub="Precision · Recall · F1 across cut-offs">
+                {thresholdFigure ? (
+                  <PlotlyChart figure={thresholdFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Threshold analysis requires probability predictions from a binary classification model.</p>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "score" && (
+              <Card title="Score distribution" sub="Hold-out set">
+                {scoreDistributionFigure ? (
+                  <PlotlyChart figure={scoreDistributionFigure} style={{ minHeight: 360 }} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Score distribution requires probability predictions from a binary classification model.</p>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "residual" && (
+              <Card title="Residual diagnostics" sub="Heteroscedasticity-style residual checks">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-background/70 p-3">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Signal</div>
+                    <div className="mt-1 text-base font-semibold">{heteroscedasticityCheck?.risk_flag ?? "N/A"}</div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-background/70 p-3">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Abs residual corr</div>
+                    <div className="mt-1 text-base font-semibold">{formatMetricValue(heteroscedasticityCheck?.spearman_abs_resid_vs_score)}</div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-background/70 p-3 sm:col-span-2">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Variance ratio</div>
+                    <div className="mt-1 text-base font-semibold">{formatMetricValue(heteroscedasticityCheck?.variance_ratio)}</div>
+                  </div>
+                </div>
+                {Array.isArray(heteroscedasticityCheck?.bin_variance) && heteroscedasticityCheck.bin_variance.length > 0 && (
+                  <div className="mt-4 overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                          <th className="py-2 pr-3">Bin</th>
+                          <th className="py-2 pr-3">Count</th>
+                          <th className="py-2">Variance</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {heteroscedasticityCheck.bin_variance.map((row: Record<string, any>, index: number) => (
+                          <tr key={`${row.score_bin ?? index}`} className="border-b border-border/60 text-sm">
+                            <td className="py-2 pr-3">{row.score_bin ?? `Bin ${index + 1}`}</td>
+                            <td className="py-2 pr-3">{row.n ?? "—"}</td>
+                            <td className="py-2">{formatMetricValue(row.residual_variance)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {activeTab === "temporal" && (
+              <Card title="Actual vs Predicted" sub="Temporal stability by selected period">
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <select value={temporalFrequency} onChange={(e) => setTemporalFrequency(e.target.value)} className="text-sm p-1 rounded bg-background">
+                      {temporalAnalysis?.frequency_options?.map((f: string) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </div>
+                  <div className="overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                          <th className="py-2 pr-3">Period</th>
+                          <th className="py-2 pr-3">Actual Rate</th>
+                          <th className="py-2 pr-3">Predicted Rate</th>
+                          <th className="py-2">Gap</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {temporalRows.map((r: any, i: number) => (
+                          <tr key={i} className="border-b border-border/60 text-sm">
+                            <td className="py-2 pr-3">{r.period}</td>
+                            <td className="py-2 pr-3">{formatMetricValue(r.actual_rate)}</td>
+                            <td className="py-2 pr-3">{formatMetricValue(r.predicted_rate)}</td>
+                            <td className="py-2">{formatMetricValue(r.gap)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </Card>
+            )}
           </div>
+
         </div>
 
         <aside className="space-y-6">
@@ -455,31 +546,31 @@ function Evaluation() {
                 <div className="grid gap-3 text-sm">
                   <div className="flex items-center justify-between">
                     <span>AUC</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.roc_auc)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.roc_auc)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>Gini</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.gini)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.gini)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>KS</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.ks)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.ks)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>Accuracy</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.accuracy)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.accuracy)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>Precision</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.precision)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.precision)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>Recall</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.recall)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.recall)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>F1 score</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationResult.metrics?.f1)}</span>
+                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.f1)}</span>
                   </div>
                 </div>
                 <div className="grid gap-2">

@@ -22,7 +22,100 @@ from sklearn.metrics import (
 def _to_scores(y_proba) -> np.ndarray:
     """Return 1-D probability scores regardless of whether y_proba is 1-D or 2-D."""
     arr = np.asarray(y_proba)
-    return arr[:, 1] if arr.ndim == 2 else arr
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim == 2:
+        if arr.shape[1] == 1:
+            return arr[:, 0]
+        if arr.shape[1] >= 2:
+            return arr[:, 1]
+    return arr
+
+
+# ─────────────────────────────────────────────
+# Binary Classification Metrics
+# ─────────────────────────────────────────────
+
+def compute_binary_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: Optional[np.ndarray] = None,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Compute full binary classification metric suite."""
+    if y_proba is not None:
+        _scores = _to_scores(y_proba) if y_proba.ndim == 2 else y_proba
+        y_pred_thresh = (_scores >= threshold).astype(int)
+    else:
+        y_pred_thresh = y_pred
+        _scores = None
+
+    metrics = {
+        "accuracy": round(accuracy_score(y_true, y_pred_thresh), 4),
+        "precision": round(precision_score(y_true, y_pred_thresh, zero_division=0), 4),
+        "recall": round(recall_score(y_true, y_pred_thresh, zero_division=0), 4),
+        "f1": round(f1_score(y_true, y_pred_thresh, zero_division=0), 4),
+        "confusion_matrix": confusion_matrix(y_true, y_pred_thresh).tolist(),
+        "classification_report": classification_report(y_true, y_pred_thresh, output_dict=True, zero_division=0),
+        "threshold_used": threshold,
+    }
+"""
+evaluate.py - Credit Risk Focused Evaluation Engine
+Computes and visualizes all metrics for binary classification and regression.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Tuple, Optional, List
+
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix, classification_report,
+    roc_curve, precision_recall_curve, average_precision_score,
+    mean_squared_error, mean_absolute_error, r2_score,
+)
+
+
+def _to_scores(y_proba) -> np.ndarray:
+    """Return 1-D probability scores regardless of whether y_proba is 1-D or 2-D."""
+    arr = np.asarray(y_proba)
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim == 2:
+        if arr.shape[1] == 1:
+            return arr[:, 0]
+        if arr.shape[1] >= 2:
+            return arr[:, 1]
+    return arr
+
+
+def compute_ks_statistic(y_true: np.ndarray, y_proba) -> Dict[str, Any]:
+    """
+    Kolmogorov-Smirnov statistic: the max separation between the cumulative
+    distributions of predicted scores for the positive (default) and negative
+    (non-default) classes. Standard credit-risk metric — higher KS means the
+    model separates good/bad accounts better. Ranges 0-1.
+    """
+    y_true = np.asarray(y_true)
+    scores = _to_scores(y_proba)
+
+    pos_scores = scores[y_true == 1]
+    neg_scores = scores[y_true == 0]
+
+    if len(pos_scores) == 0 or len(neg_scores) == 0:
+        return {"ks_statistic": None, "ks_pvalue": None}
+
+    from scipy.stats import ks_2samp
+    result = ks_2samp(pos_scores, neg_scores)
+
+    return {
+        "ks_statistic": round(float(result.statistic), 4),
+        "ks_pvalue": round(float(result.pvalue), 4),
+    }
 
 
 # ─────────────────────────────────────────────
@@ -54,33 +147,43 @@ def compute_binary_metrics(
     }
 
     if y_proba is not None and _scores is not None:
-        metrics["roc_auc"] = round(roc_auc_score(y_true, _scores), 4)
-        metrics["pr_auc"] = round(average_precision_score(y_true, _scores), 4)
+        try:
+            roc_auc_value = roc_auc_score(y_true, _scores)
+            metrics["roc_auc"] = round(float(roc_auc_value), 4) if not np.isnan(roc_auc_value) else None
+        except Exception:
+            metrics["roc_auc"] = None
+        try:
+            metrics["pr_auc"] = round(average_precision_score(y_true, _scores), 4)
+        except Exception:
+            metrics["pr_auc"] = None
 
     return metrics
 
 
-def compute_roc_curve(y_true: np.ndarray, y_proba: np.ndarray) -> list[dict[str, float]]:
+def compute_roc_curve(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Return ROC points as a list of {fpr, tpr} dicts."""
+    if y_proba is None:
+        return []
     scores = _to_scores(y_proba)
     fpr, tpr, _ = roc_curve(y_true, scores)
-    return [
-        {"fpr": float(x), "tpr": float(y)}
-        for x, y in zip(fpr.tolist(), tpr.tolist())
-    ]
+    return [{"fpr": float(x), "tpr": float(y)} for x, y in zip(fpr.tolist(), tpr.tolist())]
 
 
-def compute_pr_curve(y_true: np.ndarray, y_proba: np.ndarray) -> list[dict[str, float]]:
+def compute_pr_curve(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Return PR points as a list of {recall, precision} dicts."""
+    if y_proba is None:
+        return []
     scores = _to_scores(y_proba)
     precision, recall, _ = precision_recall_curve(y_true, scores)
-    return [
-        {"recall": float(r), "precision": float(p)}
-        for p, r in zip(precision.tolist(), recall.tolist())
-    ]
+    return [{"recall": float(r), "precision": float(p)} for p, r in zip(precision.tolist(), recall.tolist())]
 
 
-def compute_threshold_analysis(y_true: np.ndarray, y_proba: np.ndarray) -> list[dict[str, float]]:
+def compute_threshold_analysis(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
+    """Evaluate precision/recall/F1 across the same threshold grid used by the Streamlit plot."""
+    if y_proba is None:
+        return []
     scores = _to_scores(y_proba)
-    thresholds = np.linspace(0.0, 1.0, 21)
+    thresholds = np.linspace(0.01, 0.99, 99)
     rows = []
     for threshold in thresholds:
         y_pred_t = (scores >= threshold).astype(int)
@@ -93,33 +196,75 @@ def compute_threshold_analysis(y_true: np.ndarray, y_proba: np.ndarray) -> list[
     return rows
 
 
-def compute_score_distribution(y_true: np.ndarray, y_proba: np.ndarray, n_bins: int = 20) -> list[dict[str, float]]:
+def compute_score_distribution(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None, n_bins: int = 40) -> List[Dict[str, Any]]:
+    """Summarize score distribution by score bins for the frontend chart."""
+    if y_proba is None:
+        return []
     scores = _to_scores(y_proba)
-    df = pd.DataFrame({"score": scores, "label": y_true.astype(int)})
-    df["bin"] = pd.cut(df["score"], bins=n_bins, labels=[f"{int(i*100/n_bins)}" for i in range(n_bins)], include_lowest=True)
-    grouped = df.groupby("bin")
-    result = []
-    for label, group in grouped:
-        good = int((group["label"] == 0).sum())
-        bad = int((group["label"] == 1).sum())
-        result.append({"bin": str(label), "good": good, "bad": bad})
-    return result
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    rows = []
+    for i in range(len(bins) - 1):
+        left, right = bins[i], bins[i + 1]
+        mask = (scores >= left) & (scores < right)
+        if i == len(bins) - 2:
+            mask = (scores >= left) & (scores <= right)
+        if not np.any(mask):
+            continue
+        good = int(np.sum((y_true[mask] == 0).astype(int)))
+        bad = int(np.sum((y_true[mask] == 1).astype(int)))
+        rows.append({
+            "bin": f"{left:.2f}-{right:.2f}",
+            "good": good,
+            "bad": bad,
+        })
+    return rows
 
 
-def compute_gain_chart(y_true: np.ndarray, y_proba: np.ndarray, n_deciles: int = 10) -> list[dict[str, float]]:
+def compute_gain_chart(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None, n_deciles: int = 10) -> List[Dict[str, float]]:
+    """Return cumulative gain by decile in the same shape the UI expects."""
+    if y_proba is None:
+        return []
     scores = _to_scores(y_proba)
-    df = pd.DataFrame({"score": scores, "actual": y_true.astype(int)})
-    df = df.sort_values("score", ascending=False).reset_index(drop=True)
-    total_actual = int(df["actual"].sum())
+    actual = np.asarray(y_true).astype(int)
+    order = np.argsort(scores)[::-1]
+    scores = scores[order]
+    actual = actual[order]
+    total_actual = int(actual.sum())
     results = []
     for i in range(n_deciles + 1):
         pct = i / n_deciles
-        cutoff = int(len(df) * pct)
-        cum_actual = int(df.head(cutoff)["actual"].sum()) if cutoff > 0 else 0
+        cutoff = int(len(actual) * pct)
+        cum_actual = int(actual[:cutoff].sum()) if cutoff > 0 else 0
         results.append({
             "decile": int(pct * 100),
             "model": float(round(cum_actual / total_actual * 100 if total_actual > 0 else 0.0, 2)),
             "baseline": float(round(pct * 100, 2)),
+        })
+    return results
+
+
+def compute_lift_chart(y_true: np.ndarray, y_proba: Optional[np.ndarray] = None, n_deciles: int = 10) -> List[Dict[str, float]]:
+    """Return cumulative gain/lift rows for the Streamlit lift chart."""
+    if y_proba is None:
+        return []
+    scores = _to_scores(y_proba)
+    actual = np.asarray(y_true).astype(int)
+    order = np.argsort(scores)[::-1]
+    scores = scores[order]
+    actual = actual[order]
+    total_actual = int(actual.sum())
+    results = []
+    for i in range(n_deciles + 1):
+        pct = i / n_deciles
+        cutoff = int(len(actual) * pct)
+        cum_actual = int(actual[:cutoff].sum()) if cutoff > 0 else 0
+        cum_gain = cum_actual / total_actual if total_actual > 0 else 0.0
+        lift = cum_gain / pct if pct > 0 else 0.0
+        results.append({
+            "decile": int(pct * 100),
+            "model": float(round(cum_gain * 100, 2)),
+            "baseline": float(round(pct * 100, 2)),
+            "lift": float(round(lift, 4)),
         })
     return results
 
@@ -383,3 +528,190 @@ def plot_lift_chart(y_true, y_proba) -> go.Figure:
         showlegend=True,
     )
     return fig
+
+
+def plot_actual_vs_predicted(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    n_bins: int = 10,
+) -> go.Figure:
+    """
+    Plots actual default rate vs average predicted PD, grouped into
+    bins by predicted score (calibration-style chart, not time-based).
+    Shows whether the model's predicted probabilities match real-world
+    outcomes — e.g. customers predicted at 70% PD should actually
+    default ~70% of the time.
+    """
+    df = pd.DataFrame({"actual": y_true, "predicted": y_proba})
+    df["bin"] = pd.qcut(df["predicted"], q=n_bins, duplicates="drop")
+
+    grouped = df.groupby("bin", observed=True).agg(
+        actual_rate=("actual", "mean"),
+        predicted_rate=("predicted", "mean"),
+        n=("actual", "count"),
+    ).reset_index()
+    grouped["bin_label"] = grouped["bin"].astype(str)
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=grouped["bin_label"], y=grouped["actual_rate"],
+        name="Actual Default Rate",
+        marker_color="#ef4444",
+        opacity=0.85,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=grouped["bin_label"], y=grouped["predicted_rate"],
+        mode="lines+markers", name="Avg Predicted PD",
+        line=dict(color="#6366f1", width=3),
+        marker=dict(size=8),
+    ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e2e8f0"),
+        title="Actual vs Predicted Default Rate by Risk Bin",
+        xaxis_title="Predicted PD Bin (low → high risk)",
+        yaxis_title="Default Rate",
+        yaxis=dict(tickformat=".0%", gridcolor="#334155"),
+        legend=dict(orientation="h", y=1.1),
+    )
+
+    return fig
+
+
+# ─────────────────────────────────────────────
+# Temporal Stability (Actual vs Predicted over time)
+# ─────────────────────────────────────────────
+
+def _temporal_grouped(dates, y_true, y_proba, freq: str = "ME") -> pd.DataFrame:
+    """Group actual default rate and average predicted PD by calendar period."""
+    dates = pd.to_datetime(pd.Series(dates).reset_index(drop=True), errors="coerce")
+    y_true_arr = np.asarray(y_true)
+    y_proba_arr = _to_scores(np.asarray(y_proba))
+
+    df = pd.DataFrame({
+        "date": dates,
+        "actual": y_true_arr,
+        "predicted": y_proba_arr,
+    }).dropna(subset=["date"])
+
+    if df.empty:
+        return df
+
+    pandas_freq = {"Monthly": "M", "Quarterly": "Q", "Yearly": "Y"}.get(freq, freq)
+    pandas_freq = pandas_freq.replace("ME", "M").replace("QE", "Q").replace("YE", "Y")
+    df["period"] = df["date"].dt.to_period(pandas_freq)
+    grouped = df.groupby("period", observed=True).agg(
+        actual_rate=("actual", "mean"),
+        predicted_rate=("predicted", "mean"),
+        n=("actual", "count"),
+    ).reset_index()
+    grouped["period_label"] = grouped["period"].astype(str)
+    grouped["gap"] = grouped["actual_rate"] - grouped["predicted_rate"]
+    grouped["abs_gap"] = grouped["gap"].abs()
+    return grouped.sort_values("period").reset_index(drop=True)
+
+
+def plot_actual_vs_predicted_over_time(
+    dates,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    freq: str = "ME",
+) -> go.Figure:
+    """
+    Plots actual default rate vs average predicted PD over calendar time
+    (monthly/quarterly/yearly), to check whether predicted PDs track real-world
+    outcomes consistently across the observation window (temporal/regime stability),
+    as opposed to plot_actual_vs_predicted() which bins by predicted score.
+    """
+    grouped = _temporal_grouped(dates, y_true, y_proba, freq=freq)
+
+    fig = go.Figure()
+    if grouped.empty:
+        fig.update_layout(**_plotly_layout("Actual vs Predicted Default Rate Over Time"))
+        return fig
+
+    fig.add_trace(go.Bar(
+        x=grouped["period_label"], y=grouped["actual_rate"],
+        name="Actual Default Rate",
+        marker_color=COLORS["danger"],
+        opacity=0.85,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=grouped["period_label"], y=grouped["predicted_rate"],
+        mode="lines+markers", name="Avg Predicted PD",
+        line=dict(color=COLORS["primary"], width=3),
+        marker=dict(size=8),
+    ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"]),
+        title="Actual vs Predicted Default Rate Over Time",
+        xaxis_title="Period",
+        yaxis_title="Default Rate",
+        yaxis=dict(tickformat=".0%", gridcolor="#334155"),
+        legend=dict(orientation="h", y=1.1),
+    )
+    return fig
+
+
+def compute_temporal_stability_summary(
+    dates,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    freq: str = "ME",
+    gap_threshold: float = 0.05,
+) -> Dict[str, Any]:
+    """
+    Summarize how closely predicted PD tracks actual default rate across time
+    periods. A period is "flagged" if |actual - predicted| exceeds gap_threshold
+    (default 5pp). Useful for spotting stress periods / regime shifts the model
+    under- or over-estimates.
+    """
+    grouped = _temporal_grouped(dates, y_true, y_proba, freq=freq)
+
+    if grouped.empty:
+        return {
+            "n_periods_total": 0,
+            "n_periods_flagged": 0,
+            "mean_absolute_gap": 0.0,
+            "max_underestimation_period": None,
+            "max_underestimation_gap": 0.0,
+            "max_overestimation_period": None,
+            "max_overestimation_gap": 0.0,
+            "by_period": [],
+        }
+
+    flagged = grouped[grouped["abs_gap"] > gap_threshold]
+
+    # Underestimation: actual > predicted (gap > 0) — model understates risk.
+    under = grouped[grouped["gap"] > 0]
+    over = grouped[grouped["gap"] < 0]
+
+    max_under_row = under.loc[under["gap"].idxmax()] if not under.empty else None
+    max_over_row = over.loc[over["gap"].idxmin()] if not over.empty else None
+
+    return {
+        "n_periods_total": int(len(grouped)),
+        "n_periods_flagged": int(len(flagged)),
+        "mean_absolute_gap": float(grouped["abs_gap"].mean()),
+        "max_underestimation_period": str(max_under_row["period_label"]) if max_under_row is not None else None,
+        "max_underestimation_gap": float(max_under_row["gap"]) if max_under_row is not None else 0.0,
+        "max_overestimation_period": str(max_over_row["period_label"]) if max_over_row is not None else None,
+        "max_overestimation_gap": float(abs(max_over_row["gap"])) if max_over_row is not None else 0.0,
+        "by_period": [
+            {
+                "period": row["period_label"],
+                "n": int(row["n"]),
+                "actual_rate": round(float(row["actual_rate"]), 4),
+                "predicted_rate": round(float(row["predicted_rate"]), 4),
+                "gap": round(float(row["gap"]), 4),
+                "flagged": bool(row["abs_gap"] > gap_threshold),
+            }
+            for _, row in grouped.iterrows()
+        ],
+    }
