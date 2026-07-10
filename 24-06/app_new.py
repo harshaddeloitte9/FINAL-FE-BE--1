@@ -1678,9 +1678,29 @@ def render_training():
 
     st.divider()
 
+    # ── Origination date — auto-detected from the dataset's column types ──
+    # The new repo doesn't yet have the FRED macro-data step the source-of-
+    # truth app uses to let reviewers pick a date column, so we fall back to
+    # the first auto-detected datetime column from `detect_column_types`.
+    df_orig_for_dates = st.session_state.get("df")
+    origination_date_col = None
+    if col_types.get("datetime"):
+        origination_date_col = col_types["datetime"][0]
+
+    dates_train = None
+    if (
+        origination_date_col
+        and df_orig_for_dates is not None
+        and origination_date_col in df_orig_for_dates.columns
+    ):
+        try:
+            dates_train = df_orig_for_dates.loc[X_train.index, origination_date_col]
+        except Exception:
+            dates_train = None
+
     # ── Cross Validation ──
     st.markdown("#### 🔁 Cross Validation")
-    cv_col1, cv_col2 = st.columns(2)
+    cv_col1, cv_col2, cv_col3 = st.columns(3)
     with cv_col1:
         use_cv = st.checkbox("Enable K-Fold Cross Validation", value=False)
         cv_folds = st.slider("Number of folds", 3, 10, 5, 1) if use_cv else 5
@@ -1689,6 +1709,24 @@ def render_training():
         if use_hyperopt:
             n_iter = st.slider("Search iterations (n_iter)", 5, 30, 8, 1)
             st.caption("Hyperopt will override the manual parameters below — disable it to use manual settings.")
+    with cv_col3:
+        if dates_train is not None:
+            use_oot = st.checkbox(
+                f"Reserve Out-of-Time (OOT) holdout on `{origination_date_col}`",
+                value=True,
+                help=(
+                    "Recommended: reserves the most recent slice of the training data "
+                    "(by origination date) as an untouched holdout. K-Fold CV and the "
+                    "final fit only ever see the earlier 'development' data; the OOT "
+                    "slice is scored exactly once, after training, and never used to "
+                    "tune anything."
+                ),
+            )
+        else:
+            use_oot = False
+            st.caption(
+                "ℹ️ No date column detected in this dataset — OOT validation unavailable."
+            )
 
     st.divider()
 
@@ -1735,6 +1773,9 @@ def render_training():
                     use_cv=False,
                     use_hyperopt=False,
                     task_type=task_type,
+                    model_name=model_name,
+                    dates_train=None,
+                    use_oot=False,
                 )
                 row = {"Model": model_name, "Training Time (s)": round(time.time() - start, 2)}
                 row.update(_comparison_metrics(candidate_pipeline, X_val, y_val, task_type, threshold))
@@ -1832,6 +1873,9 @@ def render_training():
                 use_hyperopt=use_hyperopt,
                 param_grid=param_grid,
                 task_type=task_type,
+                model_name=selected_model_name,
+                dates_train=dates_train,
+                use_oot=use_oot,
             )
 
             progress_bar.progress(90)
@@ -1847,13 +1891,26 @@ def render_training():
             progress_bar.progress(100)
             st.success(f"✅ **{selected_model_name}** trained successfully in **{training_info['training_time_s']}s**")
 
-            # ── Results Panel ──
-            res_cols = st.columns(4)
-            res_cols[0].metric("⏱️ Training Time", f"{training_info['training_time_s']}s")
-            res_cols[1].metric("📐 Features Used", len(real_feature_names))
-            res_cols[2].metric("🏋️ Train Samples", f"{len(X_train):,}")
+            # ── Results Panel (OOT metrics folded in alongside the rest) ──
+            _oot_info = training_info.get("oot", {})
+            st.session_state.oot_metrics = _oot_info
+
+            res_metrics = [
+                ("⏱️ Training Time", f"{training_info['training_time_s']}s"),
+                ("📐 Features Used", len(real_feature_names)),
+                ("🏋️ Train Samples", f"{len(X_train):,}"),
+            ]
+            if _oot_info.get("oot_roc_auc") is not None:
+                res_metrics.append(("📈 OOT ROC-AUC", f"{_oot_info['oot_roc_auc']:.4f}"))
+            if _oot_info.get("oot_gini") is not None:
+                res_metrics.append(("📊 OOT Gini", f"{_oot_info['oot_gini']:.4f}"))
+
+            res_cols = st.columns(len(res_metrics))
+            for _col, (_label, _value) in zip(res_cols, res_metrics):
+                _col.metric(_label, _value)
+
             if training_info.get("smote_skipped"):
-                res_cols[3].warning(f"SMOTE skipped: {training_info['smote_skipped']}")
+                st.warning(f"SMOTE skipped: {training_info['smote_skipped']}")
 
             if training_info.get("cv_mean"):
                 cv_cols = st.columns(3)
@@ -1879,6 +1936,19 @@ def render_training():
                 if training_info.get("best_params"):
                     st.markdown("**Best Hyperparameters Found:**")
                     st.json(training_info["best_params"])
+
+            if _oot_info.get("oot_available"):
+                st.caption(
+                    f"🕒 OOT holdout cutoff `{_oot_info.get('cutoff_date', '—')}` — "
+                    f"{_oot_info.get('dev_n', 0):,} development rows / {_oot_info.get('oot_n', 0):,} OOT rows. "
+                    "K-Fold CV and the final fit only saw development data; OOT was scored exactly once."
+                )
+                if _oot_info.get("oot_eval_note"):
+                    st.warning(f"⚠️ {_oot_info['oot_eval_note']}")
+                if _oot_info.get("oot_eval_error"):
+                    st.warning(f"⚠️ OOT scoring failed: {_oot_info['oot_eval_error']}")
+            elif use_oot:
+                st.info(f"ℹ️ OOT holdout requested but skipped — {_oot_info.get('oot_reason', 'not enough dated rows.')}")
 
             # Show actual model params
             with st.expander("🔎 Model Parameters Used for Training", expanded=True):

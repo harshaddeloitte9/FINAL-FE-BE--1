@@ -1204,6 +1204,8 @@ async def train_model_endpoint(
     manual_params: Optional[str] = Form(None),
     use_feature_engineering: bool = Form(False),
     synthetic_samples: Optional[int] = Form(None),
+    use_oot: bool = Form(False),
+    date_col: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
@@ -1215,6 +1217,23 @@ async def train_model_endpoint(
         X, y, test_size=test_size, val_size=val_size,
         task_type=task_type, random_state=random_seed,
     )
+
+    # ── Origination/observation date for Out-of-Time (OOT) validation ──
+    # Use the reviewer-selected date column if provided and valid, otherwise
+    # fall back to the first auto-detected datetime column (same detection
+    # `detect_column_types` already exposes via the data-profile endpoint).
+    origination_date_col = date_col if (date_col and date_col in df.columns) else None
+    if origination_date_col is None:
+        datetime_candidates = col_types.get("datetime", [])
+        if datetime_candidates:
+            origination_date_col = datetime_candidates[0]
+
+    dates_train = None
+    if origination_date_col and origination_date_col in df.columns:
+        try:
+            dates_train = df.loc[X_train.index, origination_date_col]
+        except Exception:
+            dates_train = None
     prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
     fe_summary = None
     plan = None
@@ -1257,6 +1276,9 @@ async def train_model_endpoint(
         use_hyperopt=use_hyperopt,
         param_grid=param_grid,
         task_type=task_type,
+        model_name=model_name,
+        dates_train=dates_train,
+        use_oot=use_oot,
     )
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
 
@@ -1315,6 +1337,8 @@ async def train_model_endpoint(
             "scale_pos_weight": scale_pos_weight,
             "use_feature_engineering": use_feature_engineering,
             "manual_params": manual_params_dict or {},
+            "use_oot": use_oot,
+            "date_col": origination_date_col,
         },
         "training_info": training_info,
         "split_stats": split_stats,
