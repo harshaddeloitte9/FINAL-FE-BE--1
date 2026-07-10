@@ -4,6 +4,12 @@ train.py - Model Training Engine
 FIX v2:
   - Preprocessor is REBUILT on X_engineered so columns always match
   - Real feature names resolved after fitting
+
+FIX v4 (Optimal Binning removed):
+  - The Optimal-Binning / WOE preprocessing path for Logistic Regression has
+    been removed entirely. Every model — including Logistic Regression — now
+    goes through the standard rebuild_preprocessor_for() ColumnTransformer
+    path, same as tree models always have.
 """
 
 import time
@@ -77,14 +83,15 @@ def train_model(
     task_type: str = "binary",
 ) -> Tuple[Any, Dict[str, Any], List[str]]:
     """
-    1. Rebuild a fresh ColumnTransformer scoped to X_train's columns.
+    1. Rebuild a fresh preprocessor scoped to X_train's columns.
     2. Wrap in a standard sklearn Pipeline.
     3. Fit and return (pipeline, info, real_feature_names).
     """
     training_info = {}
     start_time = time.time()
 
-    # ── REBUILD preprocessor for the exact columns in X_train ──
+    training_info["preprocessing_method"] = "standard"
+
     preprocessor = rebuild_preprocessor_for(X_train, col_types, target_col, prep_report)
 
     pipeline = Pipeline([
@@ -128,14 +135,21 @@ def train_model(
             training_info["cv_error"] = str(e)
 
     # ── Extract real feature names ──
+    # ColumnTransformer needs the dedicated name-resolution helper (handles
+    # OHE expansion, datetime decomposition, etc.).
     try:
         fitted_prep = fitted_pipeline.named_steps.get("preprocessor")
         if fitted_prep is None:
             for _, step in fitted_pipeline.steps:
-                if hasattr(step, "transformers_"):
+                if hasattr(step, "transformers_") or hasattr(step, "get_feature_names_out"):
                     fitted_prep = step
                     break
-        real_names = get_feature_names_from_fitted_preprocessor(fitted_prep) if fitted_prep else []
+        if fitted_prep is not None and hasattr(fitted_prep, "transformers_"):
+            real_names = get_feature_names_from_fitted_preprocessor(fitted_prep)
+        elif fitted_prep is not None and hasattr(fitted_prep, "get_feature_names_out"):
+            real_names = list(fitted_prep.get_feature_names_out())
+        else:
+            real_names = []
     except Exception:
         real_names = []
 
