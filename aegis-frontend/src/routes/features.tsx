@@ -688,11 +688,16 @@ function Features() {
           Back to Preprocessing
         </button>
         <button
-          className="inline-flex items-center justify-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-50"
-          onClick={() => navigate("/models")}
-          disabled={!canProceed}
+          className="inline-flex items-center justify-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
+          onClick={async () => {
+            try {
+              await navigate({ to: "/training" });
+            } catch (err) {
+              console.error("Navigation failed:", err);
+            }
+          }}
         >
-          Proceed to Model Selection
+          Proceed to Model Training
           <ArrowRight className="h-4 w-4" />
         </button>
       </section>

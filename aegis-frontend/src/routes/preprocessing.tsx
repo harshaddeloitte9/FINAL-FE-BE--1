@@ -50,14 +50,16 @@ const TRANSFORM_LABELS: Record<string, string> = {
 const TRANSFORM_OPTIONS = ["none", "log1p", "yeo_johnson"];
 
 function Preprocessing() {
-  const { profile, file } = useDataset();
+  const { profile, file, preprocessingResult, setPreprocessingResult } = useDataset();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preprocess, setPreprocess] = useState<any>(null);
-  const [testSize, setTestSize] = useState(0.15);
-  const [valSize, setValSize] = useState(0.15);
-  const [randomSeed, setRandomSeed] = useState(42);
+  // Seed local preview state from context so returning to this page (e.g. via
+  // Back from a later step) doesn't lose the split/preprocessing already run.
+  const [preprocess, setPreprocess] = useState<any>(preprocessingResult ?? null);
+  const [testSize, setTestSize] = useState(preprocessingResult?.split_config?.test_size ?? 0.15);
+  const [valSize, setValSize] = useState(preprocessingResult?.split_config?.val_size ?? 0.15);
+  const [randomSeed, setRandomSeed] = useState(preprocessingResult?.split_config?.random_seed ?? 42);
 
   // ── Reviewer's confirmed choices — sent back to the API on every call ──
   const [treatmentOverrides, setTreatmentOverrides] = useState<Record<string, string>>({});
@@ -110,6 +112,9 @@ function Preprocessing() {
 
         const result = await formUpload("/data/preprocess", form);
         setPreprocess(result);
+        // Publish to shared context so Training (which no longer re-splits)
+        // can read split_stats / split_config directly.
+        setPreprocessingResult(result);
 
         // Seed local selection state from the platform's proposal, but only
         // ONCE — after that, the reviewer's own edits are what's sent back,

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
-import { useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import {
   BarChart,
   Bar,
@@ -49,6 +49,20 @@ interface ComparisonResult {
   training_time_s?: number;
 }
 
+// ── Merged in from models.tsx (Model Selection step, now folded into Training) ──
+interface ModelRecommendation {
+  name: string;
+  score: number;
+  description: string;
+  why: string;
+  best_for?: string[];
+  icon?: string;
+}
+
+interface ModelCard extends ModelRecommendation {
+  selected?: boolean;
+}
+
 function Training() {
   const navigate = useNavigate();
   const {
@@ -56,6 +70,7 @@ function Training() {
     file,
     selectedModel,
     recommendations,
+    setRecommendations,
     compareModels,
     setCompareModels,
     trainingConfig,
@@ -67,13 +82,18 @@ function Training() {
     setTrainingResult,
     setComparisonResults,
     setSelectedComparisonModel,
+    preprocessingResult,
   } = useDataset();
-  
-  // Training configuration state
+
+  // ── Split config: owned by Preprocessing (Step 3). Training only reads it. ──
+  const splitConfig = preprocessingResult?.split_config ?? { test_size: 0.15, val_size: 0.15, random_seed: 42 };
+
+  // Training configuration state (split fields kept for API-call compatibility,
+  // but sourced from preprocessing's locked-in split rather than user input here)
   const [config, setConfig] = useState<TrainingConfig>(trainingConfig ?? {
-    test_size: 0.15,
-    val_size: 0.15,
-    random_seed: 42,
+    test_size: splitConfig.test_size,
+    val_size: splitConfig.val_size,
+    random_seed: splitConfig.random_seed,
     use_cv: false,
     cv_folds: 5,
     use_hyperopt: false,
@@ -83,8 +103,20 @@ function Training() {
     manual_params: {},
   });
 
+  // Keep config's split fields in sync with whatever Preprocessing locked in,
+  // in case the reviewer changed it there after this page already mounted.
+  useEffect(() => {
+    setConfig((prev) => ({
+      ...prev,
+      test_size: splitConfig.test_size,
+      val_size: splitConfig.val_size,
+      random_seed: splitConfig.random_seed,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitConfig.test_size, splitConfig.val_size, splitConfig.random_seed]);
+
   const [trainingInfo, setTrainingInfo] = useState<Record<string, any> | null>(trainingResult?.training_info ?? null);
-  const [splitStats, setSplitStats] = useState<Record<string, any> | null>(trainingResult?.split_stats ?? null);
+  const [splitStats, setSplitStats] = useState<Record<string, any> | null>(trainingResult?.split_stats ?? preprocessingResult?.split_stats ?? null);
   const [evaluationMetrics, setEvaluationMetrics] = useState<Record<string, any> | null>(trainingResult?.evaluation_metrics ?? null);
   const [modelArtifact, setModelArtifact] = useState<string | null>(trainingResult?.model_artifact ?? null);
   const [taskType, setTaskType] = useState<string | null>(trainingResult?.task_type ?? null);
@@ -106,26 +138,135 @@ function Training() {
     reg_alpha: 0.0,
   });
 
-  // Calculate live split statistics for UI before backend training returns the exact split
-  const totalSamples = profile?.shape?.[0] ?? 0;
-  const splitStats_live = useMemo(() => {
-    if (!totalSamples) return null;
-    const testN = Math.floor(totalSamples * config.test_size);
-    const trainValN = totalSamples - testN;
-    const valN = Math.floor(trainValN * config.val_size / (1 - config.test_size));
-    const trainN = trainValN - valN;
-    return {
-      total: totalSamples,
-      train_n: trainN,
-      val_n: valN,
-      test_n: testN,
-      train_pct: trainN / totalSamples,
-      val_pct: valN / totalSamples,
-      test_pct: testN / totalSamples,
-    };
-  }, [totalSamples, config.test_size, config.val_size]);
+  // ── Model recommendations (merged in from models.tsx) ──────────────────
+  const [trainingStats, setTrainingStats] = useState<{ train_n: number; train_features: number; imbalance_ratio: number } | null>(null);
+  const [recommendationTaskType, setRecommendationTaskType] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const fetchRef = useRef(false);
 
-  const displaySplitStats = splitStats ?? splitStats_live;
+  const datasetSummary = useMemo(() => {
+    // Prefer training stats returned by the backend (train split after FE)
+    if (trainingStats) {
+      return { sampleCount: trainingStats.train_n, featureCount: trainingStats.train_features, imbalanceRatio: trainingStats.imbalance_ratio };
+    }
+    if (!profile) return null;
+    const shape = profile.shape ?? [0, 0];
+    const sampleCount = shape[0] ?? 0;
+    const featureCount = shape[1] ?? 0;
+    let imbalanceRatio = 1.0;
+
+    if (profile.class_distribution && typeof profile.class_distribution === "object") {
+      const values = Object.values(profile.class_distribution) as number[];
+      if (values.length >= 2) {
+        const sorted = values.sort((a, b) => b - a);
+        imbalanceRatio = sorted[0] / (sorted[1] || 1);
+      }
+    }
+
+    return { sampleCount, featureCount, imbalanceRatio };
+  }, [profile, trainingStats]);
+
+  const transformedModels: ModelCard[] = useMemo(() => {
+    if (!recommendations || !Array.isArray(recommendations) || recommendations.length === 0) return [];
+    return recommendations.map((rec, idx) => ({
+      ...rec,
+      selected: rec.name === selectedModel?.name || (!selectedModel && idx === 0),
+    }));
+  }, [recommendations, selectedModel]);
+
+  useEffect(() => {
+    if (!profile || !file) return;
+    // Reset guard when dataset changes so we fetch for new dataset
+    fetchRef.current = false;
+    if (recommendations && recommendations.length > 0) return; // already loaded
+    if (fetchRef.current) return; // already in-flight or fetched
+
+    let isMounted = true;
+    const loadRecommendations = async () => {
+      setModelsLoading(true);
+      setModelsError(null);
+
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("target_col", profile.target_col || "loan_status");
+
+        const response = await formUpload("/models/recommend", form);
+        if (!isMounted) return;
+        // Use backend-provided training stats when available
+        if (response?.training) {
+          setTrainingStats(response.training as any);
+        }
+        if (response?.task_type) {
+          setRecommendationTaskType(response.task_type);
+        }
+
+        const recs = response?.recommendations ?? response?.recommendations_list ?? response?.data ?? null;
+        if (recs && Array.isArray(recs)) {
+          const transformed = recs.map((rec: any) => ({
+            name: rec.name,
+            score: typeof rec.score === "number" ? rec.score : 5,
+            description: rec.description ?? "",
+            why: rec.why ?? rec.description ?? "",
+            best_for: rec.best_for ?? [],
+            icon: rec.icon,
+          }));
+
+          setRecommendations(transformed);
+
+          const currentModelName = selectedModel?.name;
+          const hasCurrentSelection = currentModelName
+            ? transformed.some((m) => m.name === currentModelName)
+            : false;
+
+          if (!hasCurrentSelection && transformed.length > 0) {
+            setSelectedModel(transformed[0]);
+          }
+
+          const validCompareModels = (compareModels ?? []).filter((name) =>
+            transformed.some((m) => m.name === name),
+          );
+
+          if (validCompareModels.length === 0 && transformed.length > 0) {
+            setCompareModels(transformed.slice(0, Math.min(3, transformed.length)).map((m) => m.name));
+          } else if (validCompareModels.length !== (compareModels ?? []).length) {
+            setCompareModels(validCompareModels);
+          }
+        } else {
+          setModelsError("No recommendations returned by backend.");
+        }
+      } catch (err: any) {
+        console.error("Training: failed to load model recommendations", err);
+        if (!isMounted) return;
+        setModelsError(err?.body?.detail ?? err?.message ?? "Failed to load model recommendations.");
+      } finally {
+        if (isMounted) setModelsLoading(false);
+      }
+    };
+
+    fetchRef.current = true;
+    loadRecommendations();
+    return () => {
+      isMounted = false;
+    };
+  }, [file, profile, recommendations, selectedModel, compareModels, setRecommendations, setSelectedModel, setCompareModels]);
+
+  const handleSelectModel = useCallback((model: ModelCard) => {
+    setSelectedModel(model);
+  }, [setSelectedModel]);
+
+  const toggleModelToCompare = useCallback((modelName: string) => {
+    const current = compareModels ?? [];
+    const next = current.includes(modelName)
+      ? current.filter((m) => m !== modelName)
+      : [...current, modelName];
+    setCompareModels(next);
+  }, [compareModels, setCompareModels]);
+
+  // Split stats to display: prefer the exact stats a training run returned,
+  // otherwise fall back to the split already computed in Preprocessing.
+  const displaySplitStats = splitStats ?? preprocessingResult?.split_stats ?? null;
 
   // Handle training execution
   const trainModel = async (modelName: string) => {
@@ -325,19 +466,13 @@ function Training() {
     setCompareModels(modelsToCompare);
   }, [modelsToCompare, setCompareModels]);
 
-  if (!selectedModel) {
+  if (!profile) {
     return (
       <div className="space-y-8">
-        <PageHeader
-          title="Training"
-          description="Configure and run model training"
-        />
+        <PageHeader title="Training" description="Pick a model and configure training." />
         <div className="rounded-xl border border-border bg-card p-6 text-center">
-          <h3 className="text-lg font-semibold">No model selected</h3>
-          <p className="mt-2 text-sm text-muted-foreground">Select a model before proceeding to training.</p>
-          <Button onClick={() => navigate({ to: "/models" })} className="mt-4">
-            Go back to Model Selection
-          </Button>
+          <h3 className="text-lg font-semibold">No dataset available</h3>
+          <p className="mt-2 text-sm text-muted-foreground">Upload and preprocess a dataset before training.</p>
         </div>
       </div>
     );
@@ -347,7 +482,7 @@ function Training() {
     <div className="space-y-8">
       <PageHeader
         title="Training"
-        description={`Configure and train the ${selectedModel.name} model with optimized parameters.`}
+        description={selectedModel ? `Configure and train the ${selectedModel.name} model with optimized parameters.` : "Models ranked by suitability for your dataset — pick one to train."}
       />
 
       {error && (
@@ -357,93 +492,181 @@ function Training() {
         </div>
       )}
 
-      {/* Data Split Configuration */}
+      {modelsError && (
+        <div className="rounded-xl border border-destructive bg-destructive/5 p-4 text-sm text-destructive flex gap-3">
+          <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+          <div>{modelsError}</div>
+        </div>
+      )}
+
+      {/* ── Model Selection (merged in from models.tsx) ──────────────────── */}
+      {datasetSummary && (
+        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="text-sm text-muted-foreground">Dataset summary</div>
+          <div className="mt-2 text-lg font-semibold">
+            Dataset: {datasetSummary.sampleCount.toLocaleString()} samples × {datasetSummary.featureCount} features | Imbalance ratio: {datasetSummary.imbalanceRatio.toFixed(1)}:1
+          </div>
+        </section>
+      )}
+
+      {modelsLoading && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          Loading model recommendations...
+        </div>
+      )}
+
+      {transformedModels.length === 0 && !modelsLoading && !modelsError && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          No model recommendations available.
+        </div>
+      )}
+
+      {transformedModels.length > 0 && (
+        <>
+          <section>
+            <h2 className="mb-4 text-base font-semibold">Recommended Models</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              These candidates are ranked by suitability and can be compared on the same split after training.
+            </p>
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {transformedModels.map((m, index) => {
+                const rankBadge = `Rank ${index + 1}`;
+                return (
+                  <button
+                    key={m.name}
+                    type="button"
+                    onClick={() => handleSelectModel(m)}
+                    className={`relative flex flex-col rounded-2xl border p-6 shadow-elegant text-left transition ${
+                      m.selected ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm uppercase tracking-wider text-muted-foreground">{rankBadge}</span>
+                          <h3 className="text-base font-semibold">{m.name}</h3>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-2xl font-semibold tabular-nums">{m.score}/10</div>
+                        <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Score</div>
+                      </div>
+                    </div>
+
+                    <p className="mt-4 text-sm text-muted-foreground">{m.description}</p>
+
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
+                        <dd className="mt-1 text-foreground/90">{m.why || m.description}</dd>
+                      </div>
+                      {m.best_for?.length ? (
+                        <div>
+                          <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
+                          <dd className="mt-1 text-foreground/90">{m.best_for.join(" · ")}</dd>
+                        </div>
+                      ) : null}
+                    </dl>
+                    {m.selected && (
+                      <div className="mt-4 inline-flex w-fit items-center gap-1 rounded-full bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">
+                        <CheckCircle2 className="h-3 w-3" /> Selected to train
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h2 className="mb-4 text-base font-semibold">Select model to train</h2>
+            <select
+              value={selectedModel?.name ?? transformedModels[0]?.name}
+              onChange={(e) => {
+                const next = transformedModels.find((m) => m.name === e.target.value);
+                if (next) setSelectedModel(next);
+              }}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+            >
+              {transformedModels.map((model) => (
+                <option key={model.name} value={model.name}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-2 text-sm text-muted-foreground">
+              The top-ranked model is pre-selected. You can change this.
+            </p>
+          </section>
+
+          {recommendationTaskType === "binary" && (
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
+              <p className="mt-3 text-sm text-muted-foreground">
+                In credit risk, <strong>Recall</strong> is the most critical metric because failing to identify a truly risky customer (false negative) is far more costly than incorrectly flagging a safe one.
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                We optimize for: <strong>ROC-AUC → Recall → PR-AUC → F1</strong>
+              </p>
+            </section>
+          )}
+        </>
+      )}
+
+      {!selectedModel && (
+        <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          Select a model above to configure and run training.
+        </div>
+      )}
+
+      {selectedModel && (
+      <>
+
+      {/* Data Split — read-only here. The split itself happens in Preprocessing (Step 3); Training just reuses it. */}
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <div className="flex items-center gap-2 mb-4">
           <BarChart3 className="h-5 w-5 text-primary" />
-          <h2 className="text-base font-semibold">Data Split (configured in Step 3 — before feature engineering)</h2>
+          <h2 className="text-base font-semibold">Data Split (locked in during Preprocessing)</h2>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Train Size */}
-          <div>
-            <label className="text-sm font-medium">Train Size</label>
-            <div className="mt-2 flex items-baseline gap-2">
-              <input
-                type="range"
-                min="0.3"
-                max="0.85"
-                step="0.05"
-                value={config.test_size + config.val_size > 0.95 ? 0.7 : 1 - config.test_size - config.val_size}
-                onChange={(e) => {
-                  const trainPct = parseFloat(e.target.value);
-                  const remaining = 1 - trainPct;
-                  setConfig(prev => ({
-                    ...prev,
-                    test_size: remaining * 0.5,
-                    val_size: remaining * 0.5,
-                  }));
-                }}
-                className="flex-1"
-              />
-              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.train_pct ?? 0).toFixed(0)}%</span>
+        {displaySplitStats ? (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {(() => {
+                const totalN = displaySplitStats.total
+                  ?? (Number(displaySplitStats.train_n ?? 0) + Number(displaySplitStats.val_n ?? 0) + Number(displaySplitStats.test_n ?? 0));
+                const pct = (n: number) => (totalN ? (n / totalN) * 100 : 0);
+                return (
+                  <>
+                    <div>
+                      <div className="text-xs uppercase tracking-wider text-muted-foreground">Train</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{pct(displaySplitStats.train_n).toFixed(0)}%</div>
+                      <p className="text-xs text-muted-foreground mt-1">{Number(displaySplitStats.train_n ?? 0).toLocaleString()} samples</p>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wider text-muted-foreground">Validation</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{pct(displaySplitStats.val_n).toFixed(0)}%</div>
+                      <p className="text-xs text-muted-foreground mt-1">{Number(displaySplitStats.val_n ?? 0).toLocaleString()} samples</p>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wider text-muted-foreground">Test</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{pct(displaySplitStats.test_n).toFixed(0)}%</div>
+                      <p className="text-xs text-muted-foreground mt-1">{Number(displaySplitStats.test_n ?? 0).toLocaleString()} samples</p>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
-            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.train_n.toLocaleString()} samples</p>}
-          </div>
-
-          {/* Val Size */}
-          <div>
-            <label className="text-sm font-medium">Validation Size</label>
-            <div className="mt-2 flex items-baseline gap-2">
-              <input
-                type="range"
-                min="0.05"
-                max="0.4"
-                step="0.05"
-                value={config.val_size}
-                onChange={(e) => setConfig(prev => ({ ...prev, val_size: parseFloat(e.target.value) }))}
-                className="flex-1"
-              />
-              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.val_pct ?? 0).toFixed(0)}%</span>
-            </div>
-            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.val_n.toLocaleString()} samples</p>}
-          </div>
-
-          {/* Test Size */}
-          <div>
-            <label className="text-sm font-medium">Test Size</label>
-            <div className="mt-2 flex items-baseline gap-2">
-              <input
-                type="range"
-                min="0.1"
-                max="0.4"
-                step="0.05"
-                value={config.test_size}
-                onChange={(e) => setConfig(prev => ({ ...prev, test_size: parseFloat(e.target.value) }))}
-                className="flex-1"
-              />
-              <span className="text-sm font-mono w-12 text-right">{(displaySplitStats?.test_pct ?? 0).toFixed(0)}%</span>
-            </div>
-            {displaySplitStats && <p className="text-xs text-muted-foreground mt-1">{displaySplitStats.test_n.toLocaleString()} samples</p>}
-          </div>
-        </div>
-
-        {/* Random Seed */}
-        <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="text-sm font-medium">Random Seed</label>
-            <input
-              type="number"
-              value={config.random_seed}
-              onChange={(e) => setConfig(prev => ({ ...prev, random_seed: parseInt(e.target.value) || 42 }))}
-              className="mt-2 w-full px-3 py-2 border border-input rounded-lg text-sm bg-background"
-            />
-            <p className="text-xs text-muted-foreground mt-1">Ensures reproducible splits</p>
-          </div>
-        </div>
-        <p className="mt-4 text-sm text-muted-foreground">
-          Feature engineering will be re-learned on the training split and then applied to validation/test without using their labels. To change the split ratio or seed, return to Model Selection.
-        </p>
+            <p className="mt-4 text-sm text-muted-foreground">
+              Random seed: <span className="font-mono">{config.random_seed}</span>. Feature engineering is re-learned on the training split only, then applied unchanged to validation/test.
+              To change the split ratio or seed, go back to Preprocessing.
+            </p>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No split found yet. <Button variant="link" className="px-0 h-auto" onClick={() => navigate({ to: "/preprocessing" })}>Run Preprocessing</Button> first — the split happens there and Training reuses it.
+          </p>
+        )}
       </section>
 
       {/* Class Distribution Visualization */}
@@ -922,21 +1145,24 @@ function Training() {
         </>
       )}
 
+      </>
+      )}
+
       {/* Action Buttons */}
       <div className="flex gap-3 pt-4">
-        <Button variant="outline" onClick={() => navigate({ to: "/models" })} className="gap-2">
+        <Button variant="outline" onClick={() => navigate({ to: "/features" })} className="gap-2">
           <ArrowLeft className="h-4 w-4" />
-          Back
+          Back to Feature Engineering
         </Button>
         <Button
           onClick={handleTrain}
-          disabled={loading}
+          disabled={loading || !selectedModel}
           className="gap-2"
         >
           {loading && <Loader2 className="h-4 w-4 animate-spin" />}
           {loading ? "Training..." : "Train Model Now"}
         </Button>
-        {modelsToCompare.length > 0 && (
+        {selectedModel && modelsToCompare.length > 0 && (
           <Button
             onClick={handleQuickComparison}
             disabled={loading}

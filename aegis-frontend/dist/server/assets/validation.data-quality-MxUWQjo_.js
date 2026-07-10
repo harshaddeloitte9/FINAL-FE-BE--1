@@ -1,0 +1,299 @@
+import { n as PageHeader } from "./app-shell-7PSh3UZt.js";
+import { t as ChartContainer } from "./chart-container-DJlEkxVk.js";
+import { Link } from "@tanstack/react-router";
+import { jsx, jsxs } from "react/jsx-runtime";
+import { ArrowRight } from "lucide-react";
+import { Area, AreaChart, Bar, BarChart as BarChart$1, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
+//#region src/routes/validation.data-quality.tsx?tsr-split=component
+var missing = [
+	{
+		feature: "Annual Income",
+		pct: 4.2
+	},
+	{
+		feature: "DTI Ratio",
+		pct: 1.1
+	},
+	{
+		feature: "Credit Utilization",
+		pct: .4
+	},
+	{
+		feature: "LTV",
+		pct: 7.6
+	},
+	{
+		feature: "Tenure",
+		pct: 2.3
+	},
+	{
+		feature: "Region",
+		pct: 0
+	}
+];
+var drift = Array.from({ length: 12 }, (_, i) => ({
+	month: `M${i + 1}`,
+	dev: .5 + Math.sin(i / 2) * .05,
+	oot: .5 + Math.sin(i / 2) * .05 + (i > 7 ? .04 : 0)
+}));
+var checks = [
+	{
+		label: "Duplicate rows",
+		value: "0.02%",
+		status: "PASS"
+	},
+	{
+		label: "Outliers (Z>4)",
+		value: "1.6%",
+		status: "WARN"
+	},
+	{
+		label: "Class imbalance",
+		value: "1 : 20",
+		status: "WARN"
+	},
+	{
+		label: "Sample representativeness",
+		value: "PSI 0.08",
+		status: "PASS"
+	},
+	{
+		label: "Data leakage scan",
+		value: "0 leaks",
+		status: "PASS"
+	},
+	{
+		label: "Schema drift",
+		value: "Stable",
+		status: "PASS"
+	}
+];
+var cls = {
+	PASS: "bg-primary-soft text-foreground border-primary/30",
+	WARN: "bg-warning/20 text-warning-foreground border-warning/40",
+	FAIL: "bg-destructive/10 text-destructive border-destructive/30"
+};
+function DataQuality() {
+	const passCount = checks.filter((item) => item.status === "PASS").length;
+	const warnCount = checks.filter((item) => item.status === "WARN").length;
+	return /* @__PURE__ */ jsxs("div", {
+		className: "space-y-8",
+		children: [
+			/* @__PURE__ */ jsx(PageHeader, {
+				title: "Stage 2 — Data Validation",
+				description: "Run automated validation checks on the submitted dataset and verify sample fitness, leakage, and data quality."
+			}),
+			/* @__PURE__ */ jsxs("section", {
+				className: "grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]",
+				children: [/* @__PURE__ */ jsxs("div", {
+					className: "rounded-xl border border-border bg-card p-6 shadow-elegant",
+					children: [
+						/* @__PURE__ */ jsx("h3", {
+							className: "text-sm font-semibold",
+							children: "Automated validation summary"
+						}),
+						/* @__PURE__ */ jsx("p", {
+							className: "mt-2 text-sm text-foreground/80",
+							children: "This stage verifies the dataset submitted in Intake and flags any issues that affect model validity."
+						}),
+						/* @__PURE__ */ jsxs("div", {
+							className: "mt-5 grid grid-cols-3 gap-3",
+							children: [
+								/* @__PURE__ */ jsx(Stat, {
+									label: "Checks",
+									value: checks.length.toString()
+								}),
+								/* @__PURE__ */ jsx(Stat, {
+									label: "PASS",
+									value: passCount.toString(),
+									tone: "pass"
+								}),
+								/* @__PURE__ */ jsx(Stat, {
+									label: "WARN",
+									value: warnCount.toString(),
+									tone: "warn"
+								})
+							]
+						})
+					]
+				}), /* @__PURE__ */ jsxs("div", {
+					className: "rounded-xl border border-border bg-card p-6 shadow-elegant",
+					children: [
+						/* @__PURE__ */ jsx("h3", {
+							className: "text-sm font-semibold",
+							children: "Stage outcome"
+						}),
+						/* @__PURE__ */ jsx("p", {
+							className: "mt-2 text-sm text-foreground/80",
+							children: "Data Validation is intended to confirm the dataset is fit for independent model assessment and that no obvious data integrity issues exist."
+						}),
+						/* @__PURE__ */ jsx("div", {
+							className: "mt-4 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary-soft px-3 py-2 text-xs font-semibold text-primary",
+							children: /* @__PURE__ */ jsx("span", { children: "Ready to proceed" })
+						})
+					]
+				})]
+			}),
+			/* @__PURE__ */ jsx("section", {
+				className: "grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6",
+				children: checks.map((c) => /* @__PURE__ */ jsxs("div", {
+					className: "rounded-xl border border-border bg-card p-4 shadow-elegant",
+					children: [
+						/* @__PURE__ */ jsx("div", {
+							className: "text-[10px] uppercase tracking-wider text-muted-foreground",
+							children: c.label
+						}),
+						/* @__PURE__ */ jsx("div", {
+							className: "mt-2 text-lg font-semibold tracking-tight",
+							children: c.value
+						}),
+						/* @__PURE__ */ jsx("span", {
+							className: `mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${cls[c.status]}`,
+							children: c.status
+						})
+					]
+				}, c.label))
+			}),
+			/* @__PURE__ */ jsxs("section", {
+				className: "grid grid-cols-1 gap-6 lg:grid-cols-2",
+				children: [/* @__PURE__ */ jsxs("div", {
+					className: "rounded-xl border border-border bg-card p-6 shadow-elegant",
+					children: [/* @__PURE__ */ jsx("h3", {
+						className: "text-sm font-semibold",
+						children: "Missing values by feature"
+					}), /* @__PURE__ */ jsx("div", {
+						className: "mt-4 h-64",
+						children: /* @__PURE__ */ jsx(ChartContainer, {
+							width: "100%",
+							height: "100%",
+							children: /* @__PURE__ */ jsxs(BarChart$1, {
+								data: missing,
+								children: [
+									/* @__PURE__ */ jsx(CartesianGrid, {
+										stroke: "oklch(0.92 0.005 240)",
+										strokeDasharray: "3 3"
+									}),
+									/* @__PURE__ */ jsx(XAxis, {
+										dataKey: "feature",
+										tickLine: false,
+										axisLine: false,
+										fontSize: 10
+									}),
+									/* @__PURE__ */ jsx(YAxis, {
+										tickLine: false,
+										axisLine: false,
+										fontSize: 11,
+										unit: "%"
+									}),
+									/* @__PURE__ */ jsx(Tooltip, { contentStyle: {
+										borderRadius: 10,
+										border: "1px solid oklch(0.92 0.005 240)"
+									} }),
+									/* @__PURE__ */ jsx(Bar, {
+										dataKey: "pct",
+										fill: "oklch(0.76 0.18 130)",
+										radius: [
+											6,
+											6,
+											0,
+											0
+										]
+									})
+								]
+							})
+						})
+					})]
+				}), /* @__PURE__ */ jsxs("div", {
+					className: "rounded-xl border border-border bg-card p-6 shadow-elegant",
+					children: [
+						/* @__PURE__ */ jsx("h3", {
+							className: "text-sm font-semibold",
+							children: "Population stability (dev vs OOT)"
+						}),
+						/* @__PURE__ */ jsx("p", {
+							className: "text-xs text-muted-foreground",
+							children: "PSI 0.08 — within tolerance"
+						}),
+						/* @__PURE__ */ jsx("div", {
+							className: "mt-4 h-64",
+							children: /* @__PURE__ */ jsx(ChartContainer, {
+								width: "100%",
+								height: "100%",
+								children: /* @__PURE__ */ jsxs(AreaChart, {
+									data: drift,
+									children: [
+										/* @__PURE__ */ jsx(CartesianGrid, {
+											stroke: "oklch(0.92 0.005 240)",
+											strokeDasharray: "3 3"
+										}),
+										/* @__PURE__ */ jsx(XAxis, {
+											dataKey: "month",
+											tickLine: false,
+											axisLine: false,
+											fontSize: 11
+										}),
+										/* @__PURE__ */ jsx(YAxis, {
+											tickLine: false,
+											axisLine: false,
+											fontSize: 11
+										}),
+										/* @__PURE__ */ jsx(Tooltip, { contentStyle: {
+											borderRadius: 10,
+											border: "1px solid oklch(0.92 0.005 240)"
+										} }),
+										/* @__PURE__ */ jsx(Area, {
+											type: "monotone",
+											dataKey: "dev",
+											stroke: "oklch(0.6 0.18 135)",
+											fill: "oklch(0.76 0.18 130)",
+											fillOpacity: .25
+										}),
+										/* @__PURE__ */ jsx(Area, {
+											type: "monotone",
+											dataKey: "oot",
+											stroke: "oklch(0.55 0.02 240)",
+											fill: "oklch(0.55 0.02 240)",
+											fillOpacity: .18
+										})
+									]
+								})
+							})
+						})
+					]
+				})]
+			}),
+			/* @__PURE__ */ jsxs("section", {
+				className: "rounded-xl border border-border bg-card p-6 shadow-elegant",
+				children: [/* @__PURE__ */ jsx("h3", {
+					className: "text-sm font-semibold",
+					children: "Data leakage detection"
+				}), /* @__PURE__ */ jsx("p", {
+					className: "mt-2 text-sm text-foreground/80",
+					children: "No future-information leakage detected across 87 candidate features. Two features were excluded during development for post-event observability and are correctly omitted from the production schema."
+				})]
+			}),
+			/* @__PURE__ */ jsx("div", {
+				className: "text-right",
+				children: /* @__PURE__ */ jsxs(Link, {
+					to: "/validation/conceptual",
+					className: "inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90",
+					children: ["Continue to Stage 3", /* @__PURE__ */ jsx(ArrowRight, { className: "h-4 w-4" })]
+				})
+			})
+		]
+	});
+}
+function Stat({ label, value, tone }) {
+	return /* @__PURE__ */ jsxs("div", {
+		className: `rounded-xl p-4 ${tone === "pass" ? "border border-primary/30 bg-primary-soft text-foreground" : tone === "warn" ? "border border-warning/30 bg-warning/10 text-warning-foreground" : "border border-border bg-background text-foreground"}`,
+		children: [/* @__PURE__ */ jsx("div", {
+			className: "text-[10px] uppercase tracking-wider text-muted-foreground",
+			children: label
+		}), /* @__PURE__ */ jsx("div", {
+			className: "mt-2 text-xl font-semibold",
+			children: value
+		})]
+	});
+}
+//#endregion
+export { DataQuality as component };
