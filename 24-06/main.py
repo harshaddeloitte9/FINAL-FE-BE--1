@@ -62,7 +62,7 @@ except ImportError:
     _legacy_fe_spec.loader.exec_module(_legacy_fe)
     resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
-from train import split_data, compute_split_stats, train_model
+from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
 import evaluate as eval_engine
 
