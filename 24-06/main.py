@@ -41,7 +41,7 @@ from utils import (
     generate_synthetic_credit_dataset, detect_column_types,
     detect_target_candidates, detect_task_type, df_to_csv_download, model_to_download,
 )
-from preprocessing import (
+from  preprocessing_new import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
     classify_missing_treatment, select_imputation_strategy, SemanticImputer,
@@ -64,7 +64,7 @@ except ImportError:
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
 from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
-import evaluate as eval_engine
+import evaluate_new as eval_engine
 
 
 def estimate_drop_impact(col: str, X_train: pd.DataFrame, y_train: pd.Series, col_types: Dict[str, List[str]]) -> Dict[str, Any]:
