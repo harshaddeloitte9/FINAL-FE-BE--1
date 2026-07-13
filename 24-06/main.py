@@ -41,11 +41,12 @@ from utils import (
     generate_synthetic_credit_dataset, detect_column_types,
     detect_target_candidates, detect_task_type, df_to_csv_download, model_to_download,
 )
-from preprocessing import (
+from preprocessing_new import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
     classify_missing_treatment, select_imputation_strategy, SemanticImputer,
     REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
+    estimate_drop_impact,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
@@ -1035,6 +1036,69 @@ async def preprocess_data(
         "review_missing_threshold": REVIEW_MISSING_THRESHOLD,
         "original_dataset_csv": df.to_csv(index=False),
     }
+
+
+@app.post("/data/drop-impact")
+async def drop_impact(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    synthetic_samples: Optional[int] = Form(None),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    columns: str = Form(...),  # JSON list of column names to analyze
+) -> Dict[str, Any]:
+    """
+    On-demand "impact of dropping this feature" analysis for one or more
+    sparse (review_flag) columns — called lazily by the frontend when a
+    reviewer expands a column's impact panel, not on every /data/preprocess
+    call, since it re-derives the correlation matrix per requested column.
+
+    Re-derives the SAME train split /data/preprocess uses (same file, target,
+    split config) so the estimate is computed on training data only — no
+    leakage from validation/test. Returns a lightweight, standalone estimate
+    (predictive importance via a quick IV, redundancy via correlation with
+    other numeric features) — NOT the authoritative IV/WOE from
+    /data/feature-engineering, which runs later on cleaned/engineered data.
+    See preprocessing_new.estimate_drop_impact() for the full explanation.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    col_types = detect_column_types(df)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    test_size = float(test_size)
+    val_size = float(val_size)
+    if not 0 < test_size < 1:
+        raise HTTPException(status_code=400, detail="test_size must be between 0 and 1")
+    if not 0 < val_size < 1:
+        raise HTTPException(status_code=400, detail="val_size must be between 0 and 1")
+    if test_size + val_size >= 1:
+        raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
+
+    try:
+        requested_cols: List[str] = json.loads(columns) if columns else []
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in 'columns': {exc}")
+    if not isinstance(requested_cols, list) or not requested_cols:
+        raise HTTPException(status_code=400, detail="'columns' must be a non-empty JSON list of column names")
+
+    task_type = detect_task_type(df[target_col])
+    X, y, _clean_info = finalize_xy(df, col_types, target_col)
+    X_train, _X_val, _X_test, y_train, _y_val, _y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    results: Dict[str, Any] = {}
+    for col in requested_cols:
+        if col not in X_train.columns:
+            results[col] = {"error": f"Column '{col}' not found in the training features."}
+            continue
+        results[col] = estimate_drop_impact(col, X_train, y_train, col_types)
+
+    return {"drop_impact": _json_safe(results)}
 
 
 @app.post("/data/feature-engineering")
