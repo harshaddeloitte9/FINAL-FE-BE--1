@@ -47,6 +47,7 @@ interface ComparisonResult {
   pr_auc?: number;
   accuracy?: number;
   training_time_s?: number;
+  error?: string;
 }
 
 // ── Merged in from models.tsx (Model Selection step, now folded into Training) ──
@@ -126,6 +127,16 @@ function Training() {
   const [error, setError] = useState<string | null>(null);
   const [modelComparison, setModelComparison] = useState<boolean>(false);
   const [modelsToCompare, setModelsToCompare] = useState<string[]>(compareModels ?? []);
+
+  // ── Flow mode: user picks one of two paths before training ─────────────
+  // 'choose'  → initial fork, nothing configured yet
+  // 'compare' → lightweight side-by-side comparison across candidate models
+  // 'direct'  → configure (class balancing, CV) and train a single model,
+  //             either chosen directly or carried over from a comparison run
+  const [flowMode, setFlowMode] = useState<"choose" | "compare" | "direct">(
+    trainingResult ? "direct" : "choose",
+  );
+  const [comparisonLoading, setComparisonLoading] = useState(false);
 
   // Hyperparameter preset controls
   const [hyperparams, setHyperparams] = useState<Record<string, any>>({
@@ -350,69 +361,71 @@ function Training() {
     }
   };
 
-  const handleQuickComparison = async () => {
-    if (!profile || !file || !selectedModel) {
-      setError("Missing profile, file, or model selection");
+  // Lightweight comparison: hits /models/compare, which skips CV, hyperopt,
+  // OOT, evaluation curves, and model-artifact serialization for every
+  // candidate — just a quick fit + test-set metrics per model, so this stays
+  // fast even with several candidates selected. Nothing here is treated as
+  // a "trained" model — trainingInfo/trainingResult are untouched, so
+  // "Proceed to Evaluation" stays locked until the user actually trains a
+  // chosen model via the direct-training path.
+  const handleRunComparison = async () => {
+    if (!profile || !file) {
+      setError("Missing profile or file");
       return;
     }
 
-    if (modelsToCompare.length === 0) {
-      setError("Select at least one model to compare");
+    if (modelsToCompare.length < 2) {
+      setError("Select at least two models to compare");
       return;
     }
 
-    setLoading(true);
+    setComparisonLoading(true);
     setError(null);
     setModelComparison(true);
 
     try {
-      const candidateModelNames = [selectedModel.name, ...modelsToCompare.filter((name) => name !== selectedModel.name)];
-      const rows = [] as Array<ComparisonResult>;
+      const form = new FormData();
+      form.append("file", file);
+      form.append("target_col", profile.target_col || "loan_status");
+      form.append("model_names", JSON.stringify(modelsToCompare));
+      form.append("test_size", String(config.test_size));
+      form.append("val_size", String(config.val_size));
+      form.append("random_seed", String(config.random_seed));
+      form.append("use_feature_engineering", String(config.use_feature_engineering));
 
-      for (const modelName of candidateModelNames) {
-        const result = await trainModel(modelName);
-        rows.push({
-          model_name: modelName,
-          roc_auc: result.evaluation_metrics?.roc_auc,
-          recall: result.evaluation_metrics?.recall,
-          precision: result.evaluation_metrics?.precision,
-          f1: result.evaluation_metrics?.f1,
-          pr_auc: result.evaluation_metrics?.pr_auc,
-          accuracy: result.evaluation_metrics?.accuracy,
-          training_time_s: result.training_info.training_time_s,
-        });
-
-        if (modelName === selectedModel.name) {
-          setTrainingInfo(result.training_info);
-          setSplitStats(result.split_stats);
-          setEvaluationMetrics(result.evaluation_metrics);
-          setModelArtifact(result.model_artifact);
-          setTaskType(result.task_type);
-          setTrainingModelName(result.model_name);
-          setTrainingConfigResult(result.training_config ?? null);
-          setTrainingResult({
-            task_type: result.task_type,
-            model_name: result.model_name,
-            real_feature_names: result.real_feature_names ?? [],
-            training_config: result.training_config ?? null,
-            training_info: result.training_info,
-            split_stats: result.split_stats,
-            feature_engineering_summary: result.feature_engineering_summary,
-            evaluation_metrics: result.evaluation_metrics,
-            evaluation_data: result.evaluation_data,
-            model_artifact: result.model_artifact,
-          });
-        }
-      }
+      const response = await formUpload("/models/compare", form);
+      const rows: ComparisonResult[] = (response?.comparison ?? []).map((row: any) => ({
+        model_name: row.model_name,
+        roc_auc: row.roc_auc,
+        recall: row.recall,
+        precision: row.precision,
+        f1: row.f1,
+        pr_auc: row.pr_auc,
+        accuracy: row.accuracy,
+        training_time_s: row.training_time_s,
+        error: row.error,
+      }));
 
       setComparisonResults(rows);
-      setSelectedComparisonModel(candidateModelNames[0]);
+      if (rows.length > 0 && !rows[0].error) {
+        setSelectedComparisonModel(rows[0].model_name);
+      }
     } catch (err: any) {
       console.error("Comparison: failed", err);
       setError(err?.body?.detail ?? err?.message ?? "Failed to run comparison.");
     } finally {
-      setLoading(false);
+      setComparisonLoading(false);
     }
+  };
+
+  // Carry a comparison winner into the direct-training path: select it as
+  // the model to train, then flip to 'direct' so the user can set class
+  // balancing / CV before running the real, full-fidelity training run.
+  const handleUseComparisonModel = (modelName: string) => {
+    setSelectedComparisonModel(modelName);
+    const chosen = recommendations?.find((rec) => rec.name === modelName);
+    if (chosen) setSelectedModel(chosen);
+    setFlowMode("direct");
   };
 
   // Calculate class imbalance for recommendations
@@ -620,6 +633,151 @@ function Training() {
       )}
 
       {selectedModel && (
+      <>
+
+      {/* ── Choose a path: compare candidates first, or go straight to configuring/training the selected model ── */}
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h2 className="text-base font-semibold mb-1">How do you want to proceed?</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Run a quick, lightweight comparison across a few candidates first, or go straight to configuring and training the selected model.
+        </p>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => setFlowMode("compare")}
+            className={`flex flex-col items-start gap-1 rounded-xl border p-4 text-left transition ${
+              flowMode === "compare" ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+            }`}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              <Zap className="h-4 w-4 text-primary" /> Compare models first
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Quick fit on a few candidates (no CV, no tuning) so you can pick a winner before committing to a full training run.
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => setFlowMode("direct")}
+            className={`flex flex-col items-start gap-1 rounded-xl border p-4 text-left transition ${
+              flowMode === "direct" ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+            }`}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              <CheckCircle2 className="h-4 w-4 text-primary" /> Configure &amp; train "{selectedModel.name}"
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Go straight to class balancing, cross-validation, and a full training run on the selected model.
+            </p>
+          </button>
+        </div>
+      </section>
+
+      {/* ── Compare path ── */}
+      {flowMode === "compare" && (
+        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <div className="flex items-center gap-2 mb-4">
+            <BarChart3 className="h-5 w-5 text-primary" />
+            <h2 className="text-base font-semibold">Model Comparison</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Pick at least two candidates to compare on the same split. This runs a quick fit — no cross-validation or tuning — so it stays fast.
+          </p>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {(recommendations ?? []).map((rec) => (
+              <label
+                key={rec.name}
+                className={`p-3 border rounded-lg cursor-pointer transition ${
+                  modelsToCompare.includes(rec.name)
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={modelsToCompare.includes(rec.name)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setModelsToCompare((prev) => [...prev, rec.name]);
+                    } else {
+                      setModelsToCompare((prev) => prev.filter((m) => m !== rec.name));
+                    }
+                  }}
+                  className="w-4 h-4"
+                />
+                <div className="text-sm font-medium mt-2">{rec.name}</div>
+              </label>
+            ))}
+          </div>
+
+          <Button
+            onClick={handleRunComparison}
+            disabled={comparisonLoading || modelsToCompare.length < 2}
+            className="mt-4 gap-2"
+          >
+            {comparisonLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Zap className="h-4 w-4" />
+            {comparisonLoading ? "Comparing..." : "Run Comparison"}
+          </Button>
+
+          {comparisonResults && comparisonResults.length > 0 && (
+            <div className="mt-6 overflow-x-auto">
+              <table className="min-w-full divide-y divide-border text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-3 py-2">Model</th>
+                    <th className="px-3 py-2">ROC-AUC</th>
+                    <th className="px-3 py-2">Recall</th>
+                    <th className="px-3 py-2">Precision</th>
+                    <th className="px-3 py-2">F1</th>
+                    <th className="px-3 py-2">PR-AUC</th>
+                    <th className="px-3 py-2">Accuracy</th>
+                    <th className="px-3 py-2">Fit Time</th>
+                    <th className="px-3 py-2">Use</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {comparisonResults.map((row) => (
+                    <tr key={row.model_name} className={row.model_name === selectedComparisonModel ? "bg-primary/5" : undefined}>
+                      <td className="px-3 py-3 font-medium">{row.model_name}</td>
+                      {row.error ? (
+                        <td className="px-3 py-3 text-destructive text-xs" colSpan={6}>{row.error}</td>
+                      ) : (
+                        <>
+                          <td className="px-3 py-3">{row.roc_auc?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.recall?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.precision?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.f1?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.pr_auc?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.accuracy?.toFixed(3) ?? "—"}</td>
+                          <td className="px-3 py-3">{row.training_time_s ? `${row.training_time_s.toFixed(2)}s` : "—"}</td>
+                        </>
+                      )}
+                      <td className="px-3 py-3">
+                        {!row.error && (
+                          <Button
+                            variant={row.model_name === selectedModel?.name ? "secondary" : "outline"}
+                            size="sm"
+                            onClick={() => handleUseComparisonModel(row.model_name)}
+                          >
+                            {row.model_name === selectedModel?.name ? "Selected" : "Use this model"}
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Pick a model above to move to configuration and run the full training pass (with class balancing / CV) on that model.
+              </p>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ── Direct path: configure + train a single model ── */}
+      {flowMode === "direct" && (
       <>
 
       {/* Data Split — read-only here. The split itself happens in Preprocessing (Step 3); Training just reuses it. */}
@@ -954,42 +1112,7 @@ function Training() {
         </AccordionItem>
       </Accordion>
 
-      {/* Model Comparison Section */}
-      {recommendations && recommendations.length > 1 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center gap-2 mb-4">
-            <BarChart3 className="h-5 w-5 text-primary" />
-            <h2 className="text-base font-semibold">Model Comparison</h2>
-          </div>
-          <p className="text-sm text-muted-foreground mb-4">Select additional models to train and compare against the champion.</p>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            {recommendations.map((rec) => (
-              <label
-                key={rec.name}
-                className={`p-3 border rounded-lg cursor-pointer transition ${
-                  modelsToCompare.includes(rec.name)
-                    ? "border-primary bg-primary/5"
-                    : "border-border hover:border-primary/50"
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={modelsToCompare.includes(rec.name)}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setModelsToCompare(prev => [...prev, rec.name]);
-                    } else {
-                      setModelsToCompare(prev => prev.filter(m => m !== rec.name));
-                    }
-                  }}
-                  className="w-4 h-4"
-                />
-                <div className="text-sm font-medium mt-2">{rec.name}</div>
-                <div className="text-xs text-muted-foreground">{rec.name === selectedModel.name ? "(Champion)" : ""}</div>
-              </label>
-            ))}
-          </div>
-        </section>
+      </>
       )}
 
       {/* Training Results */}
@@ -1086,62 +1209,6 @@ function Training() {
             </section>
           )}
 
-          {comparisonResults && comparisonResults.length > 0 && (
-            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h2 className="text-base font-semibold">Comparison Table</h2>
-                  <p className="text-sm text-muted-foreground">Review model-level metrics for selected candidates and choose a final champion.</p>
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-border text-sm">
-                  <thead>
-                    <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                      <th className="px-3 py-2">Model</th>
-                      <th className="px-3 py-2">ROC-AUC</th>
-                      <th className="px-3 py-2">Recall</th>
-                      <th className="px-3 py-2">Precision</th>
-                      <th className="px-3 py-2">F1</th>
-                      <th className="px-3 py-2">PR-AUC</th>
-                      <th className="px-3 py-2">Accuracy</th>
-                      <th className="px-3 py-2">Train Time</th>
-                      <th className="px-3 py-2">Final</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {comparisonResults.map((row) => (
-                      <tr key={row.model_name} className={row.model_name === selectedComparisonModel ? "bg-primary/5" : undefined}>
-                        <td className="px-3 py-3 font-medium">{row.model_name}</td>
-                        <td className="px-3 py-3">{row.roc_auc?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.recall?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.precision?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.f1?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.pr_auc?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.accuracy?.toFixed(3) ?? "—"}</td>
-                        <td className="px-3 py-3">{row.training_time_s ? `${row.training_time_s.toFixed(2)}s` : "—"}</td>
-                        <td className="px-3 py-3">
-                          <Button
-                            variant={row.model_name === selectedComparisonModel ? "secondary" : "outline"}
-                            size="sm"
-                            onClick={() => {
-                              setSelectedComparisonModel(row.model_name);
-                              const chosen = recommendations?.find((rec) => rec.name === row.model_name);
-                              if (chosen) {
-                                setSelectedModel(chosen);
-                              }
-                            }}
-                          >
-                            {row.model_name === selectedComparisonModel ? "Selected" : "Select"}
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          )}
         </>
       )}
 
@@ -1154,23 +1221,14 @@ function Training() {
           <ArrowLeft className="h-4 w-4" />
           Back to Feature Engineering
         </Button>
-        <Button
-          onClick={handleTrain}
-          disabled={loading || !selectedModel}
-          className="gap-2"
-        >
-          {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-          {loading ? "Training..." : "Train Model Now"}
-        </Button>
-        {selectedModel && modelsToCompare.length > 0 && (
+        {flowMode === "direct" && (
           <Button
-            onClick={handleQuickComparison}
-            disabled={loading}
-            variant="outline"
+            onClick={handleTrain}
+            disabled={loading || !selectedModel}
             className="gap-2"
           >
-            <Zap className="h-4 w-4" />
-            Run Quick Comparison
+            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+            {loading ? "Training..." : "Train Model Now"}
           </Button>
         )}
         <Button
