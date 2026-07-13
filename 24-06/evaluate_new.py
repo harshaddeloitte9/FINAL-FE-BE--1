@@ -368,14 +368,28 @@ def plot_pr_curve(y_true, y_proba) -> go.Figure:
 
 
 def plot_confusion_matrix(cm: List[List[int]], labels=None) -> go.Figure:
-    cm_array = np.array(cm)
-    if labels is None:
+    cm_array = np.array(cm, dtype=float)
+
+    # Labels must match the matrix's actual shape — a degenerate eval split
+    # (e.g. one class absent) can yield a smaller matrix than the caller's
+    # hardcoded label list, which would otherwise IndexError below.
+    if labels is None or len(labels) != cm_array.shape[0]:
         labels = [f"Class {i}" for i in range(cm_array.shape[0])]
 
-    # Normalize for color intensity
-    cm_norm = cm_array / cm_array.sum(axis=1, keepdims=True)
+    # Normalize for color intensity. A row-sum of 0 (a class with zero
+    # actual instances in this batch) would otherwise divide-by-zero into
+    # NaN, which FastAPI/Starlette's JSON encoder refuses to serialize
+    # (allow_nan=False) — that raises a 500 and the whole Evaluation tab
+    # fails to load, not just this chart. Guard it so those rows render
+    # as 0% instead of poisoning the response.
+    row_sums = cm_array.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm_array, row_sums,
+        out=np.zeros_like(cm_array),
+        where=row_sums != 0,
+    )
 
-    text = [[f"{cm_array[i][j]}<br>({cm_norm[i][j]:.1%})" for j in range(len(labels))]
+    text = [[f"{int(cm_array[i][j])}<br>({cm_norm[i][j]:.1%})" for j in range(len(labels))]
             for i in range(len(labels))]
 
     fig = go.Figure(data=go.Heatmap(
