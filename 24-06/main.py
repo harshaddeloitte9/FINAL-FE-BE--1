@@ -835,7 +835,18 @@ def _expand_plotly_bdata(obj):
         if "bdata" in obj and "dtype" in obj and isinstance(obj["bdata"], str):
             try:
                 raw = base64.b64decode(obj["bdata"])
-                return np.frombuffer(raw, dtype=obj["dtype"]).tolist()
+                flat = np.frombuffer(raw, dtype=obj["dtype"])
+                # Multi-dimensional arrays (e.g. heatmap z) are flattened into
+                # a single bdata blob with a companion "shape" field like
+                # "2, 2" — without reshaping here we'd hand the frontend a
+                # flat list where it expects nested rows, which breaks any
+                # code that does z.map(row => row.map(...)).
+                shape = obj.get("shape")
+                if shape:
+                    dims = [int(d) for d in str(shape).split(",") if d.strip()]
+                    if len(dims) > 1:
+                        flat = flat.reshape(dims)
+                return flat.tolist()
             except Exception:
                 return obj
         return {k: _expand_plotly_bdata(v) for k, v in obj.items()}
