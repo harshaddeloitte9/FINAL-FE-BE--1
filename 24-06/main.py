@@ -41,11 +41,12 @@ from utils import (
     generate_synthetic_credit_dataset, detect_column_types,
     detect_target_candidates, detect_task_type, df_to_csv_download, model_to_download,
 )
-from preprocessing import (
+from preprocessing_new import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
     classify_missing_treatment, select_imputation_strategy, SemanticImputer,
     REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
+    estimate_drop_impact,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
@@ -97,17 +98,18 @@ ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
 
 app = FastAPI()
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:8080",
         "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
         "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],  
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1036,6 +1038,69 @@ async def preprocess_data(
     }
 
 
+@app.post("/data/drop-impact")
+async def drop_impact(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    synthetic_samples: Optional[int] = Form(None),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    columns: str = Form(...),  # JSON list of column names to analyze
+) -> Dict[str, Any]:
+    """
+    On-demand "impact of dropping this feature" analysis for one or more
+    sparse (review_flag) columns — called lazily by the frontend when a
+    reviewer expands a column's impact panel, not on every /data/preprocess
+    call, since it re-derives the correlation matrix per requested column.
+
+    Re-derives the SAME train split /data/preprocess uses (same file, target,
+    split config) so the estimate is computed on training data only — no
+    leakage from validation/test. Returns a lightweight, standalone estimate
+    (predictive importance via a quick IV, redundancy via correlation with
+    other numeric features) — NOT the authoritative IV/WOE from
+    /data/feature-engineering, which runs later on cleaned/engineered data.
+    See preprocessing_new.estimate_drop_impact() for the full explanation.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    col_types = detect_column_types(df)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    test_size = float(test_size)
+    val_size = float(val_size)
+    if not 0 < test_size < 1:
+        raise HTTPException(status_code=400, detail="test_size must be between 0 and 1")
+    if not 0 < val_size < 1:
+        raise HTTPException(status_code=400, detail="val_size must be between 0 and 1")
+    if test_size + val_size >= 1:
+        raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
+
+    try:
+        requested_cols: List[str] = json.loads(columns) if columns else []
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in 'columns': {exc}")
+    if not isinstance(requested_cols, list) or not requested_cols:
+        raise HTTPException(status_code=400, detail="'columns' must be a non-empty JSON list of column names")
+
+    task_type = detect_task_type(df[target_col])
+    X, y, _clean_info = finalize_xy(df, col_types, target_col)
+    X_train, _X_val, _X_test, y_train, _y_val, _y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    results: Dict[str, Any] = {}
+    for col in requested_cols:
+        if col not in X_train.columns:
+            results[col] = {"error": f"Column '{col}' not found in the training features."}
+            continue
+        results[col] = estimate_drop_impact(col, X_train, y_train, col_types)
+
+    return {"drop_impact": _json_safe(results)}
+
+
 @app.post("/data/feature-engineering")
 async def feature_engineering(
     file: Optional[UploadFile] = File(None),
@@ -1372,6 +1437,116 @@ async def train_model_endpoint(
         "evaluation_metrics": metrics,
         "evaluation_data": evaluation_data,
         "model_artifact": _to_base64(pipeline),
+    }
+
+
+def _lighten_for_comparison(model, model_name: str, max_estimators: int = 100):
+    """
+    Reduce ensemble size for comparison-only runs so each candidate trains
+    fast. Comparison is meant to give a directional read on which model is
+    worth committing to — not a final number — so trading a bit of accuracy
+    for speed here is the right call. Full-fidelity numbers come from the
+    dedicated /models/train run once the user picks a model.
+    """
+    if hasattr(model, "n_estimators") and getattr(model, "n_estimators", None):
+        try:
+            if model.n_estimators > max_estimators:
+                model.set_params(n_estimators=max_estimators)
+        except Exception:
+            pass
+    return model
+
+
+@app.post("/models/compare")
+async def compare_models_endpoint(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    model_names: str = Form(...),  # JSON-encoded list of model names
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    use_feature_engineering: bool = Form(False),
+    synthetic_samples: Optional[int] = Form(None),
+) -> Dict[str, Any]:
+    """
+    Lightweight, fast comparison across candidate models on the SAME split.
+
+    Deliberately skips everything that makes /models/train slow when run
+    N times: no cross-validation, no hyperparameter search, no OOT, no
+    ROC/PR/threshold/gain-chart curves, and no base64 model-artifact
+    serialization. Just fit -> predict -> summary metrics per model, so a
+    reviewer can quickly see which model is worth committing to before
+    running the full, config-rich /models/train on that one model.
+    """
+    try:
+        names = json.loads(model_names)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"model_names must be a JSON array: {exc}")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="model_names must be a non-empty list")
+
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    col_types = detect_column_types(df)
+    task_type = detect_task_type(df[target_col])
+    X, y, _ = finalize_xy(df, col_types, target_col)
+    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
+    fe_summary = None
+    if use_feature_engineering:
+        plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+        X_train, fe_summary = apply_feature_engineering(X_train, plan)
+        X_test, _ = apply_feature_engineering(X_test, plan)
+
+    results = []
+    for name in names:
+        try:
+            model = get_model_instance(name, task_type)
+            model = _lighten_for_comparison(model, name)
+            pipeline, training_info, _ = train_model(
+                X_train, y_train,
+                col_types=col_types,
+                target_col=target_col,
+                prep_report=prep_report,
+                model=model,
+                use_cv=False,
+                use_hyperopt=False,
+                task_type=task_type,
+                model_name=name,
+                use_oot=False,
+            )
+            y_pred = pipeline.predict(X_test)
+            y_proba = None
+            if hasattr(pipeline, "predict_proba"):
+                try:
+                    y_proba = pipeline.predict_proba(X_test)
+                except Exception:
+                    y_proba = None
+
+            if task_type == "binary":
+                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
+            else:
+                metrics = compute_regression_metrics(y_test.values, y_pred)
+
+            results.append({
+                "model_name": name,
+                **metrics,
+                "training_time_s": training_info.get("training_time_s"),
+            })
+        except Exception as e:
+            results.append({"model_name": name, "error": str(e)})
+
+    return {
+        "task_type": task_type,
+        "comparison": results,
+        "feature_engineering_summary": fe_summary,
     }
 
 
