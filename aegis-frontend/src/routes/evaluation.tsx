@@ -95,7 +95,7 @@ function Card({ title, sub, children, className }: { title: string; sub?: string
 function Evaluation() {
   const navigate = useNavigate();
   const { trainingResult } = useDataset();
-  const [activeTab, setActiveTab] = useState<"roc" | "pr" | "confusion" | "score" | "threshold" | "lift" | "residual" | "temporal">("roc");
+  const [activeTab, setActiveTab] = useState<"summary" | "roc" | "pr" | "confusion" | "score" | "threshold" | "lift" | "residual" | "temporal">("summary");
   const [temporalDateColumn, setTemporalDateColumn] = useState<string | null>(null);
   const [temporalFrequency, setTemporalFrequency] = useState<string>("Quarterly");
 
@@ -270,64 +270,65 @@ function Evaluation() {
           <div className="space-y-6">
           <div className="flex items-center gap-2">
             <div className="inline-flex rounded-lg bg-background/60 p-1">
-              {(["roc","pr","confusion","score","threshold","lift","residual","temporal"] as const).map((t) => (
+              {(["summary","roc","pr","confusion","score","threshold","lift","residual","temporal"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setActiveTab(t)}
                   className={`px-3 py-1 text-sm rounded ${activeTab===t?"bg-primary text-white":"text-muted-foreground"}`}>
-                  {t === "roc" ? "ROC Curve" : t === "pr" ? "PR Curve" : t === "confusion" ? "Confusion" : t === "score" ? "Score Dist" : t === "threshold" ? "Thresholds" : t === "lift" ? "Lift" : t === "residual" ? "Residuals" : "Temporal"}
+                  {t === "summary" ? "Summary" : t === "roc" ? "ROC Curve" : t === "pr" ? "PR Curve" : t === "confusion" ? "Confusion" : t === "score" ? "Score Dist" : t === "threshold" ? "Thresholds" : t === "lift" ? "Lift" : t === "residual" ? "Residuals" : "Temporal"}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-            <Card title="Hold-out performance" sub="Key evaluation metrics from the test split">
-              <div className="grid gap-3 sm:grid-cols-2">
-                {summaryMetricRows.map((metric) => (
-                  <div key={metric.label} className="rounded-lg border border-border bg-background/70 p-3">
-                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{metric.label}</div>
-                    <div className="mt-1 text-lg font-semibold tabular-nums">{formatMetricValue(metric.value)}</div>
-                  </div>
-                ))}
-              </div>
-            </Card>
+          {activeTab === "summary" ? (
+            <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+              <Card title="Hold-out performance" sub={`Key evaluation metrics from the test split · decision threshold ${threshold.toFixed(2)}`}>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {summaryMetricRows.map((metric) => (
+                    <div key={metric.label} className="rounded-lg border border-border bg-background/70 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{metric.label}</div>
+                      <div className="mt-1 text-lg font-semibold tabular-nums">{formatMetricValue(metric.value)}</div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
 
-            <Card title="Classification report" sub="Per-class precision, recall, F1 and support">
-              <div className="overflow-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                      <th className="py-2 pr-3">Class</th>
-                      <th className="py-2 pr-3">Precision</th>
-                      <th className="py-2 pr-3">Recall</th>
-                      <th className="py-2 pr-3">F1</th>
-                      <th className="py-2">Support</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {classificationReportRows.length > 0 ? (
-                      classificationReportRows.map((row) => (
-                        <tr key={row.label} className="border-b border-border/60 text-sm">
-                          <td className="py-2 pr-3 font-medium">{row.label}</td>
-                          <td className="py-2 pr-3">{formatMetricValue(row.precision)}</td>
-                          <td className="py-2 pr-3">{formatMetricValue(row.recall)}</td>
-                          <td className="py-2 pr-3">{formatMetricValue(row.f1)}</td>
-                          <td className="py-2">{formatMetricValue(row.support)}</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={5} className="py-3 text-sm text-muted-foreground">Classification report will appear after a completed binary classification run.</td>
+              <Card title="Classification report" sub="Per-class precision, recall, F1 and support">
+                <div className="overflow-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                        <th className="py-2 pr-3">Class</th>
+                        <th className="py-2 pr-3">Precision</th>
+                        <th className="py-2 pr-3">Recall</th>
+                        <th className="py-2 pr-3">F1</th>
+                        <th className="py-2">Support</th>
                       </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          </div>
-
-          <div className="grid gap-6 lg:grid-cols-2">
+                    </thead>
+                    <tbody>
+                      {classificationReportRows.length > 0 ? (
+                        classificationReportRows.map((row) => (
+                          <tr key={row.label} className="border-b border-border/60 text-sm">
+                            <td className="py-2 pr-3 font-medium">{row.label}</td>
+                            <td className="py-2 pr-3">{formatMetricValue(row.precision)}</td>
+                            <td className="py-2 pr-3">{formatMetricValue(row.recall)}</td>
+                            <td className="py-2 pr-3">{formatMetricValue(row.f1)}</td>
+                            <td className="py-2">{formatMetricValue(row.support)}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={5} className="py-3 text-sm text-muted-foreground">Classification report will appear after a completed binary classification run.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </div>
+          ) : (
+          <div className="grid gap-6">
             {activeTab === "roc" && (
               <Card title="ROC curve" sub={evaluationMetrics?.roc_auc ? `AUC ${evaluationMetrics.roc_auc}` : "Probability output unavailable"}>
                 {rocFigure ? (
@@ -463,43 +464,11 @@ function Evaluation() {
               </Card>
             )}
           </div>
+          )}
 
         </div>
 
         <aside className="space-y-6">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-2 mb-4">
-              <ShieldCheck className="h-4 w-4 text-primary" />
-              <h2 className="text-base font-semibold">Evaluation summary</h2>
-            </div>
-            <div className="grid gap-3 text-sm">
-              <div className="flex items-center justify-between">
-                <span>ROC AUC</span>
-                <span className="font-semibold">{evaluationMetrics?.roc_auc ?? "N/A"}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>PR AUC</span>
-                <span className="font-semibold">{evaluationMetrics?.pr_auc ?? "N/A"}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Recall</span>
-                <span className="font-semibold">{evaluationMetrics?.recall ?? "N/A"}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Precision</span>
-                <span className="font-semibold">{evaluationMetrics?.precision ?? "N/A"}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>F1 score</span>
-                <span className="font-semibold">{evaluationMetrics?.f1 ?? "N/A"}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Threshold</span>
-                <span className="font-semibold">{threshold.toFixed(2)}</span>
-              </div>
-            </div>
-          </div>
-
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center gap-2 mb-4">
               <ShieldCheck className="h-4 w-4 text-primary" />
