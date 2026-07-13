@@ -41,12 +41,11 @@ from utils import (
     generate_synthetic_credit_dataset, detect_column_types,
     detect_target_candidates, detect_task_type, df_to_csv_download, model_to_download,
 )
-from preprocessing_new import (
+from preprocessing import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
     classify_missing_treatment, select_imputation_strategy, SemanticImputer,
     REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
-    estimate_drop_impact,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
@@ -66,6 +65,54 @@ from model_selector import recommend_models, get_model_instance, get_hyperparame
 from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
 import evaluate as eval_engine
+
+
+def estimate_drop_impact(col: str, X_train: pd.DataFrame, y_train: pd.Series, col_types: Dict[str, List[str]]) -> Dict[str, Any]:
+    """Estimate the practical impact of dropping a sparse/review-flag feature.
+
+    The endpoint uses this helper for lazy, on-demand analysis. It is intentionally
+    lightweight and derives only from the training split: a quick correlation scan
+    against other numeric features plus a simple univariate signal estimate against
+    the target. This keeps the route fast while avoiding leakage from validation/test.
+    """
+    if col not in X_train.columns:
+        return {"error": f"Column '{col}' not found in the training features."}
+
+    x_col = X_train[col]
+    if x_col.empty:
+        return {"drop_col": col, "impact": "no-data", "reason": "No training rows available."}
+
+    numeric_series = pd.to_numeric(x_col, errors="coerce")
+    missing_pct = float(numeric_series.isna().mean())
+
+    numeric_cols = [c for c in col_types.get("numeric", []) if c in X_train.columns and c != col]
+    corr_values: Dict[str, float] = {}
+    for other_col in numeric_cols:
+        other_series = pd.to_numeric(X_train[other_col], errors="coerce")
+        mask = ~(numeric_series.isna() | other_series.isna())
+        if mask.sum() >= 2:
+            corr = float(pd.Series(numeric_series[mask]).corr(pd.Series(other_series[mask])))
+            if not np.isnan(corr):
+                corr_values[other_col] = round(corr, 4)
+
+    if pd.api.types.is_numeric_dtype(y_train):
+        target = pd.to_numeric(y_train, errors="coerce")
+        mask = ~(numeric_series.isna() | target.isna())
+        if mask.sum() >= 2:
+            corr_target = float(pd.Series(numeric_series[mask]).corr(pd.Series(target[mask])))
+            corr_target = round(corr_target, 4) if not np.isnan(corr_target) else None
+        else:
+            corr_target = None
+    else:
+        corr_target = None
+
+    return {
+        "drop_col": col,
+        "missing_pct": round(missing_pct, 4),
+        "correlation_with_other_numeric_features": corr_values,
+        "correlation_with_target": corr_target,
+        "impact": "review" if missing_pct > 0.4 else "standard",
+    }
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
