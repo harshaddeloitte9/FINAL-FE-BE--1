@@ -368,6 +368,202 @@ def classify_missing_treatment(
     return results
 
 
+# ─────────────────────────────────────────────
+# "Impact of dropping this feature" — reviewer decision support for sparse
+# (review_flag) columns. This is a lightweight, standalone estimate computed
+# at THIS stage (before the split's features are engineered) so a reviewer
+# can weigh "keep vs drop" now — it is NOT the authoritative IV/WOE computed
+# later in feature engineering (which bins on cleaned/engineered data with
+# optimal binning). It exists purely to surface three things a human needs to
+# make the call: predictive power (a quick IV estimate), redundancy (is
+# another feature already carrying this signal), and how much real data would
+# be discarded if the column is dropped.
+# ─────────────────────────────────────────────
+
+IV_REDUNDANCY_CORR_THRESHOLD = 0.60
+
+
+def _quick_iv_estimate(
+    s_valid: pd.Series,
+    y_bin: pd.Series,
+    is_numeric: bool,
+    n_bins: int = 5,
+) -> Any:
+    """Fast IV estimate via quantile (numeric) or top-category (categorical)
+    binning against a binarized target. Returns a float IV or None if it
+    can't be estimated (degenerate bins, single-class target, etc.)."""
+    try:
+        if is_numeric and pd.api.types.is_numeric_dtype(s_valid):
+            nunique = s_valid.nunique()
+            if nunique < 2:
+                return None
+            buckets = pd.qcut(s_valid, q=min(n_bins, nunique), duplicates="drop")
+        else:
+            cats = s_valid.astype(str)
+            top = cats.value_counts().nlargest(n_bins).index
+            buckets = cats.where(cats.isin(top), "Other")
+
+        tab = pd.crosstab(buckets, y_bin)
+        if tab.shape[0] < 2 or 0 not in tab.columns or 1 not in tab.columns:
+            return None
+
+        # Laplace smoothing (+0.5) so zero-count bins don't blow up WOE.
+        goods = tab[0].astype(float) + 0.5
+        bads = tab[1].astype(float) + 0.5
+        good_dist = goods / goods.sum()
+        bad_dist = bads / bads.sum()
+        woe = np.log(bad_dist / good_dist)
+        return float(((bad_dist - good_dist) * woe).sum())
+    except Exception:
+        return None
+
+
+def _iv_strength_label(iv: float) -> str:
+    if iv < 0.02:
+        return "Not useful"
+    if iv < 0.10:
+        return "Weak"
+    if iv < 0.30:
+        return "Medium"
+    if iv < 0.50:
+        return "Strong"
+    return "Suspiciously high (check for leakage)"
+
+
+def estimate_drop_impact(
+    col: str,
+    X_train: pd.DataFrame,
+    y_train: Any,
+    col_types: Dict[str, List[str]],
+    min_rows_for_iv: int = 30,
+) -> Dict[str, Any]:
+    """
+    Estimate the impact of DROPPING a single sparse column, combining three
+    factors a reviewer needs to weigh a keep-vs-drop call:
+
+      1. Predictive importance — a quick IV estimate against the training
+         target (binary only), computed on the column's non-missing rows.
+      2. Redundancy — the other numeric column (if any) most correlated with
+         this one; a strong partner means another feature may already be
+         capturing the same signal.
+      3. Rows with real data — how many training rows actually have a value
+         for this column (i.e. how much information is discarded if it's
+         dropped, versus how much is already missing either way).
+
+    Returns a dict: {iv, iv_label, redundant_col, redundant_corr,
+    rows_available, rows_available_pct, verdict, verdict_tone}. `verdict_tone`
+    is one of "safe" / "caution" / "risk" / "neutral" for UI coloring.
+    """
+    numeric_cols = set(col_types.get("numeric", []))
+    result: Dict[str, Any] = {
+        "iv": None,
+        "iv_label": None,
+        "redundant_col": None,
+        "redundant_corr": None,
+        "rows_available": 0,
+        "rows_available_pct": 0.0,
+    }
+
+    if col not in X_train.columns:
+        result["verdict"] = f"Column '{col}' not found in the training data."
+        result["verdict_tone"] = "neutral"
+        return result
+
+    s = X_train[col]
+    nonnull_mask = s.notna()
+    result["rows_available"] = int(nonnull_mask.sum())
+    result["rows_available_pct"] = float(nonnull_mask.mean()) if len(s) else 0.0
+
+    # ---- 1. Predictive importance (IV) ----
+    if y_train is not None:
+        try:
+            y_aligned = pd.Series(y_train).reindex(X_train.index)
+        except Exception:
+            y_aligned = None
+        if y_aligned is not None:
+            valid = nonnull_mask & y_aligned.notna()
+            y_valid = y_aligned[valid]
+            uniq_y = sorted(pd.unique(y_valid))
+            if int(valid.sum()) >= min_rows_for_iv and len(uniq_y) == 2:
+                pos_label = uniq_y[-1]
+                y_bin = (y_valid == pos_label).astype(int)
+                iv = _quick_iv_estimate(s[valid], y_bin, is_numeric=col in numeric_cols)
+                if iv is not None:
+                    result["iv"] = round(iv, 4)
+                    result["iv_label"] = _iv_strength_label(iv)
+
+    # ---- 2. Redundancy — strongest correlated numeric partner ----
+    if col in numeric_cols:
+        s_num = pd.to_numeric(s, errors="coerce")
+        best_col, best_corr = None, 0.0
+        for other in numeric_cols:
+            if other == col or other not in X_train.columns:
+                continue
+            o_num = pd.to_numeric(X_train[other], errors="coerce")
+            pair = pd.concat([s_num, o_num], axis=1).dropna()
+            if len(pair) < min_rows_for_iv:
+                continue
+            corr = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+            if corr is not None and not np.isnan(corr) and abs(corr) > abs(best_corr):
+                best_col, best_corr = other, float(corr)
+        if best_col is not None and abs(best_corr) >= IV_REDUNDANCY_CORR_THRESHOLD:
+            result["redundant_col"] = best_col
+            result["redundant_corr"] = round(best_corr, 3)
+
+    # ---- 3. Verdict — combine predictive power + redundancy ----
+    result["verdict"], result["verdict_tone"] = _build_drop_verdict(result)
+    return result
+
+
+def _build_drop_verdict(r: Dict[str, Any]) -> Tuple[str, str]:
+    iv, redundant_col, redundant_corr = r.get("iv"), r.get("redundant_col"), r.get("redundant_corr")
+
+    redund_note = (
+        f" {redundant_col} captures similar information (|corr|={abs(redundant_corr):.2f})."
+        if redundant_col else ""
+    )
+
+    if iv is None:
+        return (
+            "Predictive power could not be estimated (too few overlapping "
+            "non-missing rows with a two-class target, or target not yet set)."
+            + (f" {redund_note.strip()}" if redund_note else ""),
+            "neutral",
+        )
+
+    if iv < 0.10:
+        base = f"Low-to-weak predictive power (IV={iv:.3f})."
+        if redundant_col:
+            return (
+                f"{base}{redund_note} Dropping is likely to have minimal impact — "
+                f"the signal is weak and largely redundant with {redundant_col}.",
+                "safe",
+            )
+        return (f"{base} Dropping is likely to have minimal impact on model performance.", "safe")
+
+    if iv < 0.30:
+        base = f"Moderate predictive power (IV={iv:.3f})."
+        if redundant_col:
+            return (
+                f"{base}{redund_note} Some signal, but largely covered by {redundant_col} — "
+                "dropping is a reasonable trade-off for a sparse column.",
+                "caution",
+            )
+        return (
+            f"{base} No strongly redundant feature found — dropping may cost a modest "
+            "amount of signal.",
+            "caution",
+        )
+
+    base = f"Strong predictive power (IV={iv:.3f})."
+    if redundant_col:
+        return (
+            f"{base}{redund_note} Dropping is likely to reduce model performance, though "
+            f"{redundant_col} may partially offset the loss.",
+            "risk",
+        )
+    return (f"{base} Dropping is likely to reduce model performance.", "risk")
+
 def select_imputation_strategy(
     X_train: pd.DataFrame,
     statistical_cols: List[str],

@@ -70,19 +70,19 @@ import evaluate as eval_engine
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
 compute_heteroscedasticity_check = eval_engine.compute_heteroscedasticity_check
-
-_legacy_eval_path = Path(__file__).resolve().parent / "evaluate.py"
-_legacy_eval_spec = importlib.util.spec_from_file_location("legacy_evaluate", _legacy_eval_path)
-if _legacy_eval_spec is None or _legacy_eval_spec.loader is None:
-    raise ImportError(f"Could not load evaluation helpers from {_legacy_eval_path}")
-_legacy_eval = importlib.util.module_from_spec(_legacy_eval_spec)
-_legacy_eval_spec.loader.exec_module(_legacy_eval)
-
-compute_roc_curve = getattr(eval_engine, "compute_roc_curve", _legacy_eval.compute_roc_curve)
-compute_pr_curve = getattr(eval_engine, "compute_pr_curve", _legacy_eval.compute_pr_curve)
-compute_threshold_analysis = getattr(eval_engine, "compute_threshold_analysis", _legacy_eval.compute_threshold_analysis)
-compute_score_distribution = getattr(eval_engine, "compute_score_distribution", _legacy_eval.compute_score_distribution)
-compute_gain_chart = getattr(eval_engine, "compute_gain_chart", _legacy_eval.compute_gain_chart)
+compute_roc_curve = eval_engine.compute_roc_curve
+compute_pr_curve = eval_engine.compute_pr_curve
+compute_threshold_analysis = eval_engine.compute_threshold_analysis
+compute_score_distribution = eval_engine.compute_score_distribution
+compute_gain_chart = eval_engine.compute_gain_chart
+compute_lift_chart = eval_engine.compute_lift_chart
+compute_temporal_analysis_bundle = eval_engine.compute_temporal_analysis_bundle
+plot_roc_curve = eval_engine.plot_roc_curve
+plot_pr_curve = eval_engine.plot_pr_curve
+plot_confusion_matrix = eval_engine.plot_confusion_matrix
+plot_threshold_analysis = eval_engine.plot_threshold_analysis
+plot_score_distribution = eval_engine.plot_score_distribution
+plot_lift_chart = eval_engine.plot_lift_chart
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
 )
@@ -794,6 +794,105 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+def _figure_json(fig) -> Optional[Dict[str, Any]]:
+    """
+    Convert a Plotly go.Figure into a plain JSON-safe dict for the
+    PlotlyChart React component. Goes through fig.to_json() (Plotly's own
+    encoder) rather than fig.to_dict(), since traces built directly from
+    numpy arrays (as the eval_engine plot_* functions do) aren't otherwise
+    serializable by FastAPI's default JSON encoder.
+    """
+    if fig is None:
+        return None
+    try:
+        return json.loads(fig.to_json())
+    except Exception:
+        return None
+
+
+def _build_evaluation_data(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: Optional[np.ndarray],
+    task_type: str,
+    threshold: float,
+    dates: Optional[pd.Series] = None,
+    date_columns: Optional[List[str]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Shared by /models/train and /models/evaluate: computes the metric suite
+    (with KS statistic + Brier score for binary tasks) and builds the full
+    evaluation_data payload the Evaluation page's charts read from — Plotly
+    figure JSON per tab (ROC/PR/confusion/threshold/score-distribution/lift),
+    the heteroscedasticity residual check, and the temporal-stability bundle
+    (Monthly/Quarterly/Yearly actual-vs-predicted) when an origination date
+    is available. Returns (metrics, evaluation_data).
+    """
+    if task_type == "binary":
+        metrics = compute_binary_metrics(y_true, y_pred, y_proba, threshold=threshold)
+        hetero_input = y_proba if y_proba is not None else y_pred
+        roc_curve_pts = compute_roc_curve(y_true, y_proba) if y_proba is not None else []
+        pr_curve_pts = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
+        threshold_pts = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
+        score_dist_pts = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
+        gain_chart_pts = compute_gain_chart(y_true, y_proba) if y_proba is not None else []
+        lift_chart_pts = compute_lift_chart(y_true, y_proba) if y_proba is not None else []
+    else:
+        metrics = compute_regression_metrics(y_true, y_pred)
+        hetero_input = y_pred
+        roc_curve_pts = pr_curve_pts = threshold_pts = score_dist_pts = gain_chart_pts = lift_chart_pts = []
+
+    hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
+
+    roc_fig = pr_fig = threshold_fig = score_dist_fig = lift_fig = confusion_fig = None
+    if task_type == "binary" and y_proba is not None:
+        try:
+            roc_fig = _figure_json(plot_roc_curve(y_true, y_proba))
+            pr_fig = _figure_json(plot_pr_curve(y_true, y_proba))
+            threshold_fig = _figure_json(plot_threshold_analysis(y_true, y_proba))
+            score_dist_fig = _figure_json(plot_score_distribution(np.asarray(y_true).astype(int), y_proba))
+            lift_fig = _figure_json(plot_lift_chart(y_true, y_proba))
+        except Exception:
+            pass
+    if task_type == "binary" and metrics.get("confusion_matrix"):
+        try:
+            confusion_fig = _figure_json(
+                plot_confusion_matrix(metrics["confusion_matrix"], labels=["Non-Default (0)", "Default (1)"])
+            )
+        except Exception:
+            confusion_fig = None
+
+    temporal_analysis = None
+    if task_type == "binary" and y_proba is not None and dates is not None:
+        try:
+            temporal_analysis = compute_temporal_analysis_bundle(
+                dates, y_true, y_proba, date_columns=date_columns or [],
+            )
+        except Exception:
+            temporal_analysis = None
+
+    evaluation_data = {
+        "metrics": metrics,
+        "heteroscedasticity_check": hetero_check,
+        "threshold": threshold,
+        "task_type": task_type,
+        "roc_curve": roc_curve_pts,
+        "pr_curve": pr_curve_pts,
+        "threshold_analysis": threshold_pts,
+        "score_distribution": score_dist_pts,
+        "gain_chart": gain_chart_pts,
+        "lift_chart": lift_chart_pts,
+        "roc_curve_figure": roc_fig,
+        "pr_curve_figure": pr_fig,
+        "confusion_matrix_figure": confusion_fig,
+        "threshold_analysis_figure": threshold_fig,
+        "score_distribution_figure": score_dist_fig,
+        "lift_chart_figure": lift_fig,
+        "temporal_analysis": temporal_analysis,
+    }
+    return metrics, evaluation_data
+
+
 @app.post("/data/preprocess")
 async def preprocess_data(
     file: Optional[UploadFile] = File(None),
@@ -1325,6 +1424,12 @@ async def train_model_endpoint(
             dates_train = df.loc[X_train.index, origination_date_col]
         except Exception:
             dates_train = None
+    dates_test = None
+    if origination_date_col and origination_date_col in df.columns:
+        try:
+            dates_test = df.loc[X_test.index, origination_date_col]
+        except Exception:
+            dates_test = None
     prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
     fe_summary = None
     plan = None
@@ -1382,35 +1487,10 @@ async def train_model_endpoint(
         except Exception:
             y_proba = None
 
-    if task_type == "binary":
-        metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
-        hetero_input = y_proba if y_proba is not None else y_pred
-        roc_curve = compute_roc_curve(y_test.values, y_proba) if y_proba is not None else []
-        pr_curve = compute_pr_curve(y_test.values, y_proba) if y_proba is not None else []
-        threshold_analysis = compute_threshold_analysis(y_test.values, y_proba) if y_proba is not None else []
-        score_distribution = compute_score_distribution(y_test.values, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_test.values, y_proba)
-    else:
-        metrics = compute_regression_metrics(y_test.values, y_pred)
-        hetero_input = y_pred
-        roc_curve = []
-        pr_curve = []
-        threshold_analysis = []
-        score_distribution = []
-        gain_chart = []
-
-    hetero_check = compute_heteroscedasticity_check(y_test.values, hetero_input, task_type=task_type)
-    evaluation_data = {
-        "metrics": metrics,
-        "heteroscedasticity_check": hetero_check,
-        "threshold": 0.5,
-        "task_type": task_type,
-        "roc_curve": roc_curve,
-        "pr_curve": pr_curve,
-        "threshold_analysis": threshold_analysis,
-        "score_distribution": score_distribution,
-        "gain_chart": gain_chart,
-    }
+    metrics, evaluation_data = _build_evaluation_data(
+        y_test.values, y_pred, y_proba, task_type, threshold=0.5,
+        dates=dates_test, date_columns=[origination_date_col] if origination_date_col else [],
+    )
 
     return {
         "task_type": task_type,
@@ -1558,6 +1638,7 @@ async def evaluate_model(
     target_col: str = Form(...),
     threshold: float = Form(0.5),
     synthetic_samples: Optional[int] = Form(None),
+    date_col: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
@@ -1573,34 +1654,24 @@ async def evaluate_model(
         except Exception:
             y_proba = None
     task_type = detect_task_type(df[target_col])
-    if task_type == "binary":
-        metrics = compute_binary_metrics(y_true, y_pred, y_proba, threshold=threshold)
-        hetero_input = y_proba if y_proba is not None else y_pred
-        roc_curve = compute_roc_curve(y_true, y_proba) if y_proba is not None else []
-        pr_curve = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
-        threshold_analysis = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
-        score_distribution = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_true, y_proba)
-    else:
-        metrics = compute_regression_metrics(y_true, y_pred)
-        hetero_input = y_pred
-        roc_curve = []
-        pr_curve = []
-        threshold_analysis = []
-        score_distribution = []
-        gain_chart = []
-    hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
-    return {
-        "metrics": metrics,
-        "heteroscedasticity_check": hetero_check,
-        "threshold": threshold,
-        "task_type": task_type,
-        "roc_curve": roc_curve,
-        "pr_curve": pr_curve,
-        "threshold_analysis": threshold_analysis,
-        "score_distribution": score_distribution,
-        "gain_chart": gain_chart,
-    }
+
+    # Same origination-date resolution as /models/train: reviewer-selected
+    # column if valid, else the first auto-detected datetime column — used
+    # to power the Temporal tab's actual-vs-predicted-over-time analysis.
+    col_types = detect_column_types(df)
+    origination_date_col = date_col if (date_col and date_col in df.columns) else None
+    if origination_date_col is None:
+        datetime_candidates = col_types.get("datetime", [])
+        if datetime_candidates:
+            origination_date_col = datetime_candidates[0]
+    dates_eval = df[origination_date_col] if origination_date_col else None
+
+    metrics, evaluation_data = _build_evaluation_data(
+        y_true, y_pred, y_proba, task_type, threshold=threshold,
+        dates=dates_eval, date_columns=[origination_date_col] if origination_date_col else [],
+    )
+    return evaluation_data
+
 
 
 @app.post("/models/explain")
