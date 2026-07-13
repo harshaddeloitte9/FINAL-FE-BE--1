@@ -25,7 +25,7 @@ try:
 except ImportError:
     SHAP_AVAILABLE = False
 
-from preprocessing import get_feature_names_from_fitted_preprocessor
+from preprocessing_new import get_feature_names_from_fitted_preprocessor
 
 
 COLORS = {
@@ -151,6 +151,32 @@ def plot_feature_importance_bar(importance_df: pd.DataFrame, top_n: int = 15) ->
 # SHAP Analysis
 # ─────────────────────────────────────────────
 
+def _normalize_shap_output(shap_vals: Any, positive_class_idx: int = 1) -> np.ndarray:
+    """
+    Normalize a SHAP explainer's raw output to a single 2D array of shape
+    (n_samples, n_features) — the positive class's SHAP values for a binary
+    classifier. Different shap versions return multi-output results in
+    different shapes:
+      - older shap: a list of one 2D array per class -> shap_vals[1]
+      - shap 0.45+ (this environment runs 0.52): a single 3D array of shape
+        (n_samples, n_features, n_outputs) -> shap_vals[:, :, 1]
+      - single-output explainers: already 2D -> passed through unchanged.
+    Without this, the original code's `isinstance(shap_vals, list)` check
+    never fires against the newer 3D-array shape, so shap_vals stays 3D and
+    every downstream `.mean(axis=0)` / indexing operation breaks — this
+    fired for EVERY model type in this environment (not just non-tree
+    KernelExplainer ones), since TreeExplainer's output shape changed too.
+    """
+    if isinstance(shap_vals, list):
+        idx = positive_class_idx if len(shap_vals) > positive_class_idx else 0
+        return np.array(shap_vals[idx])
+    arr = np.array(shap_vals)
+    if arr.ndim == 3:
+        idx = positive_class_idx if arr.shape[-1] > positive_class_idx else arr.shape[-1] - 1
+        return arr[:, :, idx]
+    return arr
+
+
 def compute_shap_values(
     pipeline,
     X_sample: pd.DataFrame,
@@ -189,16 +215,20 @@ def compute_shap_values(
         model_type = type(model).__name__
         if any(t in model_type for t in ["XGB", "LGBM", "Forest", "Boosting", "Tree"]):
             explainer = shap.TreeExplainer(model)
-            shap_vals = explainer.shap_values(X_df)
-            if isinstance(shap_vals, list):
-                shap_vals = shap_vals[1]
+            shap_vals = _normalize_shap_output(explainer.shap_values(X_df))
         else:
             background = shap.sample(X_df, min(50, len(X_df)))
             if hasattr(model, "predict_proba"):
+                # KernelExplainer only ever explains these 50 rows — X_df is
+                # re-pointed at the same 50 so it stays row-aligned with
+                # shap_vals (the original code returned the FULL X_df here,
+                # which could be longer than 50 rows, silently making
+                # sample_idx out of bounds relative to shap_vals for any
+                # index >= 50).
+                X_explained = X_df.head(50)
                 explainer = shap.KernelExplainer(model.predict_proba, background)
-                shap_vals = explainer.shap_values(X_df.head(50), nsamples=100)
-                if isinstance(shap_vals, list):
-                    shap_vals = shap_vals[1]
+                shap_vals = _normalize_shap_output(explainer.shap_values(X_explained, nsamples=100))
+                X_df = X_explained
             else:
                 return None
 

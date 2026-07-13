@@ -132,6 +132,7 @@ plot_score_distribution = eval_engine.plot_score_distribution
 plot_lift_chart = eval_engine.plot_lift_chart
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
+    generate_model_summary,
 )
 from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication
 
@@ -482,6 +483,28 @@ def _serialize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> Dict[str, Any]:
         "columns": df.columns.astype(str).tolist(),
         "preview": df.head(max_rows).replace({pd.NA: None}).to_dict(orient="records"),
     }
+
+
+def _json_safe_scalar(v: Any) -> Any:
+    """Convert a single numpy/pandas scalar to a plain JSON-safe Python value —
+    numpy int/float types aren't natively JSON-serializable, and non-finite
+    floats (inf/-inf/nan) become the non-standard `Infinity`/`NaN` tokens that
+    Python's json encoder tolerates but JavaScript's JSON.parse rejects."""
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        f = float(v)
+        return f if np.isfinite(f) else None
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
 
 
 def _to_base64(obj: Any) -> str:
@@ -1730,21 +1753,55 @@ async def explain_model(
     max_shap_samples: int = Form(100),
     sample_idx: int = Form(0),
     synthetic_samples: Optional[int] = Form(None),
+    # ── Same fields /models/train already returns in training_config — needed
+    #    to deterministically re-derive the EXACT engineered test split the
+    #    model was fitted on. Without this, X came straight from the raw
+    #    upload, whose columns don't match what the fitted preprocessor
+    #    expects whenever use_feature_engineering was True at train time
+    #    (bin/WOE/interaction columns are missing) — this is what caused
+    #    "SHAP computation failed" for every model type, not just non-tree
+    #    ones. Mirrors the old Streamlit app's use of X_test_engineered. ──
+    use_feature_engineering: bool = Form(False),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    # ── Summary tab: same inputs generate_model_summary() takes in the old app ──
+    metrics: Optional[str] = Form(None),
+    task_type: Optional[str] = Form(None),
+    # Feature importance is cheap and shown immediately in the old UI; SHAP
+    # (especially KernelExplainer, nsamples=100) is not, and is only computed
+    # on an explicit "Compute SHAP Values" click there. Default True keeps
+    # existing callers working; the frontend passes False for the initial
+    # Feature-Importance-only load.
+    compute_shap: bool = Form(True),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col is not None and target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
     pipeline = _from_base64(model_artifact)
+
     if target_col is not None:
-        X = df.drop(columns=[target_col], errors='ignore')
+        col_types = detect_column_types(df)
+        resolved_task_type = task_type or detect_task_type(df[target_col])
+        X, y, _ = finalize_xy(df, col_types, target_col)
+        X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+            X, y, test_size=test_size, val_size=val_size,
+            task_type=resolved_task_type, random_state=random_seed,
+        )
+        if use_feature_engineering:
+            plan = analyze_for_feature_engineering(X_train, y_train, col_types, resolved_task_type)
+            X_test, _ = apply_feature_engineering(X_test, plan)
+        X_explain = X_test
     else:
-        X = df
+        X_explain = df
+
     importance_df = extract_feature_importance(pipeline)
     importance = []
     if importance_df is not None:
         importance = importance_df.to_dict(orient="records")
+
     shap_info: Dict[str, Any] = {"shap_available": False}
-    shap_result = compute_shap_values(pipeline, X, max_samples=max_shap_samples)
+    shap_result = compute_shap_values(pipeline, X_explain, max_samples=max_shap_samples) if compute_shap else None
     if shap_result is not None:
         explainer, shap_values, X_df, names = shap_result
         mean_abs = list(
@@ -1754,21 +1811,50 @@ async def explain_model(
             .to_dict(orient="records")
         )
         reasoning = None
+        sample_shap: List[Dict[str, Any]] = []
+        sample_features: Dict[str, Any] = {}
         if 0 <= sample_idx < len(X_df):
             try:
-                model_proba = pipeline.predict_proba(X) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
+                model_proba = pipeline.predict_proba(X_explain) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
             except Exception:
                 model_proba = np.zeros((len(X_df), 2))
             reasoning = generate_prediction_reasoning(shap_values, X_df, model_proba, sample_idx, threshold=0.5)
+            shap_row = shap_values[sample_idx]
+            feat_row = X_df.iloc[sample_idx]
+            sample_shap = sorted(
+                (
+                    {
+                        "Feature": feat,
+                        "SHAP": _json_safe_scalar(shap_row[i]),
+                        "Value": _json_safe_scalar(feat_row.iloc[i]),
+                    }
+                    for i, feat in enumerate(X_df.columns)
+                ),
+                key=lambda r: abs(r["SHAP"]) if r["SHAP"] is not None else 0.0,
+                reverse=True,
+            )
+            sample_features = {feat: _json_safe_scalar(feat_row.iloc[i]) for i, feat in enumerate(X_df.columns)}
         shap_info = {
             "shap_available": True,
             "shap_mean_abs": mean_abs,
             "sample_idx": sample_idx,
             "sample_reasoning": reasoning,
+            "sample_shap": sample_shap,
+            "sample_features": sample_features,
         }
+
+    summary_text = None
+    if metrics:
+        try:
+            metrics_dict = json.loads(metrics)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"metrics must be valid JSON: {exc}")
+        summary_text = generate_model_summary(metrics_dict, importance_df, task_type or "binary")
+
     return {
         "feature_importance": importance,
         "shap": shap_info,
+        "summary": summary_text,
     }
 
 
