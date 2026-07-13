@@ -24,7 +24,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Download, FileText, Info, Table2, Target } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Download, FileText, Info, Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 export const Route = createFileRoute("/profiling")({
@@ -50,6 +50,32 @@ function formatCsvRow(row: Record<string, any>) {
       return `"${text}"`;
     })
     .join(",");
+}
+
+// Diverging red/blue scale for correlation cells: blue = negative, red = positive,
+// intensity scales with |value| so weak correlations read as near-neutral.
+function correlationCellStyle(value: number): { backgroundColor: string; color: string } {
+  const clamped = Math.max(-1, Math.min(1, value ?? 0));
+  const intensity = Math.abs(clamped);
+  const [r, g, b] = clamped >= 0 ? [239, 68, 68] : [59, 130, 246];
+  return {
+    backgroundColor: `rgba(${r}, ${g}, ${b}, ${(0.1 + intensity * 0.8).toFixed(2)})`,
+    color: intensity > 0.5 ? "#ffffff" : "inherit",
+  };
+}
+
+function severityRank(severity?: string): number {
+  if (severity === "high") return 0;
+  if (severity === "medium") return 1;
+  if (severity === "low") return 2;
+  return 3;
+}
+
+function severityClasses(severity?: string): string {
+  if (severity === "high") return "border-red-500 bg-red-500/5 text-red-900";
+  if (severity === "medium") return "border-amber-500 bg-amber-500/5 text-amber-900";
+  if (severity === "low") return "border-emerald-500 bg-emerald-500/5 text-emerald-900";
+  return "border-border bg-muted text-muted-foreground";
 }
 
 function Profiling() {
@@ -126,7 +152,8 @@ function Profiling() {
   const duplicateRows = active.duplicate_rows ?? null;
   const duplicateRate = active.duplicate_rate ?? null;
   const outlierAnalysis = active.outlier_analysis ?? {};
-  const outlierEntries = Object.entries(outlierAnalysis as Record<string, any>);
+  const outlierEntriesAll = Object.entries(outlierAnalysis as Record<string, any>);
+  const outlierEntries = outlierEntriesAll.filter(([, info]) => ((info as any)?.outlier_fraction ?? 0) > 0);
   const missingByColumn = active.missing_by_column
     ? Object.entries(active.missing_by_column).map(([col, value]) => ({
         col,
@@ -251,21 +278,35 @@ function Profiling() {
                 <AlertTriangle className="h-4 w-4" />
                 <span>{agent2Flags.length} data compliance flag{agent2Flags.length === 1 ? "" : "s"} detected for this dataset.</span>
               </div>
+              <div className="mt-3 space-y-2">
+                {[...agent2Flags]
+                  .sort((a: any, b: any) => severityRank(a.severity) - severityRank(b.severity))
+                  .map((flag: any, idx: number) => (
+                    <div
+                      key={`${flag.rule_id ?? "flag"}-${idx}`}
+                      className={`rounded-lg border-l-4 bg-card p-2.5 text-xs text-foreground ${severityClasses(flag.severity)}`}
+                    >
+                      <div className="font-medium">
+                        <span className="text-muted-foreground">[{flag.rule_id ?? "?"}]</span> {flag.flag}
+                        {flag.not_verifiable && (
+                          <span className="ml-1 italic text-muted-foreground">· not verifiable with current data</span>
+                        )}
+                      </div>
+                      {flag.observed_value !== undefined && flag.observed_value !== null && (
+                        <div className="mt-1 text-muted-foreground">Observed: <code>{String(flag.observed_value)}</code></div>
+                      )}
+                      {flag.suggestion && <div className="mt-1 text-muted-foreground">💡 {flag.suggestion}</div>}
+                      {(flag.source || flag.principle) && (
+                        <div className="mt-1 text-[11px] text-muted-foreground/70">
+                          {flag.source}{flag.source && flag.principle ? " — " : ""}{flag.principle}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+              </div>
             </div>
           )}
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <div className="rounded-lg border border-border bg-background p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                <Target className="h-4 w-4" />
-                <span>Target summary</span>
-              </div>
-              <div className="mt-2 text-sm text-foreground">
-                {targetSummary?.task_label ?? "Target diagnostics will appear after selection."}
-              </div>
-              <div className="mt-2 text-xs text-muted-foreground">
-                Selected target: {selectedTarget ?? "—"}
-              </div>
-            </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
             <div className="rounded-lg border border-border bg-background p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
                 <Info className="h-4 w-4" />
@@ -356,14 +397,26 @@ function Profiling() {
             <div className="rounded-lg border border-border bg-background p-3">
               <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Outlier checks</div>
               <div className="mt-1 text-sm text-foreground">
-                {outlierEntries.length > 0
-                  ? outlierEntries.slice(0, 4).map(([column, info]) => (
-                      <div key={column} className="mt-2 flex items-center justify-between gap-2">
-                        <span>{column}</span>
-                        <span className="font-medium tabular-nums">{(info as any).outlier_fraction ? `${((info as any).outlier_fraction * 100).toFixed(1)}%` : "0.0%"}</span>
-                      </div>
-                    ))
-                  : "No numeric outlier analysis available."}
+                {outlierEntries.length > 0 ? (
+                  <>
+                    {[...outlierEntries]
+                      .sort(([, a], [, b]) => ((b as any).outlier_fraction ?? 0) - ((a as any).outlier_fraction ?? 0))
+                      .slice(0, 4)
+                      .map(([column, info]) => (
+                        <div key={column} className="mt-2 flex items-center justify-between gap-2">
+                          <span>{column}</span>
+                          <span className="font-medium tabular-nums">{(((info as any).outlier_fraction ?? 0) * 100).toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    {outlierEntries.length > 4 && (
+                      <div className="mt-2 text-xs text-muted-foreground">+{outlierEntries.length - 4} more column{outlierEntries.length - 4 === 1 ? "" : "s"} with outliers</div>
+                    )}
+                  </>
+                ) : outlierEntriesAll.length > 0 ? (
+                  "No numeric columns have flagged outliers."
+                ) : (
+                  "No numeric outlier analysis available."
+                )}
               </div>
             </div>
           </div>
@@ -374,14 +427,61 @@ function Profiling() {
             <Info className="h-4 w-4 text-muted-foreground" />
             <h2 className="text-base font-semibold">Correlation snapshot</h2>
           </div>
-          <div className="mt-4 text-sm text-muted-foreground">
-            {correlationColumns.length > 0 ? (
-              <div className="rounded-lg border border-border bg-background p-3">
-                <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Numeric correlation matrix</div>
-                <div className="mt-2 text-sm text-foreground">{correlationColumns.slice(0, 6).join(", ")}{correlationColumns.length > 6 ? " …" : ""}</div>
-              </div>
+          <p className="mt-1 text-xs text-muted-foreground">Pearson correlation across numeric features (up to 10 columns).</p>
+          <div className="mt-4">
+            {correlationColumns.length > 0 && correlationValues.length > 0 ? (
+              <>
+                <div className="overflow-x-auto">
+                  <table style={{ borderCollapse: "separate", borderSpacing: "3px" }}>
+                    <thead>
+                      <tr>
+                        <th className="p-1" />
+                        {correlationColumns.map((column) => (
+                          <th
+                            key={column}
+                            title={column}
+                            className="max-w-[56px] truncate p-1 text-[10px] font-medium text-muted-foreground"
+                          >
+                            {column.length > 7 ? `${column.slice(0, 6)}…` : column}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {correlationColumns.map((rowColumn, rowIndex) => (
+                        <tr key={rowColumn}>
+                          <th
+                            title={rowColumn}
+                            className="whitespace-nowrap p-1 pr-2 text-right text-[10px] font-medium text-muted-foreground"
+                          >
+                            {rowColumn.length > 10 ? `${rowColumn.slice(0, 9)}…` : rowColumn}
+                          </th>
+                          {(correlationValues[rowIndex] ?? []).map((value, colIndex) => (
+                            <td
+                              key={`${rowColumn}-${correlationColumns[colIndex]}`}
+                              title={`${rowColumn} × ${correlationColumns[colIndex]}: ${value.toFixed(2)}`}
+                              className="h-8 w-8 rounded-sm text-center align-middle text-[11px] font-medium tabular-nums"
+                              style={correlationCellStyle(value)}
+                            >
+                              {value.toFixed(2)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <span>-1</span>
+                  <div
+                    className="h-2 flex-1 rounded-full"
+                    style={{ background: "linear-gradient(to right, rgba(59,130,246,0.9), rgba(148,163,184,0.15), rgba(239,68,68,0.9))" }}
+                  />
+                  <span>+1</span>
+                </div>
+              </>
             ) : (
-              <div className="rounded-lg border border-border bg-background p-3">No numeric correlation matrix available for this dataset.</div>
+              <div className="rounded-lg border border-border bg-background p-3 text-sm text-muted-foreground">No numeric correlation matrix available for this dataset.</div>
             )}
           </div>
         </div>
