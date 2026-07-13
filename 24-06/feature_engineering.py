@@ -10,10 +10,10 @@ import numpy as np
 from typing import Dict, List, Tuple, Any, Optional
 
 # Single source of truth for skew-driven transform recommendations — see
-# preprocessing.recommend_transform() docstring. Previously this module used
-# its own inline |skew| > 1.5 threshold, inconsistent with preprocessing.py's
+# preprocessing_new.recommend_transform() docstring. Previously this module used
+# its own inline |skew| > 1.5 threshold, inconsistent with preprocessing_new.py's
 # separate |skew| > 1.0 threshold; both now go through the same function.
-from preprocessing import recommend_transform
+from preprocessing_new import recommend_transform
 
 
 MAX_DIAGNOSTIC_ROWS = 20000
@@ -319,7 +319,7 @@ _DPD_SIGNATURES = [
 # —— Post-default / outcome-only columns (recovery, LGD, EAD-at-default, CCF,
 # default date) are unobservable for a loan that hasn't defaulted yet, so they
 # must never be PD model features — same reasoning as origination-PD/DPD above.
-# preprocessing.finalize_xy/prepare_data already strip these before X reaches
+# preprocessing_new.finalize_xy/prepare_data already strip these before X reaches
 # this step; this is a second, independent guard in case apply_feature_engineering
 # is ever called on a frame that skipped that path.
 _POST_DEFAULT_SIGNATURES = [
@@ -893,7 +893,7 @@ def analyze_for_feature_engineering(
     Returns a plan dict explaining what will be done and why.
 
     Log-transform columns work the same "propose, don't apply" way as
-    preprocessing.py's pipeline routing: every numeric column's
+    preprocessing_new.py's pipeline routing: every numeric column's
     recommend_transform() output is stored in plan["transform_recommendations"],
     but plan["log_transform_cols"] — what apply_feature_engineering() actually
     creates a `{col}_log` column for — is driven ONLY by `transform_choices`
@@ -901,7 +901,7 @@ def analyze_for_feature_engineering(
     selections). Pass None / omit it and no `_log` columns are created at all.
 
     model_family: "tree" or "linear" — passed through to recommend_transform()
-    (see preprocessing.py) so recommendations are annotated appropriately for
+    (see preprocessing_new.py) so recommendations are annotated appropriately for
     the model family actually being trained.
     """
     transform_choices = transform_choices or {}
