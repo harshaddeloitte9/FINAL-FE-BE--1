@@ -1,2 +1,23 @@
-# Frontend dependencies
+# Frontend dependencies and generated build artifacts
 **/node_modules/
+**/.vite/
+**/.vite-cache/
+**/.turbo/
+**/.next/
+**/dist/
+**/coverage/
+**/.cache/
+**/.parcel-cache/
+**/.eslintcache
+**/.stylelintcache
+**/*.tsbuildinfo
+**/.bin/
+
+# Python caches and local environment artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.venv/
+venv/
