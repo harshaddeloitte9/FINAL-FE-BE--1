@@ -4,7 +4,7 @@ import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download } from "lucide-react";
+import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw } from "lucide-react";
 
 export const Route = createFileRoute("/features")({
   head: () => ({ meta: [{ title: "Feature Engineering — Aegis Credit" }] }),
@@ -38,6 +38,21 @@ interface FeatureEngineeringResponse {
     summary?: Record<string, number | null>;
   };
   available_numeric_columns?: string[];
+  interaction_features?: Array<{
+    name?: string;
+    feature_a?: string;
+    feature_b?: string;
+    type?: string;
+    interaction_type?: string;
+    score?: number;
+    gini?: number;
+    source?: string;
+  }>;
+}
+
+interface MacroDateCandidate {
+  column: string;
+  is_preferred: boolean;
 }
 
 function Features() {
@@ -49,44 +64,128 @@ function Features() {
   const [vifSortKey, setVifSortKey] = useState<"feature" | "value">("value");
   const [vifSortAsc, setVifSortAsc] = useState(false);
 
+  // ── Macroeconomic Features (FRED) ──────────────────────────────────────────
+  // Fetched once (per date column choice) and, once attached, carried forward
+  // as csv_text (instead of the original file) into every /data/feature-
+  // engineering call below, so macro columns run through the same IV/WOE, MI,
+  // binning and correlation analysis as any other numeric feature.
+  const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
+  const [macroDefaultDateCol, setMacroDefaultDateCol] = useState<string | null>(null);
+  const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
+  const [macroColumns, setMacroColumns] = useState<string[]>([]);
+  const [macroDateColUsed, setMacroDateColUsed] = useState<string | null>(null);
+  const [datasetCsvText, setDatasetCsvText] = useState<string | null>(null);
+  const [macroLoading, setMacroLoading] = useState(false);
+  const [macroError, setMacroError] = useState<string | null>(null);
+
+  // ── Feature Removal — propose-confirm ──────────────────────────────────────
+  const [removeChecked, setRemoveChecked] = useState<Record<string, boolean>>({});
+  const [confirmedRemoveCols, setConfirmedRemoveCols] = useState<string[] | null>(null);
+  const [applyingRemoval, setApplyingRemoval] = useState(false);
+
+  const targetCol = useMemo(() => {
+    if (!profile) return "";
+    if (profile.columns && Array.isArray(profile.columns) && profile.columns.includes("loan_status")) {
+      return "loan_status";
+    }
+    if (profile.target_candidates && Array.isArray(profile.target_candidates) && profile.target_candidates.length > 0) {
+      return profile.target_candidates[0];
+    }
+    return "";
+  }, [profile]);
+
+  const runFeatureEngineering = async (overrideConfirmedRemove?: string[]) => {
+    if (!file || !targetCol || targetCol === "string") {
+      setError("Could not determine target column. Please check the uploaded dataset.");
+      return;
+    }
+    try {
+      setLoading(true);
+      setError(null);
+
+      const form = new FormData();
+      if (datasetCsvText) {
+        form.append("csv_text", datasetCsvText);
+      } else {
+        form.append("file", file);
+      }
+      form.append("target_col", targetCol);
+      const remove = overrideConfirmedRemove ?? confirmedRemoveCols;
+      if (remove !== null && remove !== undefined) {
+        form.append("confirmed_remove_cols", JSON.stringify(remove));
+      }
+
+      const result = await formUpload<FeatureEngineeringResponse>("/data/feature-engineering", form);
+      setEngineeringResult(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to run feature engineering";
+      setError(message);
+    } finally {
+      setLoading(false);
+      setApplyingRemoval(false);
+    }
+  };
+
+  // Fetch the date-column candidates for macro alignment once the dataset is
+  // available — lightweight, doesn't block the initial analysis below.
+  useEffect(() => {
+    if (!file) return;
+    (async () => {
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await formUpload<{ candidates: MacroDateCandidate[]; default_date_col: string | null }>(
+          "/data/macro/date-columns",
+          form,
+        );
+        setMacroCandidates(res.candidates ?? []);
+        setMacroDefaultDateCol(res.default_date_col ?? null);
+        setSelectedMacroDateCol(res.default_date_col ?? (res.candidates?.[0]?.column ?? ""));
+      } catch {
+        // Non-fatal — the macro section just won't have a default selection.
+      }
+    })();
+  }, [file]);
+
   useEffect(() => {
     if (!file || !profile) {
       setError("No dataset uploaded. Please upload a dataset first.");
       return;
     }
-
-    const runFeatureEngineering = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        let target_col = "";
-        if (profile.columns && Array.isArray(profile.columns) && profile.columns.includes("loan_status")) {
-          target_col = "loan_status";
-        } else if (profile.target_candidates && Array.isArray(profile.target_candidates) && profile.target_candidates.length > 0) {
-          target_col = profile.target_candidates[0];
-        }
-
-        if (!target_col || target_col === "string") {
-          throw new Error("Could not determine target column. Please check the uploaded dataset.");
-        }
-
-        const form = new FormData();
-        form.append("file", file);
-        form.append("target_col", target_col);
-
-        const result = await formUpload<FeatureEngineeringResponse>("/data/feature-engineering", form);
-        setEngineeringResult(result);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to run feature engineering";
-        setError(message);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     runFeatureEngineering();
-  }, [file, profile]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, profile, datasetCsvText]);
+
+  const fetchMacroFeatures = async () => {
+    if (!file || !selectedMacroDateCol) return;
+    try {
+      setMacroLoading(true);
+      setMacroError(null);
+      const form = new FormData();
+      form.append("file", file);
+      form.append("date_col", selectedMacroDateCol);
+      const res = await formUpload<{
+        macro_columns: string[];
+        date_col_used: string;
+        csv_with_macro: string;
+      }>("/data/macro/fetch", form);
+      setMacroColumns(res.macro_columns ?? []);
+      setMacroDateColUsed(res.date_col_used ?? selectedMacroDateCol);
+      setDatasetCsvText(res.csv_with_macro);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to fetch FRED macro features";
+      setMacroError(message);
+    } finally {
+      setMacroLoading(false);
+    }
+  };
+
+  const handleReFetchMacro = () => {
+    setMacroColumns([]);
+    setMacroDateColUsed(null);
+    setDatasetCsvText(null);
+    setMacroError(null);
+  };
 
   const plan = engineeringResult?.feature_engineering_plan ?? {};
   const summary = engineeringResult?.feature_engineering_summary ?? {};
@@ -119,6 +218,88 @@ function Features() {
     : Array.isArray(plan.regulatory_alerts)
     ? plan.regulatory_alerts
     : [];
+
+  const interactionFeatures = Array.isArray(engineeringResult?.interaction_features)
+    ? engineeringResult.interaction_features
+    : [];
+
+  // ── Feature Removal — propose-confirm, computed client-side ────────────────
+  // Mirrors the old Streamlit app's cascade-rescue logic exactly (same inputs:
+  // drop_high_corr_pairs, low_variance_cols, low_iv_cols, iv_scores — all
+  // already returned wholesale in feature_engineering_plan): if BOTH members
+  // of a correlated pair are proposed for removal, pre-retain the higher-IV
+  // one so the information family doesn't vanish entirely.
+  const removalProposal = useMemo(() => {
+    const dropHighCorrPairs: Array<[string, string, number]> = Array.isArray(plan.drop_high_corr_pairs)
+      ? plan.drop_high_corr_pairs
+      : [];
+    const lowVarianceCols: string[] = Array.isArray(plan.low_variance_cols) ? plan.low_variance_cols : [];
+    const lowIvCols: string[] = Array.isArray(plan.low_iv_cols) ? plan.low_iv_cols : [];
+    const ivScoresMap: Record<string, number> = plan.iv_scores && typeof plan.iv_scores === "object" ? plan.iv_scores : {};
+
+    const corrDropSet = new Set(dropHighCorrPairs.map(([, dropped]) => dropped));
+    const lowVarSet = new Set(lowVarianceCols);
+    const lowIvSet = new Set(lowIvCols);
+    const corrReason = new Map<string, string>();
+    for (const [kept, dropped, corr] of dropHighCorrPairs) {
+      corrReason.set(dropped, `Corr ${Number(corr).toFixed(2)} with \`${kept}\``);
+    }
+
+    const allProposed = new Set<string>([...corrDropSet, ...lowVarSet, ...lowIvSet]);
+    const rescueSet = new Set<string>();
+    const rescueNote = new Map<string, string>();
+    for (const [kept, dropped] of dropHighCorrPairs) {
+      if (allProposed.has(kept)) {
+        const ivKept = ivScoresMap[kept] ?? 0;
+        const ivDrop = ivScoresMap[dropped] ?? 0;
+        const [rescued, victim] = ivKept >= ivDrop ? [kept, dropped] : [dropped, kept];
+        rescueSet.add(rescued);
+        rescueNote.set(
+          rescued,
+          `Retained — sole survivor of correlated pair (partner \`${victim}\` also removed by another filter)`,
+        );
+      }
+    }
+
+    const reasonFor = (feat: string): string => {
+      if (rescueNote.has(feat)) return rescueNote.get(feat)!;
+      if (corrReason.has(feat)) return corrReason.get(feat)!;
+      if (lowVarSet.has(feat)) return "Near-constant — top value covers > 99% of rows";
+      if (lowIvSet.has(feat)) {
+        const ivVal = ivScoresMap[feat];
+        return ivVal !== undefined ? `Low IV (${ivVal.toFixed(4)} < 0.02)` : "Low IV (< 0.02)";
+      }
+      return "Proposed for removal";
+    };
+
+    const proposalCols = Array.from(new Set<string>([...corrDropSet, ...lowVarSet, ...lowIvSet]));
+    const rows = proposalCols.map((feature) => ({
+      feature,
+      iv: ivScoresMap[feature] !== undefined ? Number(ivScoresMap[feature]) : null,
+      reason: reasonFor(feature),
+      rescued: rescueSet.has(feature),
+      defaultRemove: !rescueSet.has(feature),
+    }));
+
+    return { rows, rescueSet };
+  }, [plan]);
+
+  // Fill in default checkbox state for any newly-proposed feature, preserving
+  // whatever the reviewer already toggled for features seen before.
+  useEffect(() => {
+    setRemoveChecked((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const row of removalProposal.rows) {
+        if (!(row.feature in next)) {
+          next[row.feature] = row.defaultRemove;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [removalProposal.rows.map((r) => r.feature).join("|")]);
 
   const [decisionLogCsvUrl, setDecisionLogCsvUrl] = useState<string | null>(null);
 
@@ -161,6 +342,13 @@ function Features() {
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const applyRemovalChoices = () => {
+    const confirmed = removalProposal.rows.filter((row) => removeChecked[row.feature]).map((row) => row.feature);
+    setApplyingRemoval(true);
+    setConfirmedRemoveCols(confirmed);
+    runFeatureEngineering(confirmed);
   };
 
   const vifRows = useMemo(() => {
@@ -276,6 +464,75 @@ function Features() {
     <div className="space-y-8">
       <PageHeader title="Feature Engineering" description="Engineered features, multicollinearity diagnostics, and importance preview." />
 
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <div className="flex items-center gap-2">
+          <Globe className="h-4 w-4 text-primary" />
+          <h2 className="text-base font-semibold">Macroeconomic Features (FRED)</h2>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Fetches FRED macro data (GDP, unemployment, Fed funds rate) aligned to the calendar month of loan
+          origination — never a default or charge-off date. This reflects the macro environment at underwriting,
+          which is what IFRS 9's point-in-time PD methodology conditions on. Attached before the analysis below
+          runs, so these go through the same IV/WOE, MI and binning as any other feature.
+        </p>
+
+        {macroColumns.length > 0 ? (
+          <div className="mt-4 space-y-3">
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+              ✅ FRED macro features attached: {macroColumns.join(", ")}
+              {macroDateColUsed && <> (aligned to the calendar month of <code className="font-mono">{macroDateColUsed}</code>)</>} —
+              they'll run through IV/WOE below like any other numeric feature.
+            </div>
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
+              onClick={handleReFetchMacro}
+            >
+              <RefreshCw className="h-4 w-4" />
+              Re-fetch / change macro features
+            </button>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-3">
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Loan origination date column (macro features are aligned to this, by calendar month)
+              </label>
+              <select
+                className="mt-2 w-full max-w-md rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                value={selectedMacroDateCol}
+                onChange={(e) => setSelectedMacroDateCol(e.target.value)}
+              >
+                <option value="">— none —</option>
+                {macroCandidates.map(({ column, is_preferred }) => (
+                  <option key={column} value={column}>
+                    {is_preferred ? `⭐ ${column} (origination/loan date)` : column}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              disabled={!selectedMacroDateCol || macroLoading}
+              className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={fetchMacroFeatures}
+            >
+              {macroLoading ? <Loader className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+              Fetch FRED macro features
+            </button>
+            {!selectedMacroDateCol && (
+              <p className="text-xs text-muted-foreground">
+                Select the loan origination date column and click Fetch to attach FRED macro features (GDP,
+                unemployment, Fed funds rate) aligned to that month.
+              </p>
+            )}
+            {macroError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{macroError}</div>
+            )}
+          </div>
+        )}
+      </section>
+
       <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
         {originalFeatures !== null && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
@@ -303,320 +560,144 @@ function Features() {
         )}
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">Feature Engineering Plan</h2>
-            <p className="text-xs text-muted-foreground">The same transformations learned on the training split and applied to validation/test.</p>
-          </div>
-          <button
-            type="button"
-            className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
-            onClick={downloadEngineeredDataset}
-          >
-            <Download className="h-4 w-4" />
-            Download engineered dataset
-          </button>
-        </div>
-        <div className="mt-4 grid gap-4 xl:grid-cols-2">
-          <div className="rounded-xl border border-border bg-background p-4">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Selected features</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {selectedFeatures.length > 0 ? selectedFeatures.slice(0, 20).map((feature: string) => (
-                <span key={feature} className="rounded-full border border-border bg-primary/10 px-2 py-1 font-mono text-[10px]">
-                  {feature}
-                </span>
-              )) : <span className="text-sm text-muted-foreground">No selected features available.</span>}
-            </div>
-          </div>
-          <div className="rounded-xl border border-border bg-background p-4">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Dropped features</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {droppedFeatures.length > 0 ? droppedFeatures.map((feature: string) => (
-                <span key={feature} className="rounded-full border border-border bg-muted/40 px-2 py-1 font-mono text-[10px]">
-                  {feature}
-                </span>
-              )) : <span className="text-sm text-muted-foreground">No features were dropped.</span>}
-            </div>
-          </div>
-        </div>
-        <div className="mt-4 space-y-3 text-sm">
-          {appliedSteps.length > 0 ? (
-            appliedSteps.map((step: any, idx: number) => (
-              <div key={idx} className="rounded-xl border border-border bg-background p-3">
-                <div className="font-medium text-xs text-foreground">{step.step || `Step ${idx + 1}`}</div>
-                <div className="mt-1 text-[11px] text-muted-foreground">{step.reason || ""}</div>
-                {Array.isArray(step.columns) && step.columns.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {step.columns.map((col: string, cidx: number) => (
-                      <span key={cidx} className="inline-block rounded border border-border bg-primary/10 px-2 py-0.5 font-mono text-[10px]">
-                        {col}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))
-          ) : (
-            <div className="rounded-xl border border-border bg-background p-3 text-muted-foreground">
-              No significant feature engineering opportunities were detected for this dataset.
-            </div>
-          )}
-        </div>
+      <section className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
+          onClick={downloadEngineeredDataset}
+        >
+          <Download className="h-4 w-4" />
+          Download engineered dataset
+        </button>
       </section>
 
-      {Object.keys(encodingSummary).length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">Encoding summary</h2>
-              <p className="text-xs text-muted-foreground">The feature engineering report captures the transformations chosen for this dataset.</p>
-            </div>
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {Object.entries(encodingSummary).map(([key, value]) => (
-              <div key={key} className="rounded-xl border border-border bg-background p-3">
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{key.replace(/_/g, " ")}</div>
-                <div className="mt-2 text-sm text-muted-foreground">
-                  {Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {/* Feature Engineering Plan section removed from UI per streamline request.
+          Backend continues computing: appliedSteps, selectedFeatures, droppedFeatures.
+          Full plan detail is available in downloadable CSV reports. */}
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        {(appliedSteps.length > 0 || transformedSteps.length > 0) && (
-          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant xl:col-span-2">
-            <div className="flex items-center justify-between gap-4">
-              <h2 className="text-base font-semibold">Transformations applied</h2>
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h2 className="text-base font-semibold">🗑️ Feature Removal Proposal</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Features proposed for removal by automated analysis. Untick any row to retain that feature. Click Apply
+          to re-run feature engineering with your confirmed choices.
+        </p>
+
+        {removalProposal.rescueSet.size > 0 && (
+          <div className="mt-4 flex items-start gap-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+            <RefreshCw className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <div>
+              <strong>Cascade rescue</strong> — {Array.from(removalProposal.rescueSet).map((f) => `\`${f}\``).join(", ")}{" "}
+              pre-retained: both members of a correlated pair were proposed for removal; the higher-IV member was
+              kept so the information family doesn't vanish entirely.
             </div>
-            <div className="mt-4 space-y-3 text-sm">
-              {appliedSteps.length > 0 ? (
-                appliedSteps.map((step: any, idx: number) => (
-                  <div key={idx} className="rounded-xl border border-border bg-background p-3">
-                    <div className="font-medium text-xs text-foreground">{step.step || `Step ${idx + 1}`}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">{step.reason || ""}</div>
-                    {Array.isArray(step.columns) && step.columns.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {step.columns.map((col: string, cidx: number) => (
-                          <span key={cidx} className="inline-block rounded border border-border bg-primary/10 px-2 py-0.5 font-mono text-[10px]">
-                            {col}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))
-              ) : (
-                transformedSteps.map((item: string, idx: number) => (
-                  <div key={idx} className="rounded-xl border border-border bg-background p-3 text-muted-foreground">
-                    {item}
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
+          </div>
         )}
 
-        {addedFeatures.length > 0 && (
-          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <h2 className="text-base font-semibold">Features added</h2>
-            <div className="mt-4 space-y-2 text-sm text-muted-foreground">
-              {addedFeatures.map((feature: string, idx: number) => (
-                <div key={idx} className="rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs">
-                  {feature}
-                </div>
-              ))}
+        {removalProposal.rows.length > 0 ? (
+          <>
+            <div className="mt-4 overflow-x-auto">
+              <table className="min-w-full border-collapse text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="border-b border-border px-3 py-2">Feature</th>
+                    <th className="border-b border-border px-3 py-2">IV</th>
+                    <th className="border-b border-border px-3 py-2">Reason</th>
+                    <th className="border-b border-border px-3 py-2">Remove?</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {removalProposal.rows.map((row) => (
+                    <tr key={row.feature} className="odd:bg-background">
+                      <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
+                      <td className="border-b border-border px-3 py-2 text-xs">{row.iv !== null ? row.iv.toFixed(4) : "—"}</td>
+                      <td className="border-b border-border px-3 py-2 text-xs text-muted-foreground">{row.reason}</td>
+                      <td className="border-b border-border px-3 py-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={!!removeChecked[row.feature]}
+                          onChange={(e) =>
+                            setRemoveChecked((prev) => ({ ...prev, [row.feature]: e.target.checked }))
+                          }
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          </section>
+            <button
+              type="button"
+              disabled={applyingRemoval || loading}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={applyRemovalChoices}
+            >
+              {applyingRemoval ? <Loader className="h-4 w-4 animate-spin" /> : null}
+              Apply removal choices
+            </button>
+          </>
+        ) : (
+          <p className="mt-4 text-sm text-muted-foreground">No features proposed for removal on this dataset.</p>
         )}
-      </div>
+      </section>
 
-      {removedFeatures.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h2 className="text-base font-semibold">Features removed</h2>
-          <div className="mt-4 space-y-3 text-sm text-muted-foreground">
-            {removedFeatures.map((feature: string, idx: number) => {
-              const reasons = appliedSteps
-                .filter((step: any) => Array.isArray(step.columns) && step.columns.includes(feature))
-                .map((step: any) => step.reason)
-                .filter(Boolean);
-              return (
-                <div key={idx} className="rounded-xl border border-border bg-background p-3">
-                  <div className="font-medium text-xs">{feature}</div>
-                  {reasons.length > 0 && <div className="mt-1 text-[11px] text-muted-foreground">{reasons.join(" / ")}</div>}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
+      {/* Encoding summary section removed from UI per streamline request.
+          Transformations (Log transform, WOE, binning, etc.) continue backend-side.
+          Full encoding report available in CSV downloads. */}
 
-      {giniRows.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">Univariate Gini coefficients</h2>
-              <p className="text-xs text-muted-foreground">Computed on the training split only.</p>
-            </div>
-          </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="border-b border-border px-3 py-2">Feature</th>
-                  <th className="border-b border-border px-3 py-2">Gini</th>
-                </tr>
-              </thead>
-              <tbody>
-                {giniRows.map((row) => (
-                  <tr key={row.feature} className="odd:bg-background">
-                    <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
-                    <td className="border-b border-border px-3 py-2 text-xs">{row.score.toFixed(4)}</td>
+      {/* "Transformations applied" section removed from UI per streamline request.
+          Applied steps continue computing server-side for CSV exports. */}
+
+      {/* Diagnostic tables removed from UI per streamline request:
+          - Univariate Gini coefficients
+          - Mutual information
+          - Highly correlated pairs
+          - VIF table
+          All metrics continue computing server-side and appear in CSV exports. */}
+
+      {/* Information value table and WOE Transformation Details removed from UI per streamline request.
+          All IV and WOE metrics continue computing server-side and appear in CSV exports. */}
+
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h2 className="text-base font-semibold">🔗 Interaction Terms Generated</h2>
+        {interactionFeatures.length > 0 ? (
+          <>
+            <p className="mt-1 text-xs text-muted-foreground">
+              IV and Gini are each interaction's own predictive power — the metrics that let it pass evaluation
+              (min IV, redundancy filtering) — not a lift over the source features alone.
+            </p>
+            <div className="mt-4 overflow-x-auto">
+              <table className="min-w-full border-collapse text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="border-b border-border px-3 py-2">Feature A</th>
+                    <th className="border-b border-border px-3 py-2">Feature B</th>
+                    <th className="border-b border-border px-3 py-2">Type</th>
+                    <th className="border-b border-border px-3 py-2">IV</th>
+                    <th className="border-b border-border px-3 py-2">Gini</th>
+                    <th className="border-b border-border px-3 py-2">Source</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {miData.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">Mutual information</h2>
-              <p className="text-xs text-muted-foreground">All numeric features ranked by mutual information with target ({miData.length} features).</p>
+                </thead>
+                <tbody>
+                  {[...interactionFeatures]
+                    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+                    .map((f, idx) => (
+                      <tr key={f.name ?? idx} className="odd:bg-background">
+                        <td className="border-b border-border px-3 py-2 font-mono text-xs">{f.feature_a}</td>
+                        <td className="border-b border-border px-3 py-2 font-mono text-xs">{f.feature_b}</td>
+                        <td className="border-b border-border px-3 py-2 text-xs">{f.interaction_type ?? f.type ?? "—"}</td>
+                        <td className="border-b border-border px-3 py-2 text-xs">{f.score !== undefined ? f.score.toFixed(4) : "—"}</td>
+                        <td className="border-b border-border px-3 py-2 text-xs">{f.gini !== undefined && f.gini !== null ? f.gini.toFixed(4) : "—"}</td>
+                        <td className="border-b border-border px-3 py-2 text-xs capitalize">{f.source ?? "ranked"}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
             </div>
-          </div>
-          <div className="mt-4 overflow-y-auto" style={{ maxHeight: "600px" }}>
-            {miData.length > 0 && (
-              <div style={{ height: Math.max(400, miData.length * 25) }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={miData} layout="vertical" margin={{ left: 150 }}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                    <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
-                    <YAxis type="category" dataKey="feature" tickLine={false} axisLine={false} fontSize={9} width={145} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Bar dataKey="score" fill="oklch(0.76 0.18 130)" radius={[0, 6, 6, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
-      {highCorrPairs.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h2 className="text-base font-semibold">Highly correlated pairs</h2>
-          <div className="mt-4 space-y-3 text-sm text-muted-foreground">
-            {highCorrPairs.map((pair: any, idx: number) => (
-              <div key={idx} className="rounded-xl border border-border bg-background p-3">
-                <div className="font-medium text-xs">{pair.feature_1} ↔ {pair.feature_2}</div>
-                <div className="mt-1 text-[11px]">Correlation: {Number(pair.correlation).toFixed(4)}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {vifRows.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">VIF table</h2>
-              <p className="text-xs text-muted-foreground">Variance inflation factor estimates for numeric features.</p>
-            </div>
-            <div className="flex gap-2 text-xs">
-              <button
-                type="button"
-                className="rounded-full border border-border bg-background px-2 py-1 text-muted-foreground hover:border-primary hover:text-foreground"
-                onClick={() => {
-                  setVifSortKey("feature");
-                  setVifSortAsc((prev) => (vifSortKey === "feature" ? !prev : true));
-                }}
-              >
-                Sort by feature
-              </button>
-              <button
-                type="button"
-                className="rounded-full border border-border bg-background px-2 py-1 text-muted-foreground hover:border-primary hover:text-foreground"
-                onClick={() => {
-                  setVifSortKey("value");
-                  setVifSortAsc((prev) => (vifSortKey === "value" ? !prev : true));
-                }}
-              >
-                Sort by VIF
-              </button>
-            </div>
-          </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="border-b border-border px-3 py-2">Feature</th>
-                  <th className="border-b border-border px-3 py-2">VIF</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedVifRows.map((row) => (
-                  <tr key={row.feature} className="odd:bg-background">
-                    <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
-                    <td className="border-b border-border px-3 py-2 text-xs">{row.value.toFixed(3)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {ivData.length > 0 && (
-        <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">Information value</h2>
-              <p className="text-xs text-muted-foreground">All computed IV features and WOE transformation candidates ({ivData.length} features).</p>
-            </div>
-          </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="border-b border-border px-3 py-2">Feature</th>
-                  <th className="border-b border-border px-3 py-2">IV</th>
-                  <th className="border-b border-border px-3 py-2">WOE Applied</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ivData.map((row) => (
-                  <tr key={row.feature} className="odd:bg-background">
-                    <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
-                    <td className="border-b border-border px-3 py-2 text-xs">{row.iv.toFixed(5)}</td>
-                    <td className="border-b border-border px-3 py-2 text-xs">{woeCols.includes(row.feature) ? "Yes" : "No"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {woeInfo.length > 0 && (
-            <div className="mt-6">
-              <h3 className="text-sm font-semibold">WOE Transformation Details</h3>
-              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                {woeInfo.map((info) => (
-                  <div key={info.feature} className="rounded-xl border border-border bg-background p-3 text-sm">
-                    <div className="font-medium text-xs">{info.feature}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">WOE buckets: {info.buckets}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No interaction terms passed evaluation for this dataset.</p>
+        )}
+      </section>
 
       {regulatoryAlerts.length > 0 && (
         <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
