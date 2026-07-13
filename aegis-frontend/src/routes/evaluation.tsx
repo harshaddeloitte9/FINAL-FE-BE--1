@@ -190,6 +190,8 @@ function Evaluation() {
       { label: "F1 score", value: evaluationMetrics?.f1 },
       { label: "ROC AUC", value: evaluationMetrics?.roc_auc },
       { label: "PR AUC", value: evaluationMetrics?.pr_auc },
+      { label: "KS statistic", value: evaluationMetrics?.ks_statistic },
+      { label: "Brier score", value: evaluationMetrics?.brier_score },
     ];
   }, [evaluationMetrics, taskType]);
 
