@@ -97,17 +97,18 @@ ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
 
 app = FastAPI()
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:8080",
         "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
         "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],  
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1346,6 +1347,116 @@ async def train_model_endpoint(
         "evaluation_metrics": metrics,
         "evaluation_data": evaluation_data,
         "model_artifact": _to_base64(pipeline),
+    }
+
+
+def _lighten_for_comparison(model, model_name: str, max_estimators: int = 100):
+    """
+    Reduce ensemble size for comparison-only runs so each candidate trains
+    fast. Comparison is meant to give a directional read on which model is
+    worth committing to — not a final number — so trading a bit of accuracy
+    for speed here is the right call. Full-fidelity numbers come from the
+    dedicated /models/train run once the user picks a model.
+    """
+    if hasattr(model, "n_estimators") and getattr(model, "n_estimators", None):
+        try:
+            if model.n_estimators > max_estimators:
+                model.set_params(n_estimators=max_estimators)
+        except Exception:
+            pass
+    return model
+
+
+@app.post("/models/compare")
+async def compare_models_endpoint(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    model_names: str = Form(...),  # JSON-encoded list of model names
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    use_feature_engineering: bool = Form(False),
+    synthetic_samples: Optional[int] = Form(None),
+) -> Dict[str, Any]:
+    """
+    Lightweight, fast comparison across candidate models on the SAME split.
+
+    Deliberately skips everything that makes /models/train slow when run
+    N times: no cross-validation, no hyperparameter search, no OOT, no
+    ROC/PR/threshold/gain-chart curves, and no base64 model-artifact
+    serialization. Just fit -> predict -> summary metrics per model, so a
+    reviewer can quickly see which model is worth committing to before
+    running the full, config-rich /models/train on that one model.
+    """
+    try:
+        names = json.loads(model_names)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"model_names must be a JSON array: {exc}")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="model_names must be a non-empty list")
+
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    col_types = detect_column_types(df)
+    task_type = detect_task_type(df[target_col])
+    X, y, _ = finalize_xy(df, col_types, target_col)
+    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
+    fe_summary = None
+    if use_feature_engineering:
+        plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+        X_train, fe_summary = apply_feature_engineering(X_train, plan)
+        X_test, _ = apply_feature_engineering(X_test, plan)
+
+    results = []
+    for name in names:
+        try:
+            model = get_model_instance(name, task_type)
+            model = _lighten_for_comparison(model, name)
+            pipeline, training_info, _ = train_model(
+                X_train, y_train,
+                col_types=col_types,
+                target_col=target_col,
+                prep_report=prep_report,
+                model=model,
+                use_cv=False,
+                use_hyperopt=False,
+                task_type=task_type,
+                model_name=name,
+                use_oot=False,
+            )
+            y_pred = pipeline.predict(X_test)
+            y_proba = None
+            if hasattr(pipeline, "predict_proba"):
+                try:
+                    y_proba = pipeline.predict_proba(X_test)
+                except Exception:
+                    y_proba = None
+
+            if task_type == "binary":
+                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
+            else:
+                metrics = compute_regression_metrics(y_test.values, y_pred)
+
+            results.append({
+                "model_name": name,
+                **metrics,
+                "training_time_s": training_info.get("training_time_s"),
+            })
+        except Exception as e:
+            results.append({"model_name": name, "error": str(e)})
+
+    return {
+        "task_type": task_type,
+        "comparison": results,
+        "feature_engineering_summary": fe_summary,
     }
 
 
