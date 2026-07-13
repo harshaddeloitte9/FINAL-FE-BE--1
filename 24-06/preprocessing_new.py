@@ -986,6 +986,11 @@ def build_preprocessing_report(
 class BooleanToIntTransformer(BaseEstimator, TransformerMixin):
     """Cast boolean / 0-1 flag columns to float."""
     def fit(self, X, y=None):
+        # sklearn's check_is_fitted() (no explicit `attributes=`) looks for any
+        # attribute ending in "_" (and not starting with "__") to decide an
+        # estimator has been fitted. Without this, fit() runs fine but every
+        # downstream .transform() call raises NotFittedError anyway.
+        self.n_features_in_ = pd.DataFrame(X).shape[1]
         return self
 
     def transform(self, X):
@@ -1007,6 +1012,11 @@ class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
             self._col_names = list(X.columns)
         else:
             self._col_names = [f"dt_col_{i}" for i in range(X.shape[1] if hasattr(X, "shape") else 1)]
+        # _col_names starts with an underscore, which check_is_fitted() does
+        # NOT count as a fitted marker (it looks for names ENDING in "_").
+        # Without a properly-suffixed attribute, transform() always raises
+        # NotFittedError even right after a successful fit().
+        self.n_features_in_ = len(self._col_names)
         return self
 
     def transform(self, X):
@@ -1068,6 +1078,9 @@ class LogTransformer(BaseEstimator, TransformerMixin):
     all-positive on training data."""
 
     def fit(self, X, y=None):
+        # See BooleanToIntTransformer.fit() — without this, check_is_fitted()
+        # always reports "not fitted" and transform() raises NotFittedError.
+        self.n_features_in_ = pd.DataFrame(X).shape[1]
         return self
 
     def transform(self, X):
@@ -1095,6 +1108,10 @@ class YeoJohnsonTransformer(BaseEstimator, TransformerMixin):
         arr = pd.DataFrame(X).apply(pd.to_numeric, errors="coerce").fillna(0).values
         self._pt = PowerTransformer(method="yeo-johnson")
         self._pt.fit(arr)
+        # _pt starts with an underscore, which check_is_fitted() does NOT
+        # count as a fitted marker (needs a name ENDING in "_"). Same bug as
+        # BooleanToIntTransformer/DatetimeFeatureExtractor above.
+        self.n_features_in_ = arr.shape[1]
         return self
 
     def transform(self, X):
