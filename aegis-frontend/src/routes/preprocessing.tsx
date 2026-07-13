@@ -1,8 +1,8 @@
 ﻿import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import {
-  ArrowLeft, ArrowRight, Download, Minus, Plus, Target, BarChart as BarChartIcon,
-  Table as TableIcon, Brain, Settings, Trash2, Hash, Tag, Loader2, AlertTriangle,
+  ArrowLeft, ArrowRight, Download, Minus, Plus, BarChart as BarChartIcon,
+  Table as TableIcon, Brain, Trash2, Hash, Tag, Loader2, AlertTriangle,
   CheckCircle2, Info,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -67,6 +67,51 @@ function Preprocessing() {
   const [transformChoices, setTransformChoices] = useState<Record<string, string>>({});
   const [strategyOverride, setStrategyOverride] = useState<string | null>(null);
   const initializedDefaults = useRef(false);
+
+  // ── On-demand "impact of dropping this feature" analysis (review_flag
+  //    columns only) — fetched lazily per column when the reviewer expands
+  //    it, not for every column on every /data/preprocess call. ──
+  const [dropImpactOpen, setDropImpactOpen] = useState<Record<string, boolean>>({});
+  const [dropImpactLoading, setDropImpactLoading] = useState<Record<string, boolean>>({});
+  const [dropImpactError, setDropImpactError] = useState<Record<string, string>>({});
+  const [dropImpact, setDropImpact] = useState<Record<string, any>>({});
+
+  const fetchDropImpact = async (col: string) => {
+    if (!file || !preprocess?.target_col) return;
+    setDropImpactLoading((prev) => ({ ...prev, [col]: true }));
+    setDropImpactError((prev) => ({ ...prev, [col]: "" }));
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("target_col", preprocess.target_col);
+      form.append("test_size", String(testSize));
+      form.append("val_size", String(valSize));
+      form.append("random_seed", String(randomSeed));
+      form.append("columns", JSON.stringify([col]));
+      const result = await formUpload("/data/drop-impact", form);
+      const impact = (result as any)?.drop_impact?.[col];
+      if (impact?.error) {
+        setDropImpactError((prev) => ({ ...prev, [col]: impact.error }));
+      } else {
+        setDropImpact((prev) => ({ ...prev, [col]: impact }));
+      }
+    } catch (err: any) {
+      setDropImpactError((prev) => ({
+        ...prev,
+        [col]: err?.body?.detail ?? err?.message ?? "Impact analysis failed.",
+      }));
+    } finally {
+      setDropImpactLoading((prev) => ({ ...prev, [col]: false }));
+    }
+  };
+
+  const toggleDropImpact = (col: string) => {
+    const nextOpen = !dropImpactOpen[col];
+    setDropImpactOpen((prev) => ({ ...prev, [col]: nextOpen }));
+    if (nextOpen && !dropImpact[col] && !dropImpactLoading[col]) {
+      fetchDropImpact(col);
+    }
+  };
 
   useEffect(() => {
     const runPreprocess = async () => {
@@ -208,8 +253,6 @@ function Preprocessing() {
     return Array.from(new Set(preprocess.class_distribution_chart.map((item: any) => String(item.class))));
   }, [preprocess?.class_distribution_chart]);
 
-  const targetPreview = Array.isArray(preprocess?.target_preview) ? preprocess.target_preview : [];
-  const processedDatasetPreview = Array.isArray(preprocess?.processed_dataset_preview) ? preprocess.processed_dataset_preview : [];
 
   // ── Missing-value treatment proposal (every column classify_missing_treatment
   //    found — i.e. every column that actually has missing values) ──
@@ -444,6 +487,78 @@ function Preprocessing() {
                           </div>
                           <p className="mt-1.5 text-xs text-muted-foreground">{info.reason}</p>
 
+                          {isReviewFlag && (
+                            <div className="mt-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleDropImpact(col)}
+                                className="text-xs font-medium text-amber-700 underline decoration-dotted underline-offset-2 hover:text-amber-800"
+                              >
+                                {dropImpactOpen[col] ? "Hide" : "Show"} impact of dropping this feature
+                              </button>
+
+                              {dropImpactOpen[col] && (
+                                <div className="mt-2 rounded-lg border border-border bg-background p-3">
+                                  {dropImpactLoading[col] ? (
+                                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      Analyzing impact of dropping {col}...
+                                    </div>
+                                  ) : dropImpactError[col] ? (
+                                    <div className="text-xs text-red-600">{dropImpactError[col]}</div>
+                                  ) : dropImpact[col] ? (
+                                    <>
+                                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                        <div>
+                                          <div className="text-xs text-muted-foreground">Predictive importance (IV)</div>
+                                          <div className="text-sm font-semibold tabular-nums">
+                                            {dropImpact[col].iv !== null && dropImpact[col].iv !== undefined
+                                              ? dropImpact[col].iv.toFixed(3)
+                                              : "n/a"}
+                                          </div>
+                                          {dropImpact[col].iv_label && (
+                                            <div className="text-xs text-muted-foreground">{dropImpact[col].iv_label}</div>
+                                          )}
+                                        </div>
+                                        <div>
+                                          <div className="text-xs text-muted-foreground">Most correlated feature</div>
+                                          {dropImpact[col].redundant_col ? (
+                                            <>
+                                              <div className="text-sm font-semibold">{dropImpact[col].redundant_col}</div>
+                                              <div className="text-xs text-muted-foreground">
+                                                {"|corr|="}{Math.abs(dropImpact[col].redundant_corr).toFixed(2)}
+                                              </div>
+                                            </>
+                                          ) : (
+                                            <>
+                                              <div className="text-sm font-semibold">None found</div>
+                                              <div className="text-xs text-muted-foreground">no redundancy ≥ 0.60</div>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      <div
+                                        className={`mt-3 rounded-md border-l-4 p-2.5 text-xs ${
+                                          dropImpact[col].verdict_tone === "safe"
+                                            ? "border-emerald-500 bg-emerald-500/5 text-emerald-900"
+                                            : dropImpact[col].verdict_tone === "caution"
+                                            ? "border-amber-500 bg-amber-500/5 text-amber-900"
+                                            : dropImpact[col].verdict_tone === "risk"
+                                            ? "border-red-500 bg-red-500/5 text-red-900"
+                                            : "border-border bg-background text-muted-foreground"
+                                        }`}
+                                      >
+                                        <span className="font-medium">Verdict: </span>
+                                        {dropImpact[col].verdict}
+                                      </div>
+                                    </>
+                                  ) : null}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
                           <div className="mt-3 flex flex-wrap items-center gap-3">
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-muted-foreground">Treatment</span>
@@ -675,66 +790,6 @@ function Preprocessing() {
           </div>
 
           <Separator />
-
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-sm font-semibold flex items-center">
-              <Target className="h-4 w-4 mr-2 text-emerald-700" />
-              Target Preview
-            </div>
-            <div className="mt-3 overflow-x-auto">
-              {targetPreview.length > 0 ? (
-                <table className="min-w-full border-collapse text-sm">
-                  <thead>
-                    <tr>
-                      <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">Index</th>
-                      <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">Target</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {targetPreview.map((value: any, index: number) => (
-                      <tr key={index} className={index % 2 === 0 ? "bg-background" : ""}>
-                        <td className="border-b border-border px-3 py-2 font-mono text-xs">{index + 1}</td>
-                        <td className="border-b border-border px-3 py-2 font-mono text-xs">{value === null || value === undefined ? "" : String(value)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="p-6 text-center text-sm text-muted-foreground">No target preview available.</div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-sm font-semibold flex items-center">
-              <Settings className="h-4 w-4 mr-2" />
-              Processed Dataset Preview
-            </div>
-            <div className="mt-4 overflow-x-auto">
-              {processedDatasetPreview.length > 0 ? (
-                <table className="min-w-full border-collapse text-sm">
-                  <thead>
-                    <tr>
-                      {Object.keys(processedDatasetPreview[0]).map((key: string) => (
-                        <th key={key} className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">{key}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {processedDatasetPreview.map((row: any, rowIndex: number) => (
-                      <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : ""}>
-                        {Object.values(row).map((cell: any, cellIndex: number) => (
-                          <td key={cellIndex} className="border-b border-border px-3 py-2 font-mono text-xs">{cell === null || cell === undefined ? "" : String(cell)}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="p-6 text-center text-sm text-muted-foreground">No processed dataset preview available.</div>
-              )}
-            </div>
-          </div>
 
           <div className="flex gap-3 pt-4">
             <Button variant="outline" onClick={() => navigate({ to: "/profiling" })} className="gap-2">
