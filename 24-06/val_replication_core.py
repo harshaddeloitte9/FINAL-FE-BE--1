@@ -177,6 +177,12 @@ def run_replication(
         "split_stats": {},
         "timing_s": 0.0,
         "ablation": {},
+        "X_train": None,
+        "X_test": None,
+        "y_train": None,
+        "y_test": None,
+        "y_proba": None,
+        "y_pred": None,
     }
     t0 = time.time()
     try:
@@ -209,10 +215,23 @@ def run_replication(
         prep_report_fe["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_cols}
 
         registry = CLASSIFICATION_MODELS
-        if model_name not in registry:
+        normalized_model_name = model_name
+        alias_map = {
+            "LogisticRegression": "Logistic Regression",
+            "LogisticRegressionClassifier": "Logistic Regression",
+            "RandomForest": "Random Forest",
+            "RandomForestClassifier": "Random Forest",
+            "GradientBoosting": "Gradient Boosting",
+            "GradientBoostingClassifier": "Gradient Boosting",
+            "XGBoostClassifier": "XGBoost",
+            "LightGBMClassifier": "LightGBM",
+        }
+        if model_name in alias_map:
+            normalized_model_name = alias_map[model_name]
+        if normalized_model_name not in registry:
             raise ValueError(f"Model '{model_name}' not found. Available: {list(registry.keys())}")
-        model_cls = registry[model_name]["class"]
-        default_params = registry[model_name].get("default_params", {}).copy()
+        model_cls = registry[normalized_model_name]["class"]
+        default_params = registry[normalized_model_name].get("default_params", {}).copy()
         try:
             valid_keys = set(model_cls().get_params().keys())
             default_params = {k: v for k, v in default_params.items() if k in valid_keys}
@@ -256,6 +275,12 @@ def run_replication(
             "cv_mean_auc": training_info.get("cv_mean"),
             "cv_std_auc": training_info.get("cv_std"),
             "timing_s": 0.0,
+            "X_train": X_train,
+            "X_test": X_test_eng,
+            "y_train": y_train,
+            "y_test": y_test,
+            "y_proba": y_proba,
+            "y_pred": y_pred,
         })
 
         seed_aucs = []

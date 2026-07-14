@@ -31,6 +31,12 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
 _local_agent2_spec = importlib.util.spec_from_file_location("local_agent2", Path(__file__).resolve().parent / "agent2.py")
 if _local_agent2_spec is None or _local_agent2_spec.loader is None:
@@ -535,6 +541,26 @@ def _json_safe_scalar(v: Any) -> Any:
     except (TypeError, ValueError):
         pass
     return v
+
+
+def _serialize_stage5_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    out = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            out[key] = _serialize_stage5_payload(value)
+        elif isinstance(value, (list, tuple)):
+            out[key] = [_serialize_stage5_payload(item) if isinstance(item, dict) else item for item in value]
+        elif isinstance(value, (np.integer, np.floating, np.bool_)):
+            out[key] = _json_safe_scalar(value)
+        elif isinstance(value, (pd.DataFrame, pd.Series)):
+            out[key] = None
+        elif isinstance(value, (np.ndarray,)):
+            out[key] = value.tolist()
+        else:
+            out[key] = _json_safe_scalar(value)
+    return out
 
 
 def _to_base64(obj: Any) -> str:
@@ -2041,6 +2067,306 @@ async def explain_model(
         "feature_importance": importance,
         "shap": shap_info,
         "summary": summary_text,
+    }
+
+
+def _run_benchmark_comparison(
+    replication_result: Dict[str, Any],
+    benchmark_model: str,
+    y_true: Optional[np.ndarray],
+    y_proba: Optional[np.ndarray],
+) -> Dict[str, Any]:
+    X_train = replication_result.get("X_train")
+    X_test = replication_result.get("X_test")
+    y_train = replication_result.get("y_train")
+    if X_train is None or X_test is None or y_train is None or y_true is None or y_proba is None:
+        return {
+            "model_name": benchmark_model,
+            "status": "SKIP",
+            "metrics": {},
+            "comparison": {},
+        }
+
+    X_tr_num = X_train.select_dtypes(include=[np.number])
+    X_te_num = X_test.select_dtypes(include=[np.number])
+    if X_tr_num.empty or X_te_num.empty:
+        return {
+            "model_name": benchmark_model,
+            "status": "SKIP",
+            "metrics": {},
+            "comparison": {},
+        }
+
+    imputer = SimpleImputer(strategy="median")
+    X_tr_imp = imputer.fit_transform(X_tr_num)
+    X_te_imp = imputer.transform(X_te_num)
+
+    scaler = StandardScaler()
+    X_tr_sc = scaler.fit_transform(X_tr_imp)
+    X_te_sc = scaler.transform(X_te_imp)
+
+    if "Logistic" in benchmark_model:
+        model = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+    elif "Decision Tree" in benchmark_model:
+        model = DecisionTreeClassifier(max_depth=5, class_weight="balanced", random_state=42)
+    else:
+        model = RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42)
+
+    model.fit(X_tr_sc, y_train)
+    bm_proba = model.predict_proba(X_te_sc)[:, 1]
+    bm_pred = (bm_proba >= 0.5).astype(int)
+    bm_auc = round(float(roc_auc_score(np.asarray(y_true), bm_proba)), 4)
+    bm_gini = round(2 * bm_auc - 1, 4)
+    bm_recall = round(float(np.mean(bm_pred[np.asarray(y_true) == 1] == 1)), 4)
+
+    champion_auc = replication_result.get("metrics", {}).get("roc_auc")
+    champion_recall = replication_result.get("metrics", {}).get("recall")
+    champion_gini = replication_result.get("metrics", {}).get("gini")
+
+    return {
+        "model_name": benchmark_model,
+        "status": "OK",
+        "metrics": {
+            "roc_auc": bm_auc,
+            "gini": bm_gini,
+            "recall": bm_recall,
+        },
+        "comparison": {
+            "champion_vs_challenger": {
+                "roc_auc": {
+                    "champion": champion_auc,
+                    "challenger": bm_auc,
+                },
+                "gini": {
+                    "champion": champion_gini,
+                    "challenger": bm_gini,
+                },
+                "recall": {
+                    "champion": champion_recall,
+                    "challenger": bm_recall,
+                },
+            }
+        },
+    }
+
+
+@app.post("/validation/performance")
+async def validation_performance(
+    model_name: str = Form(...),
+    target_col: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    benchmark_model: str = Form("Logistic Regression (Industry Standard)"),
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+    seeds: Optional[str] = Form("42,43,44,45,46"),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    cv_folds: int = Form(5),
+    reported_json: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    intake_payload = {}
+    if intake_json:
+        try:
+            intake_payload = json.loads(intake_json)
+        except Exception:
+            intake_payload = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            mdd_text = parse_mdd_file(mdd_file)
+        except Exception:
+            mdd_text = ""
+
+    reported_payload: Dict[str, Any] = {}
+    if reported_json:
+        try:
+            reported_payload = json.loads(reported_json)
+        except Exception:
+            reported_payload = {}
+
+    try:
+        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    except Exception:
+        seed_list = [random_seed]
+
+    replication_result = run_replication(
+        df=df,
+        target_col=target_col,
+        model_name=model_name,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
+        cv_folds=cv_folds,
+        reported=reported_payload,
+        seeds=seed_list,
+    )
+
+    y_true = replication_result.get("y_test")
+    y_proba = replication_result.get("y_proba")
+    y_true_arr = np.asarray(y_true).astype(int) if y_true is not None else None
+    y_proba_arr = np.asarray(y_proba).astype(float) if y_proba is not None else None
+
+    metrics = dict(replication_result.get("metrics") or {})
+    metrics = {k: _json_safe_scalar(v) for k, v in metrics.items()}
+
+    roc_curve = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        roc_curve = compute_roc_curve(y_true_arr, y_proba_arr)
+
+    pr_curve = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        pr_curve = compute_pr_curve(y_true_arr, y_proba_arr)
+
+    threshold_analysis = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        threshold_analysis = compute_threshold_analysis(y_true_arr, y_proba_arr)
+
+    score_distribution = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        score_distribution = compute_score_distribution(y_true_arr, y_proba_arr, n_bins=40)
+
+    cm = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        y_pred = (y_proba_arr >= 0.5).astype(int)
+        cm_matrix = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).tolist()
+        cm = {"labels": [0, 1], "matrix": cm_matrix}
+
+    calibration_points = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        cal_df = pd.DataFrame({"actual": y_true_arr, "predicted": y_proba_arr})
+        cal_df["bin"] = pd.qcut(cal_df["predicted"], q=10, duplicates="drop")
+        grouped = (
+            cal_df.groupby("bin", observed=True)
+            .agg(actual_rate=("actual", "mean"), predicted_rate=("predicted", "mean"), n=("actual", "count"))
+            .reset_index()
+        )
+        calibration_points = [
+            {
+                "bin": str(row["bin"]),
+                "actual_rate": float(row["actual_rate"]),
+                "predicted_rate": float(row["predicted_rate"]),
+                "n": int(row["n"]),
+            }
+            for _, row in grouped.iterrows()
+        ]
+
+    cv_mean_auc = replication_result.get("cv_mean_auc")
+    test_auc = metrics.get("roc_auc")
+    train_test_gap = None
+    train_test_gap_status = "WARN"
+    if cv_mean_auc is not None and test_auc is not None:
+        train_test_gap = round(abs(float(cv_mean_auc) - float(test_auc)), 4)
+        train_test_gap_status = "PASS" if train_test_gap <= 0.10 else "FAIL"
+    elif test_auc is not None:
+        train_test_gap = round(float(test_auc) if np.isfinite(float(test_auc)) else 0.0, 4)
+        train_test_gap_status = "WARN"
+
+    validation_report = run_validation_agent2(df, intake_payload or {}, mdd_text)
+    stage5_findings = [
+        finding for finding in validation_report.get("all_findings", [])
+        if finding.get("stage") == "Stage 5: Performance Validation"
+    ]
+
+    benchmark_payload = _run_benchmark_comparison(
+        replication_result=replication_result,
+        benchmark_model=benchmark_model,
+        y_true=y_true_arr,
+        y_proba=y_proba_arr,
+    )
+
+    performance_checks = []
+    if metrics.get("roc_auc") is not None:
+        performance_checks.append({
+            "check": "ROC-AUC",
+            "threshold": ">= 0.70",
+            "status": "PASS" if float(metrics["roc_auc"]) >= 0.70 else "FAIL",
+            "value": metrics["roc_auc"],
+        })
+    if metrics.get("gini") is not None:
+        performance_checks.append({
+            "check": "Gini",
+            "threshold": ">= 0.40",
+            "status": "PASS" if float(metrics["gini"]) >= 0.40 else "FAIL",
+            "value": metrics["gini"],
+        })
+    if metrics.get("recall") is not None:
+        performance_checks.append({
+            "check": "Recall",
+            "threshold": ">= 0.60",
+            "status": "PASS" if float(metrics["recall"]) >= 0.60 else "FAIL",
+            "value": metrics["recall"],
+        })
+    if metrics.get("precision") is not None:
+        performance_checks.append({
+            "check": "Precision",
+            "threshold": ">= 0.50",
+            "status": "PASS" if float(metrics["precision"]) >= 0.50 else "FAIL",
+            "value": metrics["precision"],
+        })
+    if metrics.get("f1") is not None:
+        performance_checks.append({
+            "check": "F1 Score",
+            "threshold": ">= 0.55",
+            "status": "PASS" if float(metrics["f1"]) >= 0.55 else "FAIL",
+            "value": metrics["f1"],
+        })
+    if metrics.get("brier_score") is not None:
+        performance_checks.append({
+            "check": "Brier Score",
+            "threshold": "< 0.25",
+            "status": "PASS" if float(metrics["brier_score"]) < 0.25 else "FAIL",
+            "value": metrics["brier_score"],
+        })
+    if metrics.get("pr_auc") is not None:
+        performance_checks.append({
+            "check": "PR-AUC",
+            "threshold": ">= 0.30",
+            "status": "PASS" if float(metrics["pr_auc"]) >= 0.30 else "FAIL",
+            "value": metrics["pr_auc"],
+        })
+    if metrics.get("ks") is not None:
+        performance_checks.append({
+            "check": "KS Statistic",
+            "threshold": ">= 0.30",
+            "status": "PASS" if float(metrics["ks"]) >= 0.30 else "FAIL",
+            "value": metrics["ks"],
+        })
+
+    safe_replication_result = dict(replication_result)
+    for key in ["X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
+        safe_replication_result.pop(key, None)
+
+    return {
+        "stage": "performance",
+        "replication": {
+            "result": safe_replication_result,
+            "checks": evaluate_replication_checks(replication_result, reported_payload, seed_list),
+        },
+        "report": {
+            "metrics": metrics,
+            "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc")},
+            "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc")},
+            "confusion_matrix": cm,
+            "score_distribution": {"bins": score_distribution},
+            "calibration_chart": {"points": calibration_points},
+            "train_test_auc_gap": {
+                "cv_mean_auc": cv_mean_auc,
+                "test_auc": test_auc,
+                "gap": train_test_gap,
+                "status": train_test_gap_status,
+            },
+            "metric_checks": performance_checks,
+            "compliance_findings": stage5_findings,
+            "benchmark": benchmark_payload,
+            "threshold_analysis": threshold_analysis,
+        },
     }
 
 
