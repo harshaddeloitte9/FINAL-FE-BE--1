@@ -95,8 +95,12 @@ function enhanceFigureAxes(figure: any) {
 
   layout.xaxis = { ...baseAxis, ...(layout.xaxis ?? {}), title: withTitleFont(layout.xaxis?.title) };
   layout.yaxis = { ...baseAxis, ...(layout.yaxis ?? {}), title: withTitleFont(layout.yaxis?.title) };
-  layout.xaxis2 = layout.xaxis2 ? { ...baseAxis, ...layout.xaxis2, title: withTitleFont(layout.xaxis2?.title) } : layout.xaxis2;
-  layout.yaxis2 = layout.yaxis2 ? { ...baseAxis, ...layout.yaxis2, title: withTitleFont(layout.yaxis2?.title) } : layout.yaxis2;
+  if (layout.xaxis2) {
+    layout.xaxis2 = { ...baseAxis, ...layout.xaxis2, title: withTitleFont(layout.xaxis2?.title) };
+  }
+  if (layout.yaxis2) {
+    layout.yaxis2 = { ...baseAxis, ...layout.yaxis2, title: withTitleFont(layout.yaxis2?.title) };
+  }
   layout.font = { size: 13, color: AXIS_TICK_COLOR, ...(layout.font ?? {}) };
   layout.margin = { t: 30, r: 20, b: 60, l: 65, ...(layout.margin ?? {}) };
 
