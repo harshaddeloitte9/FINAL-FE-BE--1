@@ -267,6 +267,12 @@ function Intake() {
         setMddMetrics(response.val_mdd_reported_metrics);
       }
       setDemoMode(response.demo_label ?? response.demo_mode ?? null);
+
+      const demoForm = new FormData();
+      demoForm.append("demo_mode", mode);
+      const demoProfile = await formUpload("/data/upload", demoForm);
+      setUploadResult(null, demoProfile as any);
+      setDatasetFile(null);
     } catch (error) {
       setDemoError(error instanceof Error ? error.message : "Unable to load demo submission.");
     } finally {
@@ -624,49 +630,13 @@ function Intake() {
 
       {/* Attestation and Submit */}
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="mb-4 text-sm text-muted-foreground">By clicking 'Submit Intake', you confirm that all information provided is accurate and the validation team is ready to proceed.</div>
+        <div className="mb-4 text-sm text-muted-foreground">Confirm that all required artifacts are uploaded and the validation readiness checklist is complete. Use the button below to save progress without submitting.</div>
         <label className="flex items-center gap-3 mb-4">
           <input type="checkbox" className="h-4 w-4 accent-primary" checked={chkAttestation} onChange={(e) => setChkAttestation(e.target.checked)} />
           <span className="text-sm">I confirm the above information is accurate and complete</span>
         </label>
         {submitError ? <div className="mb-4 text-sm text-red-500">{submitError}</div> : null}
         <div className="flex gap-3 flex-wrap">
-          <button
-            className={`inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm ${!(chkAttestation && chkInventory && chkTier && chkArtifacts && chkPrevFindings && chkRegScope && chkIndependence && chkPlanApproved) ? "opacity-50 cursor-not-allowed" : "hover:bg-primary/90"}`}
-            onClick={async () => {
-              // Gate
-              const gatePassed = chkAttestation && chkInventory && chkTier && chkArtifacts && chkPrevFindings && chkRegScope && chkIndependence && chkPlanApproved;
-              if (!gatePassed) return;
-              // Prepare payload
-              const payload = {
-                model_name: modelName,
-                owning_team: owningTeam,
-                model_owner: modelOwner,
-                lead_validator: leadValidator,
-                model_type: modelType,
-                model_version: version,
-                model_tier: tier,
-                model_purpose: purpose,
-                mdd_text: mddText ?? "",
-              };
-              setSubmitError(null);
-              try {
-                const resp = await api<Record<string, any>>("/validation/submit-intake", { method: "POST", body: JSON.stringify(payload) });
-                if (resp?.status === "ok") {
-                  // proceed to Stage 2
-                  void navigate({ to: intake.nextStep.path as string });
-                } else {
-                  setSubmitError(resp?.detail ?? "Unable to submit the intake form.");
-                }
-              } catch (err) {
-                console.error("Submit intake failed", err);
-                setSubmitError(err instanceof Error ? err.message : "Failed to submit intake.");
-              }
-            }}
-            disabled={!(chkAttestation && chkInventory && chkTier && chkArtifacts && chkPrevFindings && chkRegScope && chkIndependence && chkPlanApproved)}
-          >
-            <span>📋 Submit Intake & Proceed to Stage 2</span>
-          </button>
           <button className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold" onClick={() => { /* No-op for now: allow edits */ }}>
             Save draft
           </button>

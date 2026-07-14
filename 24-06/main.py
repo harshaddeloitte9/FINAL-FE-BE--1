@@ -774,7 +774,21 @@ async def upload_data(
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     synthetic_samples: Optional[int] = Form(None),
+    demo_mode: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
+    if demo_mode and file is None and csv_text is None and not synthetic_samples:
+        demo_mode = demo_mode.lower()
+        demo_file = SOURCE_OF_TRUTH_DIR / "demo_data" / ("flawed_portfolio.csv" if demo_mode == "flawed" else "clean_portfolio.csv")
+        if not demo_file.exists():
+            raise HTTPException(status_code=400, detail=f"Demo dataset not found for mode '{demo_mode}'.")
+        df = pd.read_csv(demo_file, keep_default_na=True)
+        dataset_name = "Demo B dataset" if demo_mode == "flawed" else "Demo A dataset"
+        profile = _build_data_profile(df, dataset_name=dataset_name)
+        profile["csv_text"] = df.to_csv(index=False)
+        profile["source_type"] = "demo"
+        profile["demo_mode"] = demo_mode
+        return profile
+
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     dataset_name = file.filename if file is not None else "Synthetic Credit Dataset"
     profile = _build_data_profile(df, dataset_name=dataset_name)
