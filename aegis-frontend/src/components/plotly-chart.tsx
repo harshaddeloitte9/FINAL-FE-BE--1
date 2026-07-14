@@ -15,14 +15,29 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
     let mounted = true;
 
     const loadPlotly = async () => {
-      const mod = await import("plotly.js-basic-dist");
+      const mod: any = await import("plotly.js-basic-dist");
       if (!mounted) return;
-      Plotly = mod;
+      // plotly.js-basic-dist is a CJS/UMD bundle (module.exports = Plotly).
+      // Dynamic import() of a CJS module surfaces its exports under
+      // `.default`; the top-level named properties (newPlot, purge, etc.)
+      // aren't reliably re-exported for a bundle this size since Plotly
+      // assigns most of its API at runtime rather than via static exports.
+      // Falling back to `mod` keeps this working if a bundler ever does
+      // flatten it.
+      Plotly = mod.default ?? mod;
+      if (!Plotly?.newPlot) {
+        console.error("PlotlyChart: Plotly.newPlot is unavailable — module shape was", mod);
+        return;
+      }
       if (containerRef.current) {
-        plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, {
-          responsive: true,
-          displayModeBar: false,
-        });
+        try {
+          plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, {
+            responsive: true,
+            displayModeBar: false,
+          });
+        } catch (err) {
+          console.error("PlotlyChart: failed to render figure", err);
+        }
       }
     };
 

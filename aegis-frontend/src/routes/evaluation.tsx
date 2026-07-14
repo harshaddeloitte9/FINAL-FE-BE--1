@@ -2,9 +2,8 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import PlotlyChart from "@/components/plotly-chart";
-import { ArrowLeft, ArrowRight, Download, ShieldCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Download } from "lucide-react";
 import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/evaluation")({
@@ -49,29 +48,6 @@ function downloadBase64File(base64: string, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-function statusToBadgeVariant(status: string) {
-  switch (status) {
-    case "PASS":
-      return "default" as const;
-    case "WARN":
-      return "secondary" as const;
-    case "FAIL":
-      return "destructive" as const;
-    default:
-      return "outline" as const;
-  }
-}
-
-function formatReplicatedValue(value: unknown) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "N/A";
-  }
-  if (typeof value === "number") {
-    return value.toFixed(4);
-  }
-  return String(value);
-}
-
 function formatMetricValue(value: unknown) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "N/A";
@@ -80,6 +56,83 @@ function formatMetricValue(value: unknown) {
     return value.toFixed(3);
   }
   return String(value);
+}
+
+const AXIS_LINE_COLOR = "#334155"; // slate-700
+const AXIS_TICK_COLOR = "#1e293b"; // slate-800
+const AXIS_GRID_COLOR = "#cbd5e1"; // slate-300
+
+function withTitleFont(title: unknown) {
+  const text = typeof title === "string" ? title : (title as any)?.text;
+  if (!text) return title;
+  return {
+    text,
+    standoff: 14,
+    font: { size: 15, color: AXIS_TICK_COLOR, ...((title as any)?.font ?? {}) },
+  };
+}
+
+// Makes axis lines, ticks, and titles bolder and higher-contrast so charts are easier to read.
+function enhanceFigureAxes(figure: any) {
+  if (!figure) return figure;
+
+  const baseAxis = {
+    showline: true,
+    linecolor: AXIS_LINE_COLOR,
+    linewidth: 2,
+    mirror: true,
+    ticks: "outside",
+    tickcolor: AXIS_LINE_COLOR,
+    ticklen: 6,
+    tickfont: { size: 13, color: AXIS_TICK_COLOR },
+    showgrid: true,
+    gridcolor: AXIS_GRID_COLOR,
+    gridwidth: 1,
+    zerolinecolor: AXIS_LINE_COLOR,
+    zerolinewidth: 2,
+    // Lets Plotly grow the margin as needed so the axis title never
+    // overlaps long tick labels (paired with `standoff` on the title).
+    automargin: true,
+  };
+
+  const layout = { ...(figure.layout ?? {}) };
+
+  layout.xaxis = { ...baseAxis, ...(layout.xaxis ?? {}), title: withTitleFont(layout.xaxis?.title) };
+  layout.yaxis = { ...baseAxis, ...(layout.yaxis ?? {}), title: withTitleFont(layout.yaxis?.title) };
+  if (layout.xaxis2) {
+    layout.xaxis2 = { ...baseAxis, ...layout.xaxis2, title: withTitleFont(layout.xaxis2?.title) };
+  }
+  if (layout.yaxis2) {
+    layout.yaxis2 = { ...baseAxis, ...layout.yaxis2, title: withTitleFont(layout.yaxis2?.title) };
+  }
+  // Backend figures are styled for a dark card (light-gray text) — this UI
+  // renders charts on a light card, so our high-contrast color must win
+  // over whatever the backend sent, not the other way around.
+  layout.font = { ...(layout.font ?? {}), size: 13, color: AXIS_TICK_COLOR };
+  layout.margin = { t: 30, r: 20, b: 60, l: 65, ...(layout.margin ?? {}) };
+
+  // Same light-on-dark mismatch applies to the chart title and legend,
+  // neither of which inherit cleanly from layout.font since the backend
+  // sets its own explicit colors on them.
+  if (layout.title) {
+    const titleObj = typeof layout.title === "string" ? { text: layout.title } : { ...layout.title };
+    layout.title = { ...titleObj, font: { size: 16, ...(titleObj.font ?? {}), color: AXIS_TICK_COLOR } };
+  }
+  layout.legend = {
+    ...(layout.legend ?? {}),
+    font: { size: 12, color: AXIS_TICK_COLOR },
+    bgcolor: "rgba(255,255,255,0.85)",
+    bordercolor: AXIS_GRID_COLOR,
+    borderwidth: 1,
+  };
+
+  return { ...figure, layout };
+}
+
+function toneClasses(tone: string) {
+  if (tone === "warning") return "border-amber-500/40 bg-amber-500/5";
+  if (tone === "destructive") return "border-destructive/40 bg-destructive/5";
+  return "border-primary/40 bg-primary/5";
 }
 
 function Card({ title, sub, children, className }: { title: string; sub?: string; children: React.ReactNode; className?: string }) {
@@ -113,16 +166,6 @@ function Evaluation() {
       ? evaluationData.threshold
       : 0.5;
 
-  const complianceLoading = false;
-  const complianceError: string | null = null;
-  const complianceScore: number | string | null = null;
-  const complianceFlags: Array<{ rule_id: string; flag: string }> = [];
-  const replicationLoading = false;
-  const replicationError: string | null = null;
-  const replicationResult = null as { metrics?: Record<string, any> } | null;
-  const replicationMetrics: Record<string, any> = (replicationResult?.metrics ?? {}) as Record<string, any>;
-  const replicationChecks: Array<{ id: string; title: string; status: string }> = [];
-
   const confusion = useMemo(() => {
     const matrix = evaluationMetrics?.confusion_matrix;
     if (Array.isArray(matrix) && matrix.length === 2 && Array.isArray(matrix[0]) && Array.isArray(matrix[1])) {
@@ -141,12 +184,11 @@ function Evaluation() {
     ] as const;
   }, [evaluationMetrics?.confusion_matrix]);
 
-  const rocFigure = useMemo(() => evaluationData?.roc_curve_figure ?? null, [evaluationData?.roc_curve_figure]);
-  const prFigure = useMemo(() => evaluationData?.pr_curve_figure ?? null, [evaluationData?.pr_curve_figure]);
-  const confusionMatrixFigure = useMemo(() => evaluationData?.confusion_matrix_figure ?? null, [evaluationData?.confusion_matrix_figure]);
-  const thresholdFigure = useMemo(() => evaluationData?.threshold_analysis_figure ?? null, [evaluationData?.threshold_analysis_figure]);
-  const scoreDistributionFigure = useMemo(() => evaluationData?.score_distribution_figure ?? null, [evaluationData?.score_distribution_figure]);
-  const liftChartFigure = useMemo(() => evaluationData?.lift_chart_figure ?? null, [evaluationData?.lift_chart_figure]);
+  const rocFigure = useMemo(() => enhanceFigureAxes(evaluationData?.roc_curve_figure ?? null), [evaluationData?.roc_curve_figure]);
+  const prFigure = useMemo(() => enhanceFigureAxes(evaluationData?.pr_curve_figure ?? null), [evaluationData?.pr_curve_figure]);
+  const thresholdFigure = useMemo(() => enhanceFigureAxes(evaluationData?.threshold_analysis_figure ?? null), [evaluationData?.threshold_analysis_figure]);
+  const scoreDistributionFigure = useMemo(() => enhanceFigureAxes(evaluationData?.score_distribution_figure ?? null), [evaluationData?.score_distribution_figure]);
+  const liftChartFigure = useMemo(() => enhanceFigureAxes(evaluationData?.lift_chart_figure ?? null), [evaluationData?.lift_chart_figure]);
   const heteroscedasticityCheck = useMemo(() => evaluationData?.heteroscedasticity_check ?? null, [evaluationData?.heteroscedasticity_check]);
   const temporalAnalysis = useMemo(() => evaluationData?.temporal_analysis ?? null, [evaluationData?.temporal_analysis]);
   const temporalRows = useMemo(() => {
@@ -160,6 +202,60 @@ function Evaluation() {
 
     return temporalAnalysis.plot_data_by_freq?.[temporalFrequency] ?? [];
   }, [temporalAnalysis, temporalFrequency]);
+
+  const temporalFigure = useMemo(() => {
+    if (!temporalRows || temporalRows.length === 0) return null;
+
+    const periods = temporalRows.map((r: any) => r.period);
+    const actual = temporalRows.map((r: any) => r.actual_rate);
+    const predicted = temporalRows.map((r: any) => r.predicted_rate);
+    const gap = temporalRows.map((r: any) => r.gap);
+    // Flagged periods (significant actual-vs-predicted drift) get a red
+    // marker so they stand out against the rest of the series at a glance.
+    const markerColors = temporalRows.map((r: any) => (r.flagged ? "#ef4444" : "#0ea5e9"));
+
+    return enhanceFigureAxes({
+      data: [
+        {
+          type: "bar",
+          name: "Gap",
+          x: periods,
+          y: gap,
+          yaxis: "y2",
+          marker: { color: "rgba(100,116,139,0.25)" },
+          hovertemplate: "%{x}<br>Gap: %{y:.3f}<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines+markers",
+          name: "Actual Rate",
+          x: periods,
+          y: actual,
+          line: { color: "#0ea5e9", width: 3 },
+          marker: { color: markerColors, size: 8 },
+          hovertemplate: "%{x}<br>Actual: %{y:.3f}<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines+markers",
+          name: "Predicted Rate",
+          x: periods,
+          y: predicted,
+          line: { color: "#6366f1", width: 3, dash: "dot" },
+          marker: { size: 6 },
+          hovertemplate: "%{x}<br>Predicted: %{y:.3f}<extra></extra>",
+        },
+      ],
+      layout: {
+        title: "Actual vs Predicted Default Rate",
+        xaxis: { title: "Period" },
+        yaxis: { title: "Rate" },
+        yaxis2: { title: "Gap", overlaying: "y", side: "right", showgrid: false },
+        legend: { orientation: "h", y: 1.18 },
+        barmode: "overlay",
+      },
+    });
+  }, [temporalRows]);
 
   const temporalSummary = useMemo(() => {
     if (!temporalAnalysis) {
@@ -266,7 +362,7 @@ function Evaluation() {
         }
       />
 
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-[1.2fr_420px]">
+      <section className="grid grid-cols-1 gap-6">
           <div className="space-y-6">
           <div className="flex items-center gap-2">
             <div className="inline-flex rounded-lg bg-background/60 p-1">
@@ -351,11 +447,52 @@ function Evaluation() {
 
             {activeTab === "confusion" && (
               <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}`}>
-                {confusionMatrixFigure ? (
-                  <PlotlyChart figure={confusionMatrixFigure} style={{ minHeight: 360 }} />
-                ) : (
-                  <p className="text-sm text-muted-foreground">Confusion matrix requires a binary classification prediction threshold.</p>
-                )}
+                <div className="flex justify-center overflow-auto py-2">
+                  <table className="border-separate" style={{ borderSpacing: 8 }}>
+                    <thead>
+                      <tr>
+                        <th />
+                        <th />
+                        <th colSpan={2} className="pb-1 text-center text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          Predicted
+                        </th>
+                      </tr>
+                      <tr>
+                        <th />
+                        <th />
+                        <th className="px-2 pb-2 text-center text-xs font-medium text-muted-foreground">0</th>
+                        <th className="px-2 pb-2 text-center text-xs font-medium text-muted-foreground">1</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <th
+                          rowSpan={2}
+                          className="pr-1 text-center align-middle text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+                          style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+                        >
+                          Actual
+                        </th>
+                        <th className="pr-2 text-center text-xs font-medium text-muted-foreground">0</th>
+                        {[confusion[0], confusion[1]].map(([label, count, tone]) => (
+                          <td key={label} className={`rounded-lg border p-4 text-center ${toneClasses(tone)}`}>
+                            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                            <div className="mt-1 text-lg font-semibold tabular-nums">{Number(count).toLocaleString()}</div>
+                          </td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th className="pr-2 text-center text-xs font-medium text-muted-foreground">1</th>
+                        {[confusion[2], confusion[3]].map(([label, count, tone]) => (
+                          <td key={label} className={`rounded-lg border p-4 text-center ${toneClasses(tone)}`}>
+                            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                            <div className="mt-1 text-lg font-semibold tabular-nums">{Number(count).toLocaleString()}</div>
+                          </td>
+                        ))}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </Card>
             )}
 
@@ -438,28 +575,11 @@ function Evaluation() {
                       {temporalAnalysis?.frequency_options?.map((f: string) => <option key={f} value={f}>{f}</option>)}
                     </select>
                   </div>
-                  <div className="overflow-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                          <th className="py-2 pr-3">Period</th>
-                          <th className="py-2 pr-3">Actual Rate</th>
-                          <th className="py-2 pr-3">Predicted Rate</th>
-                          <th className="py-2">Gap</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {temporalRows.map((r: any, i: number) => (
-                          <tr key={i} className="border-b border-border/60 text-sm">
-                            <td className="py-2 pr-3">{r.period}</td>
-                            <td className="py-2 pr-3">{formatMetricValue(r.actual_rate)}</td>
-                            <td className="py-2 pr-3">{formatMetricValue(r.predicted_rate)}</td>
-                            <td className="py-2">{formatMetricValue(r.gap)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  {temporalFigure ? (
+                    <PlotlyChart figure={temporalFigure} style={{ minHeight: 380 }} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No temporal data available for the selected period.</p>
+                  )}
                 </div>
               </Card>
             )}
@@ -467,103 +587,6 @@ function Evaluation() {
           )}
 
         </div>
-
-        <aside className="space-y-6">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-2 mb-4">
-              <ShieldCheck className="h-4 w-4 text-primary" />
-              <h2 className="text-base font-semibold">Compliance snapshot</h2>
-            </div>
-            {complianceLoading ? (
-              <p className="text-sm text-muted-foreground">Loading compliance verdict…</p>
-            ) : complianceError ? (
-              <p className="text-sm text-destructive">{complianceError}</p>
-            ) : (
-              <div className="space-y-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span>Compliance score</span>
-                  <span className="font-semibold">{complianceScore ?? "—"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Flags raised</span>
-                  <span className="font-semibold">{complianceFlags?.length ?? 0}</span>
-                </div>
-                {complianceFlags && complianceFlags.length > 0 && (
-                  <div className="space-y-2 pt-2">
-                    {complianceFlags.slice(0, 3).map((flag, index) => (
-                      <div key={index} className="rounded-lg border border-border p-3 bg-background">
-                        <div className="text-xs uppercase tracking-wider text-muted-foreground">{flag.rule_id}</div>
-                        <div className="mt-1 text-sm font-semibold">{flag.flag}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {!complianceFlags?.length && <p className="text-sm text-muted-foreground">No compliance flags were raised in this evaluation run.</p>}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-2 mb-4">
-              <ShieldCheck className="h-4 w-4 text-primary" />
-              <h2 className="text-base font-semibold">Replication validation</h2>
-            </div>
-            {replicationLoading ? (
-              <p className="text-sm text-muted-foreground">Running replication checks…</p>
-            ) : replicationError ? (
-              <p className="text-sm text-destructive">{replicationError}</p>
-            ) : replicationResult ? (
-              <div className="space-y-4 text-sm">
-                <div className="grid gap-3 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span>AUC</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.roc_auc)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Gini</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.gini)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>KS</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.ks)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Accuracy</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.accuracy)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Precision</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.precision)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Recall</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.recall)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>F1 score</span>
-                    <span className="font-semibold">{formatReplicatedValue(replicationMetrics.f1)}</span>
-                  </div>
-                </div>
-                <div className="grid gap-2">
-                  {replicationChecks?.slice(0, 6).map((check, index) => (
-                    <div key={index} className="flex items-center justify-between rounded-xl border border-border bg-background px-3 py-2">
-                      <div>
-                        <div className="text-xs uppercase tracking-wider text-muted-foreground">{check.id}</div>
-                        <div className="font-semibold">{check.title}</div>
-                      </div>
-                      <Badge variant={statusToBadgeVariant(check.status)}>{check.status}</Badge>
-                    </div>
-                  ))}
-                </div>
-                {replicationChecks && replicationChecks.length > 6 && (
-                  <p className="text-xs text-muted-foreground">Showing first 6 replication checks; view full report on the backend payload.</p>
-                )}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Replication results will appear after a successful evaluation training session.</p>
-            )}
-          </div>
-        </aside>
       </section>
 
       <div className="flex gap-3 pt-4">
