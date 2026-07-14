@@ -3,6 +3,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowRight, AlertCircle, Loader2, PlayCircle, UploadCloud } from "lucide-react";
+import { rocCurve, prCurve, scoreDistribution } from "@/lib/mock-data";
+import { useDataset } from "@/lib/app-context";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar,
 } from "recharts";
@@ -59,6 +61,7 @@ function formatValue(value: unknown, digits = 3) {
 }
 
 function Performance() {
+<<<<<<< HEAD
   const ds = useDataset();
   const [localFile, setLocalFile] = React.useState<File | null>(null);
   const [targetCol, setTargetCol] = React.useState(
@@ -157,6 +160,11 @@ function Performance() {
       { metric: "Recall", champion: benchmarkComparison.recall?.champion, challenger: benchmarkComparison.recall?.challenger },
     ];
   }, [benchmarkComparison]);
+=======
+  const { file, profile } = useDataset();
+  const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
+  const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
+>>>>>>> a4d85a79 (Align validation workflow with Streamlit implementation)
 
   return (
     <div className="space-y-8">
@@ -165,6 +173,7 @@ function Performance() {
         description="Comprehensive performance evaluation on the independent validation hold-out set before stress testing and regulatory review."
       />
 
+<<<<<<< HEAD
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <div className="grid gap-4 md:grid-cols-3">
           <label className="space-y-2 text-sm">
@@ -219,6 +228,21 @@ function Performance() {
           <div className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{error}</span>
+=======
+      <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
+        {datasetReady ? (
+          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-foreground">{datasetName}</span>.</>
+        ) : (
+          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+        )}
+      </section>
+
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        {metrics.map((m) => (
+          <div key={m.label} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{m.label}</div>
+            <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{m.value}</div>
+>>>>>>> a4d85a79 (Align validation workflow with Streamlit implementation)
           </div>
         ) : null}
       </section>

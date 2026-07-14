@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Legend } from "recharts";
+import { useDataset } from "@/lib/app-context";
 import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
 
 export const Route = createFileRoute("/validation/stress")({
@@ -29,12 +30,24 @@ const backtest = Array.from({ length: 12 }, (_, i) => ({
 }));
 
 function Stress() {
+  const { file, profile } = useDataset();
+  const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
+  const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
+
   return (
     <div className="space-y-8">
       <PageHeader
         title="Stage 6 — Stress & Backtesting"
         description="Scenario simulations, model stability over time, and back-tested predictions vs realised outcomes."
       />
+
+      <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
+        {datasetReady ? (
+          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-foreground">{datasetName}</span>.</>
+        ) : (
+          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+        )}
+      </section>
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">

@@ -233,8 +233,18 @@ export const Route = createFileRoute("/validation/data-quality")({
 });
 
 function DataQuality() {
-  const { file, profile } = useDataset();
-  const [validationProfile, setValidationProfile] = useState<any | null>(null);
+  const {
+    file,
+    profile,
+    validationIntakeData,
+    validationMddText,
+    validationMddMetrics,
+    validationProfile: sharedValidationProfile,
+    validationResults: sharedValidationResults,
+    setValidationProfile,
+    setValidationResults,
+  } = useDataset();
+  const [validationProfile, setValidationProfileState] = useState<any | null>(sharedValidationProfile ?? null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [showAiDeepCheck, setShowAiDeepCheck] = useState(true);
@@ -268,7 +278,15 @@ function DataQuality() {
       }
 
       const result = await formUpload("/data/profile", form);
-      setValidationProfile(result as any);
+      const nextProfile = result as any;
+      setValidationProfileState(nextProfile);
+      setValidationProfile(nextProfile);
+      setValidationResults({
+        profile: nextProfile,
+        intake: validationIntakeData ?? null,
+        mddText: validationMddText ?? null,
+        mddMetrics: validationMddMetrics ?? null,
+      });
     } catch (error: any) {
       setRunError(error?.message ?? "Failed to run validation checks.");
     } finally {
@@ -281,6 +299,12 @@ function DataQuality() {
 
     void runDataValidation();
   }, [datasetLoaded, validationProfile, isRunning, file, profile?.csv_text, profile?.dataset_name]);
+
+  useEffect(() => {
+    if (sharedValidationProfile && !validationProfile) {
+      setValidationProfileState(sharedValidationProfile);
+    }
+  }, [sharedValidationProfile, validationProfile]);
 
   const combinedResults = useMemo(() => {
     if (!validationProfile) return [];

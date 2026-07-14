@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { CheckCircle2, AlertTriangle, XCircle, FileDown, FileText } from "lucide-react";
+import { useDataset } from "@/lib/app-context";
 
 export const Route = createFileRoute("/validation/findings")({
   head: () => ({ meta: [{ title: "Validation Findings & Report — Aegis Credit" }] }),
@@ -28,6 +29,10 @@ const Icon = ({ s }: { s: "PASS" | "WARN" | "FAIL" }) =>
   <XCircle className="h-3.5 w-3.5" />;
 
 function Findings() {
+  const { file, profile } = useDataset();
+  const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
+  const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -44,6 +49,14 @@ function Findings() {
           </>
         }
       />
+
+      <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
+        {datasetReady ? (
+          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-foreground">{datasetName}</span>.</>
+        ) : (
+          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+        )}
+      </section>
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 rounded-xl border border-border bg-card p-6 shadow-elegant">

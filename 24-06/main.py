@@ -249,6 +249,7 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
                 "Used for IFRS 9 ECL staging, credit decisioning, and risk appetite reporting. "
                 "Scope: personal loan portfolio only. Out of scope: mortgages, business lending."
             ),
+            "algorithm": "XGBoost",
             "default_definition": "90 days past due (IFRS 9 / CRR Art.178)",
             "calibration_method": "Platt scaling (TTC)",
             "macro_variables_mentioned": True,
@@ -2455,7 +2456,8 @@ async def validation_tier(request: TierRequest) -> Dict[str, Any]:
 
 @app.post("/validation/replication")
 async def validation_replication(
-    model_name: str = Form(...),
+    algorithm: Optional[str] = Form(None),
+    model_name: Optional[str] = Form(None),
     target_col: str = Form(...),
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
@@ -2482,15 +2484,18 @@ async def validation_replication(
     except Exception:
         seed_list = [random_seed]
 
-    reported: Dict[str, Any] = {}
-    if reported_json:
-        try:
-            parsed = json.loads(reported_json)
-            if isinstance(parsed, dict):
-                reported.update({k: v for k, v in parsed.items() if v is not None})
-        except Exception:
-            pass
+resolved_model_name = (algorithm or model_name or "").strip()
+if not resolved_model_name:
+    raise HTTPException(status_code=400, detail="Model or algorithm is required.")
 
+reported: Dict[str, Any] = {}
+if reported_json:
+    try:
+        parsed = json.loads(reported_json)
+        if isinstance(parsed, dict):
+            reported.update({k: v for k, v in parsed.items() if v is not None})
+    except Exception:
+        pass 
     if mdd_file is not None:
         try:
             # parse_mdd_file was ported from Streamlit and expects a sync
@@ -2511,7 +2516,7 @@ async def validation_replication(
     result = run_replication(
         df=df,
         target_col=target_col,
-        model_name=model_name,
+        model_name=resolved_model_name,
         test_size=test_size,
         val_size=val_size,
         random_seed=random_seed,

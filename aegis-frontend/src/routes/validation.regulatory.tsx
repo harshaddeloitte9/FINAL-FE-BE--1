@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { regulatoryChecks } from "@/lib/mock-data";
+import { useDataset } from "@/lib/app-context";
 import { ArrowRight, CheckCircle2, AlertTriangle, XCircle, ChevronDown, Download } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,9 @@ const sevDot: Record<string, string> = {
 
 function Regulatory() {
   const [open, setOpen] = useState<string | null>("SS123-4.1");
+  const { file, profile } = useDataset();
+  const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
+  const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
 
   return (
     <div className="space-y-8">
@@ -36,6 +40,14 @@ function Regulatory() {
           </button>
         }
       />
+
+      <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
+        {datasetReady ? (
+          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-foreground">{datasetName}</span>.</>
+        ) : (
+          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+        )}
+      </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
         <div className="space-y-6">

@@ -179,7 +179,15 @@ const fallbackIntake: IntakeDisplay = {
 function Intake() {
   const [intake, setIntake] = useState<IntakeDisplay>(fallbackIntake);
   const navigate = useNavigate();
-  const { setUploadResult, profile } = useDataset();
+  const {
+    setUploadResult,
+    profile,
+    setValidationIntakeData,
+    setValidationMddText,
+    setValidationMddMetrics,
+    setValidationProfile,
+    setValidationResults,
+  } = useDataset();
 
   // Form state mirroring the Streamlit intake
   const [modelName, setModelName] = useState("");
@@ -242,6 +250,8 @@ function Intake() {
       setIntake(response.display);
       const snapshot = response.val_intake_data;
       if (snapshot) {
+        const intakeSnapshot = { ...snapshot, mdd_text: snapshot.mdd_text ?? null };
+        setValidationIntakeData(intakeSnapshot);
         setModelName(snapshot.model_name ?? "");
         setOwningTeam(snapshot.owning_team ?? "");
         setModelOwner(snapshot.model_owner ?? "");
@@ -253,6 +263,7 @@ function Intake() {
         if (snapshot.mdd_text) {
           setMddText(snapshot.mdd_text);
           setMddFileName("Parsed MDD from backend");
+          setValidationMddText(snapshot.mdd_text);
         }
       }
       setChkInventory(response.chk_inventory ?? false);
@@ -265,6 +276,7 @@ function Intake() {
       setChkAttestation(response.chk_attestation ?? false);
       if (response.val_mdd_reported_metrics) {
         setMddMetrics(response.val_mdd_reported_metrics);
+        setValidationMddMetrics(response.val_mdd_reported_metrics);
       }
       setDemoMode(response.demo_label ?? response.demo_mode ?? null);
 
@@ -273,6 +285,8 @@ function Intake() {
       const demoProfile = await formUpload("/data/upload", demoForm);
       setUploadResult(null, demoProfile as any);
       setDatasetFile(null);
+      setValidationProfile(demoProfile as any);
+      setValidationResults(null);
     } catch (error) {
       setDemoError(error instanceof Error ? error.message : "Unable to load demo submission.");
     } finally {
@@ -289,6 +303,8 @@ function Intake() {
           // Prefill lightweight form fields from snapshot if present
           const snapshot = response.val_intake_data;
           if (snapshot) {
+            const intakeSnapshot = { ...snapshot, mdd_text: snapshot.mdd_text ?? null };
+            setValidationIntakeData(intakeSnapshot);
             setModelName(snapshot.model_name ?? "");
             setOwningTeam(snapshot.owning_team ?? "");
             setModelOwner(snapshot.model_owner ?? "");
@@ -300,6 +316,7 @@ function Intake() {
             if (snapshot.mdd_text) {
               setMddText(snapshot.mdd_text);
               setMddFileName("Parsed MDD from backend");
+              setValidationMddText(snapshot.mdd_text);
             }
           }
           setChkInventory(response.chk_inventory ?? false);
@@ -312,6 +329,7 @@ function Intake() {
           setChkAttestation(response.chk_attestation ?? false);
           if (response.val_mdd_reported_metrics) {
             setMddMetrics(response.val_mdd_reported_metrics);
+            setValidationMddMetrics(response.val_mdd_reported_metrics);
           }
           setDemoMode(response.demo_label ?? response.demo_mode ?? null);
         }

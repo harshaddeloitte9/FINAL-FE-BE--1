@@ -52,6 +52,11 @@ type DatasetState = {
   trainingResult?: TrainingResult | null;
   comparisonResults?: ComparisonResult[] | null;
   selectedComparisonModel?: string | null;
+  validationIntakeData?: Record<string, any> | null;
+  validationMddText?: string | null;
+  validationMddMetrics?: Record<string, any> | null;
+  validationProfile?: Record<string, any> | null;
+  validationResults?: Record<string, any> | null;
   setUploadResult: (file: File | null, profile: DatasetProfile | null) => void;
   setProfile: (profile: DatasetProfile | null) => void;
   setRecommendations: (recommendations: ModelRecommendation[] | null) => void;
@@ -63,6 +68,11 @@ type DatasetState = {
   setComparisonResults: (results: ComparisonResult[] | null) => void;
   setSelectedComparisonModel: (modelName: string | null) => void;
   setCompareModels: (models: string[] | null) => void;
+  setValidationIntakeData: (data: Record<string, any> | null) => void;
+  setValidationMddText: (text: string | null) => void;
+  setValidationMddMetrics: (metrics: Record<string, any> | null) => void;
+  setValidationProfile: (profile: Record<string, any> | null) => void;
+  setValidationResults: (results: Record<string, any> | null) => void;
 };
 
 const DatasetContext = React.createContext<DatasetState | null>(null);
@@ -79,6 +89,11 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [trainingResult, setTrainingResultState] = React.useState<TrainingResult | null>(null);
   const [comparisonResults, setComparisonResultsState] = React.useState<ComparisonResult[] | null>(null);
   const [selectedComparisonModel, setSelectedComparisonModelState] = React.useState<string | null>(null);
+  const [validationIntakeData, setValidationIntakeDataState] = React.useState<Record<string, any> | null>(null);
+  const [validationMddText, setValidationMddTextState] = React.useState<string | null>(null);
+  const [validationMddMetrics, setValidationMddMetricsState] = React.useState<Record<string, any> | null>(null);
+  const [validationProfile, setValidationProfileState] = React.useState<Record<string, any> | null>(null);
+  const [validationResults, setValidationResultsState] = React.useState<Record<string, any> | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
   React.useEffect(() => {
@@ -193,6 +208,26 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setSelectedComparisonModelState(modelName);
   }, []);
 
+  const setValidationIntakeData = React.useCallback((data: Record<string, any> | null) => {
+    setValidationIntakeDataState(data);
+  }, []);
+
+  const setValidationMddText = React.useCallback((text: string | null) => {
+    setValidationMddTextState(text);
+  }, []);
+
+  const setValidationMddMetrics = React.useCallback((metrics: Record<string, any> | null) => {
+    setValidationMddMetricsState(metrics);
+  }, []);
+
+  const setValidationProfile = React.useCallback((profileState: Record<string, any> | null) => {
+    setValidationProfileState(profileState);
+  }, []);
+
+  const setValidationResults = React.useCallback((results: Record<string, any> | null) => {
+    setValidationResultsState(results);
+  }, []);
+
   const value = React.useMemo(
     () => ({
       file,
@@ -206,6 +241,11 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       trainingResult,
       comparisonResults,
       selectedComparisonModel,
+      validationIntakeData,
+      validationMddText,
+      validationMddMetrics,
+      validationProfile,
+      validationResults,
       setUploadResult,
       setProfile: setProfileState,
       setRecommendations,
@@ -217,6 +257,11 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setTrainingResult,
       setComparisonResults,
       setSelectedComparisonModel,
+      setValidationIntakeData,
+      setValidationMddText,
+      setValidationMddMetrics,
+      setValidationProfile,
+      setValidationResults,
     }),
     [
       file,
@@ -230,6 +275,11 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       trainingResult,
       comparisonResults,
       selectedComparisonModel,
+      validationIntakeData,
+      validationMddText,
+      validationMddMetrics,
+      validationProfile,
+      validationResults,
       setUploadResult,
       setRecommendations,
       setSelectedModel,
@@ -240,6 +290,11 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setTrainingResult,
       setComparisonResults,
       setSelectedComparisonModel,
+      setValidationIntakeData,
+      setValidationMddText,
+      setValidationMddMetrics,
+      setValidationProfile,
+      setValidationResults,
     ],
   );
 

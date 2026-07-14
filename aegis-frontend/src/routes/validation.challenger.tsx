@@ -128,6 +128,9 @@ function ModelReplicationPanel() {
   const profile = ds.profile as Record<string, any> | null | undefined;
   const trainingResult = ds.trainingResult as Record<string, any> | null | undefined;
   const trainingConfig = ds.trainingConfig as Record<string, any> | null | undefined;
+  const validationMddMetrics = ds.validationMddMetrics as Record<string, any> | null | undefined;
+  const validationIntakeData = ds.validationIntakeData as Record<string, any> | null | undefined;
+  const selectedModelName = ds.selectedModel?.name as string | undefined;
 
   const targetCandidates: string[] = React.useMemo(() => {
     const c = profile?.target_candidates ?? profile?.targetCandidates ?? profile?.candidate_targets ?? [];
@@ -142,33 +145,58 @@ function ModelReplicationPanel() {
   const datasetName: string | null =
     profile?.dataset_name ?? profile?.name ?? ds.file?.name ?? null;
 
-  const contextFileAvailable = !!ds.file;
-  const activeFile = localFile ?? ds.file ?? null;
+  const contextFileAvailable = Boolean(ds.file || profile?.csv_text || profile?.dataset_name || profile?.name);
+  const resolvedAlgorithmName = React.useMemo(() => {
+    const fromIntake = typeof validationIntakeData?.algorithm === "string" ? validationIntakeData.algorithm.trim() : "";
+    if (fromIntake) return fromIntake;
+
+    const fromSelected = typeof selectedModelName === "string" ? selectedModelName.trim() : "";
+    if (fromSelected) return fromSelected;
+
+    const fromTraining = typeof trainingResult?.model_name === "string" ? trainingResult.model_name.trim() : "";
+    if (fromTraining) return fromTraining;
+
+    return modelName.trim();
+  }, [modelName, selectedModelName, trainingResult?.model_name, validationIntakeData?.algorithm]);
+  const activeFile = React.useMemo<File | null>(() => {
+    if (localFile) return localFile;
+    if (ds.file) return ds.file;
+
+    const csvText = typeof profile?.csv_text === "string" ? profile.csv_text : "";
+    if (!csvText.trim()) return null;
+
+    const resolvedName = datasetName ?? "validation_dataset.csv";
+    const safeName = resolvedName.endsWith(".csv") || resolvedName.endsWith(".xlsx")
+      ? resolvedName
+      : `${resolvedName}.csv`;
+    return new File([csvText], safeName, { type: "text/csv" });
+  }, [datasetName, ds.file, localFile, profile?.csv_text]);
 
   // Fetch the classification model registry once for the datalist.
   React.useEffect(() => {
-    let cancelled = false;
-    api<{ models: string[] }>("/models/list")
-      .then((res) => {
-        if (!cancelled) setAvailableModels(res.models ?? []);
-      })
-      .catch(() => {
-        // Datalist just stays empty — the field still accepts free text.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    const contextModels = [selectedModelName, trainingResult?.model_name, validationIntakeData?.model_name]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => String(value));
+
+    if (contextModels.length > 0) {
+      setAvailableModels((prev) => Array.from(new Set([...prev, ...contextModels])));
+    }
+  }, [selectedModelName, trainingResult?.model_name, validationIntakeData?.model_name]);
 
   // Prefill from whatever the earlier stages already put in context, once.
   const prefilledRef = React.useRef(false);
   React.useEffect(() => {
     if (prefilledRef.current) return;
-    if (!profile && !trainingResult) return;
+    const hasContextModel = Boolean(selectedModelName || trainingResult?.model_name || validationIntakeData?.model_name || profile);
+    if (!hasContextModel) return;
     prefilledRef.current = true;
 
     if (targetCandidates[0]) setTargetCol(targetCandidates[0]);
-    if (trainingResult?.model_name) setModelName(String(trainingResult.model_name));
+
+    const contextModelName = selectedModelName ?? trainingResult?.model_name ?? validationIntakeData?.model_name;
+    if (contextModelName) {
+      setModelName(String(contextModelName));
+    }
 
     if (trainingConfig) {
       if (typeof trainingConfig.test_size === "number") setTestSize(trainingConfig.test_size);
@@ -177,24 +205,24 @@ function ModelReplicationPanel() {
       if (typeof trainingConfig.cv_folds === "number") setCvFolds(trainingConfig.cv_folds);
     }
 
-    const evalMetrics = trainingResult?.evaluation_metrics as Record<string, any> | undefined;
-    if (evalMetrics) {
+    const sourceMetrics = validationMddMetrics ?? (trainingResult?.evaluation_metrics as Record<string, any> | undefined);
+    if (sourceMetrics) {
       setReported((prev) => {
         const next = { ...prev };
         for (const { key } of REPORTED_METRIC_FIELDS) {
-          const v = evalMetrics[key] ?? (key === "cv_mean_auc" ? evalMetrics.cv_mean : undefined);
+          const v = sourceMetrics[key] ?? (key === "cv_mean_auc" ? sourceMetrics.cv_mean : undefined);
           if (v !== undefined && v !== null) next[key] = String(v);
         }
         return next;
       });
     }
-  }, [profile, trainingResult, trainingConfig, targetCandidates]);
+  }, [profile, trainingResult, trainingConfig, validationMddMetrics, validationIntakeData?.model_name, selectedModelName, targetCandidates]);
 
   const runReplication = async () => {
     setError(null);
 
     if (!activeFile) {
-      setError("No dataset available. Upload a file below, or complete Stage 1 Intake first so it's already in context.");
+      setError("No active dataset is available in shared state. Complete Stage 1 Intake and Stage 2 Data Validation first, or upload a file below.");
       return;
     }
     if (!targetCol.trim()) {
@@ -206,13 +234,24 @@ function ModelReplicationPanel() {
       return;
     }
 
+    const algorithmName = resolvedAlgorithmName.trim();
+    if (!algorithmName) {
+      setError("Algorithm is required.");
+      return;
+    }
+
     setLoading(true);
     setReplication(null);
     setFlags([]);
     try {
       const form = new FormData();
-      form.append("file", activeFile);
+      if (activeFile) {
+        form.append("file", activeFile);
+      } else if (typeof profile?.csv_text === "string") {
+        form.append("csv_text", profile.csv_text);
+      }
       form.append("model_name", modelName.trim());
+      form.append("algorithm", algorithmName);
       form.append("target_col", targetCol.trim());
       form.append("seeds", seedsText.trim() || "42,43,44,45,46");
       form.append("test_size", String(testSize));
