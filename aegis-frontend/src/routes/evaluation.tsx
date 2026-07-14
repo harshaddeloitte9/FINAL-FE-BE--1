@@ -67,6 +67,7 @@ function withTitleFont(title: unknown) {
   if (!text) return title;
   return {
     text,
+    standoff: 14,
     font: { size: 15, color: AXIS_TICK_COLOR, ...((title as any)?.font ?? {}) },
   };
 }
@@ -89,6 +90,9 @@ function enhanceFigureAxes(figure: any) {
     gridwidth: 1,
     zerolinecolor: AXIS_LINE_COLOR,
     zerolinewidth: 2,
+    // Lets Plotly grow the margin as needed so the axis title never
+    // overlaps long tick labels (paired with `standoff` on the title).
+    automargin: true,
   };
 
   const layout = { ...(figure.layout ?? {}) };
@@ -101,8 +105,26 @@ function enhanceFigureAxes(figure: any) {
   if (layout.yaxis2) {
     layout.yaxis2 = { ...baseAxis, ...layout.yaxis2, title: withTitleFont(layout.yaxis2?.title) };
   }
-  layout.font = { size: 13, color: AXIS_TICK_COLOR, ...(layout.font ?? {}) };
+  // Backend figures are styled for a dark card (light-gray text) — this UI
+  // renders charts on a light card, so our high-contrast color must win
+  // over whatever the backend sent, not the other way around.
+  layout.font = { ...(layout.font ?? {}), size: 13, color: AXIS_TICK_COLOR };
   layout.margin = { t: 30, r: 20, b: 60, l: 65, ...(layout.margin ?? {}) };
+
+  // Same light-on-dark mismatch applies to the chart title and legend,
+  // neither of which inherit cleanly from layout.font since the backend
+  // sets its own explicit colors on them.
+  if (layout.title) {
+    const titleObj = typeof layout.title === "string" ? { text: layout.title } : { ...layout.title };
+    layout.title = { ...titleObj, font: { size: 16, ...(titleObj.font ?? {}), color: AXIS_TICK_COLOR } };
+  }
+  layout.legend = {
+    ...(layout.legend ?? {}),
+    font: { size: 12, color: AXIS_TICK_COLOR },
+    bgcolor: "rgba(255,255,255,0.85)",
+    bordercolor: AXIS_GRID_COLOR,
+    borderwidth: 1,
+  };
 
   return { ...figure, layout };
 }
