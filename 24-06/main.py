@@ -15,20 +15,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Union
 
+from dotenv import load_dotenv
+load_dotenv()  # reads a local .env file (if present) into os.environ, e.g. FRED_API_KEY
+
 BACKEND_DIR = Path(__file__).resolve().parent
 SOURCE_OF_TRUTH_DIR = Path(__file__).resolve().parent.parent / "Credit-Risk-Poc-main"
 for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
-
-# Load secrets (e.g. FRED_API_KEY) from a local, gitignored 24-06/.env if one
-# exists — see .env.example. Without this, any env var the app needs (FRED
-# macro fetch, etc.) only works on whichever machine happened to have it set
-# at the OS level, which isn't portable across teammates' machines or CI.
-# Never overrides a real OS-level env var that's already set (e.g. in prod).
-from dotenv import load_dotenv
-load_dotenv(BACKEND_DIR / ".env")
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,7 +65,7 @@ except ImportError:
     _legacy_fe = importlib.util.module_from_spec(_legacy_fe_spec)
     _legacy_fe_spec.loader.exec_module(_legacy_fe)
     resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
-from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
+from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid, CLASSIFICATION_MODELS
 from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
 import evaluate_new as eval_engine
@@ -96,7 +91,7 @@ from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
     generate_model_summary,
 )
-from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication
+from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication, evaluate_replication_checks
 
 _validation_agent2_path = SOURCE_OF_TRUTH_DIR / "validation_agent2.py"
 _validation_agent2_spec = importlib.util.spec_from_file_location("source_validation_agent2", _validation_agent2_path)
@@ -488,6 +483,17 @@ async def _read_dataframe(
     if synthetic_samples and synthetic_samples > 0:
         return generate_synthetic_credit_dataset(n_samples=synthetic_samples)
 
+    # csv_text represents the CURRENT state of the pipeline (e.g. after FRED
+    # macro features, feature engineering, etc. have been attached and carried
+    # forward from an earlier step) and must win whenever present. `file` is
+    # only used as a fallback for the very first upload, before any csv_text
+    # exists yet — if both happen to be sent together (e.g. the frontend still
+    # holds onto the originally uploaded file in state), silently preferring
+    # `file` would discard every transformation applied since the initial
+    # upload with no error or signal that it happened.
+    if csv_text:
+        return pd.read_csv(io.StringIO(csv_text), keep_default_na=True)
+
     if file is not None:
         name = file.filename.lower()
         if name.endswith(".csv"):
@@ -497,9 +503,6 @@ async def _read_dataframe(
             file.file.seek(0)
             return pd.read_excel(file.file, engine="openpyxl")
         raise HTTPException(status_code=400, detail="Unsupported file type. Use CSV or XLSX.")
-
-    if csv_text:
-        return pd.read_csv(io.StringIO(csv_text), keep_default_na=True)
 
     raise HTTPException(status_code=400, detail="Provide a file upload, CSV text, or synthetic_samples.")
 
@@ -605,7 +608,7 @@ def _build_data_profile(
         target_numeric = pd.to_numeric(df[resolved_target_col], errors="coerce")
         if target_numeric.notna().sum() >= 2:
             for col in col_types.get("numeric", []):
-                if col == target_col:
+                if col == resolved_target_col:
                     continue
                 try:
                     corr = df[col].corr(target_numeric)
@@ -1544,6 +1547,13 @@ async def macro_fetch(
     }
 
 
+@app.get("/models/list")
+async def list_classification_models() -> Dict[str, Any]:
+    """Returns the available classification model keys (e.g. for the Replication
+    stage's model selector), independent of any dataset-based recommendation."""
+    return {"models": list(CLASSIFICATION_MODELS.keys())}
+
+
 @app.post("/models/recommend")
 async def recommend_models_endpoint(
     file: Optional[UploadFile] = File(None),
@@ -1745,6 +1755,10 @@ async def train_model_endpoint(
         "training_info": training_info,
         "split_stats": split_stats,
         "feature_engineering_summary": fe_summary,
+        "low_iv_columns": plan.get("low_iv_cols", []) if plan else [],
+        "low_variance_columns": plan.get("low_variance_cols", []) if plan else [],
+        "dropped_high_corr_pairs": plan.get("drop_high_corr_pairs", []) if plan else [],
+        "applied_steps": plan.get("applied_steps", []) if plan else [],
         "evaluation_metrics": metrics,
         "evaluation_data": evaluation_data,
         "model_artifact": _to_base64(pipeline),
@@ -2125,8 +2139,16 @@ async def validation_replication(
     random_seed: int = Form(42),
     cv_folds: int = Form(5),
     mdd_file: Optional[UploadFile] = File(None),
+    reported_json: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
-    """Run backend replication checks. Returns {'flags', 'report'} to match existing shapes."""
+    """Run backend replication checks. Returns {'flags', 'report'} to match existing shapes.
+
+    `reported` (the developer-reported metrics R4.2/R4.3/R4.4/R4.8 compare against)
+    can come from two places, combinable: `reported_json` (e.g. pulled from an
+    already-completed training run's evaluation_metrics) and/or an uploaded MDD
+    file. When both are present, values extracted from the MDD take precedence
+    per-key, since the MDD is the authoritative developer documentation.
+    """
     df = await _read_dataframe(file=file, csv_text=csv_text)
     # parse seeds
     try:
@@ -2134,13 +2156,31 @@ async def validation_replication(
     except Exception:
         seed_list = [random_seed]
 
-    reported = {}
+    reported: Dict[str, Any] = {}
+    if reported_json:
+        try:
+            parsed = json.loads(reported_json)
+            if isinstance(parsed, dict):
+                reported.update({k: v for k, v in parsed.items() if v is not None})
+        except Exception:
+            pass
+
     if mdd_file is not None:
         try:
-            mdd_text = parse_mdd_file(mdd_file)
-            reported = extract_metrics_from_mdd(mdd_text)
+            # parse_mdd_file was ported from Streamlit and expects a sync
+            # file-like object with .name/.seek()/.read(). FastAPI's
+            # UploadFile itself is async (.filename, async .read()/.seek()),
+            # so we reach through to the underlying SpooledTemporaryFile the
+            # same way _read_dataframe() does elsewhere, and attach the
+            # filename it needs for extension sniffing (.pdf/.docx/.txt).
+            mdd_file.file.seek(0)
+            mdd_underlying = mdd_file.file
+            mdd_underlying.name = mdd_file.filename or ""
+            mdd_text = parse_mdd_file(mdd_underlying)
+            mdd_reported = extract_metrics_from_mdd(mdd_text)
+            reported.update({k: v for k, v in mdd_reported.items() if v is not None})
         except Exception:
-            reported = {}
+            pass
 
     result = run_replication(
         df=df,
@@ -2156,7 +2196,6 @@ async def validation_replication(
 
     checks = []
     try:
-        from val_replication_core import evaluate_replication_checks
         checks = evaluate_replication_checks(result, reported, seed_list)
     except Exception:
         checks = []
