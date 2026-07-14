@@ -68,20 +68,27 @@ function Conceptual() {
               <h3 className="text-sm font-semibold">Feature relevance</h3>
               <p className="text-xs text-muted-foreground">Top SHAP-ranked drivers · economic plausibility check</p>
               <div className="mt-4 space-y-2">
-                {data?.featureRelevance?.importance_df && data.featureRelevance.importance_df.length > 0 ? (
-                  data.featureRelevance.importance_df.slice(0, 8).map((f: any) => (
-                    <div key={f.Feature} className="flex items-center gap-3 rounded-lg border border-border bg-background p-3">
-                      <span className="w-44 truncate text-sm font-medium">{f.Feature}</span>
-                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-primary" style={{ width: `${(f.Importance ?? 0) * 400}%` }} />
-                      </div>
-                      <span className="w-12 text-right text-xs font-mono text-muted-foreground">{((f.Importance ?? 0) * 1).toFixed(2)}</span>
-                      <CheckCircle2 className="h-4 w-4 text-primary" />
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-sm text-muted-foreground">No feature importance available.</div>
-                )}
+                {(() => {
+                  const importanceRows = data?.featureRelevance?.importance_df ?? data?.featureRelevance?.top_drivers ?? [];
+                  if (Array.isArray(importanceRows) && importanceRows.length > 0) {
+                    const maxImportance = Math.max(...importanceRows.map((f: any) => Number(f.Importance ?? 0)), 1);
+                    return importanceRows.slice(0, 8).map((f: any) => {
+                      const importance = Number(f.Importance ?? 0);
+                      const width = Math.max(8, (importance / maxImportance) * 100);
+                      return (
+                        <div key={f.Feature} className="flex items-center gap-3 rounded-lg border border-border bg-background p-3">
+                          <span className="w-44 truncate text-sm font-medium">{f.Feature}</span>
+                          <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full rounded-full bg-primary" style={{ width: `${width}%` }} />
+                          </div>
+                          <span className="w-12 text-right text-xs font-mono text-muted-foreground">{importance.toFixed(3)}</span>
+                          <CheckCircle2 className="h-4 w-4 text-primary" />
+                        </div>
+                      );
+                    });
+                  }
+                  return <div className="text-sm text-muted-foreground">No feature importance available.</div>;
+                })()}
               </div>
             </div>
 
@@ -140,9 +147,21 @@ function Conceptual() {
           <section className="rounded-xl border border-primary/30 bg-primary-soft p-6">
             <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
             <p className="mt-2 text-sm">
-              Verdict: <span className="font-semibold">{data?.regulatoryAlignment?.verdict ?? "—"}</span>. 
+              Verdict: <span className="font-semibold">{data?.regulatoryAlignment?.verdict ?? "—"}</span>.
               Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/{data?.regulatoryAlignment?.counts?.fail ?? 0}.
             </p>
+            {data?.regulatoryAlignment?.remediation_summary && (
+              <p className="mt-3 text-sm text-muted-foreground">{data.regulatoryAlignment.remediation_summary}</p>
+            )}
+            {data?.regulatoryAlignment?.regulatory_references?.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {data.regulatoryAlignment.regulatory_references.map((ref: string) => (
+                  <span key={ref} className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80">
+                    {ref}
+                  </span>
+                ))}
+              </div>
+            )}
             {data?.regulatoryAlignment?.high_severity_fails?.length > 0 && (
               <div className="mt-3 text-sm text-destructive">High severity fails: {data.regulatoryAlignment.high_severity_fails.length}</div>
             )}

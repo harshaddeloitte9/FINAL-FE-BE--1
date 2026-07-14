@@ -2588,7 +2588,68 @@ def _normalize_finding(f: dict) -> dict:
     }
 
 
-def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None) -> dict:
+def _derive_feature_importance_payload(report: dict, df=None, model_file: Optional[UploadFile] = None, intake: Optional[dict] = None) -> dict:
+    """Build a frontend-friendly feature importance payload from available artifacts."""
+    replicated = report.get("replicated_importances", {}) or {}
+    importance_df = None
+
+    if model_file is not None:
+        try:
+            model_bytes = model_file.file.read()
+            _buf = io.BytesIO(model_bytes)
+            pipeline = joblib.load(_buf)
+            df_imp = extract_feature_importance(pipeline)
+            if df_imp is not None:
+                importance_df = df_imp.to_dict(orient="records")
+        except Exception:
+            importance_df = None
+
+    if importance_df is None and df is not None and not getattr(df, "empty", True):
+        try:
+            target_col = None
+            if intake:
+                target_col = intake.get("target_col") or intake.get("target") or intake.get("default_col")
+            if target_col and target_col in df.columns:
+                target_series = df[target_col]
+            else:
+                target_candidates = [c for c in df.columns if df[c].nunique(dropna=True) <= 2]
+                target_col = target_candidates[0] if target_candidates else None
+                target_series = df[target_col] if target_col else None
+            if target_col and target_series is not None:
+                feature_candidates = [c for c in df.columns if c != target_col and pd.api.types.is_numeric_dtype(df[c])]
+                if feature_candidates:
+                    X = df[feature_candidates].fillna(df[feature_candidates].median())
+                    y = target_series.astype(int).fillna(0)
+                    if y.nunique() >= 2:
+                        model = LogisticRegression(max_iter=1000, random_state=42)
+                        model.fit(X, y)
+                        coef_abs = np.abs(model.coef_).mean(axis=0)
+                        importance_series = pd.Series(coef_abs, index=feature_candidates).sort_values(ascending=False)
+                        importance_df = [
+                            {"Feature": feature, "Importance": float(score)}
+                            for feature, score in importance_series.items()
+                        ]
+        except Exception:
+            importance_df = None
+
+    if importance_df is None and replicated:
+        try:
+            importance_df = [
+                {"Feature": feature, "Importance": float(score)}
+                for feature, score in sorted(replicated.items(), key=lambda item: item[1], reverse=True)
+            ]
+        except Exception:
+            importance_df = None
+
+    top_drivers = importance_df[:8] if importance_df else []
+    return {
+        "replicated_importances": replicated,
+        "importance_df": importance_df,
+        "top_drivers": top_drivers,
+    }
+
+
+def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None, intake: Optional[dict] = None, mdd_text: str = "") -> dict:
     """Map ValidationAgent2 report into the five UI sections.
 
     Returns a dict with keys: featureRelevance, methodologyReview, modelAssumptions,
@@ -2602,49 +2663,148 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
 
     raw_findings = [f for f in findings]
 
-    # Feature relevance: prefer model artifact importances first, else fallback to replicated importances.
-    replicated = report.get("replicated_importances", {}) or {}
-    importance_df = None
+    feature_relevance = _derive_feature_importance_payload(report, df=df, model_file=model_file, intake=intake)
+    replicated = feature_relevance.get("replicated_importances", {}) or {}
 
-    if model_file is not None:
-        try:
-            # attempt to load pipeline artifact and extract importances
-            model_bytes = model_file.file.read()
-            import io, joblib
-            _buf = io.BytesIO(model_bytes)
-            pipeline = joblib.load(_buf)
-            df_imp = extract_feature_importance(pipeline)
-            if df_imp is not None:
-                importance_df = df_imp.to_dict(orient="records")
-        except Exception:
-            importance_df = None
+    # Methodology Review: a human-readable summary of the modelling approach.
+    methodology_items = []
+    methodology_name = str(intake.get("methodology") or intake.get("algorithm") or "").strip() if intake else ""
+    algo_title = methodology_name or "Not specified"
+    methodology_items.append({
+        "id": "model_algorithm",
+        "title": "Model algorithm",
+        "status": "PASS" if algo_title and algo_title.lower() != "not specified" else "WARN",
+        "observed": algo_title or "Not specified",
+        "detail": "The documented model algorithm should be consistent with the training approach and submitted artifacts.",
+    })
 
-    if importance_df is None and replicated:
-        try:
-            importance_df = [
-                {"Feature": feature, "Importance": float(score)}
-                for feature, score in sorted(replicated.items(), key=lambda item: item[1], reverse=True)
-            ]
-        except Exception:
-            importance_df = None
+    monotonic = intake.get("monotonic_constraints") if intake else None
+    if monotonic in (None, "", []):
+        monotonic = "Not specified"
+    methodology_items.append({
+        "id": "monotonic_constraints",
+        "title": "Monotonic constraints",
+        "status": "PASS" if isinstance(monotonic, list) and monotonic or (isinstance(monotonic, str) and monotonic.lower() not in {"not specified", "none"}) else "WARN",
+        "observed": monotonic if isinstance(monotonic, str) else ", ".join(map(str, monotonic)) if isinstance(monotonic, list) else str(monotonic),
+        "detail": "Monotonic constraints should be documented when regulatory expectations or risk policy require them.",
+    })
 
-    feature_relevance = {"replicated_importances": replicated, "importance_df": importance_df}
+    cv_value = intake.get("cross_validation_strategy") or intake.get("cv_strategy") or "Not specified"
+    methodology_items.append({
+        "id": "cross_validation_strategy",
+        "title": "Cross-validation strategy",
+        "status": "PASS" if str(cv_value).lower() not in {"not specified", "none", ""} else "WARN",
+        "observed": str(cv_value) if cv_value else "Not specified",
+        "detail": "Cross-validation should be documented to demonstrate that the model is not overfit to one sample split.",
+    })
 
-    # Methodology Review: modelling methodology checks only.
+    calibration = intake.get("calibration_method") or intake.get("calibration") or "Not specified"
+    methodology_items.append({
+        "id": "calibration_method",
+        "title": "Calibration method",
+        "status": "PASS" if str(calibration).lower() not in {"not specified", "none", ""} else "WARN",
+        "observed": str(calibration) or "Not specified",
+        "detail": "Calibration should be documented where the model produces probability outputs used for decisioning.",
+    })
+
+    class_weight = intake.get("class_weight") or intake.get("class_weighting") or "Not specified"
+    methodology_items.append({
+        "id": "class_weighting",
+        "title": "Class weighting",
+        "status": "PASS" if str(class_weight).lower() not in {"not specified", "none", ""} else "WARN",
+        "observed": str(class_weight) or "Not specified",
+        "detail": "Class weighting or resampling should be documented when the target distribution is imbalanced.",
+    })
+
+    # Preserve the existing Stage 3 findings as extra detail if present.
     methodology_ids = ("3.1", "3.2", "3.6", "3.9")
     methodology_checks = [f for f in raw_findings if f.get("check_id") in methodology_ids]
-    methodology = [_normalize_finding(f) for f in methodology_checks]
+    methodology_items.extend(_normalize_finding(f) for f in methodology_checks)
 
     # Model Assumptions: assumptions and boundary checks from Stage 3.
+    assumptions_items = []
+    assumptions = intake.get("assumptions") if intake else []
+    if not isinstance(assumptions, list):
+        assumptions = []
+    assumption_text = {item.lower() for item in assumptions if isinstance(item, str)}
+
+    assumptions_items.append({
+        "id": "linearity",
+        "title": "Linearity",
+        "status": "PASS" if "linearity" in assumption_text else "WARN",
+        "observed": "Linearity assumption documented" if "linearity" in assumption_text else "Linearity assumption not explicitly documented",
+        "detail": "The relationship between the predictors and log-odds should be assessed for linear models.",
+    })
+    assumptions_items.append({
+        "id": "independence",
+        "title": "Independence",
+        "status": "PASS" if intake.get("independence_confirmed") is True or "independence" in assumption_text else "WARN",
+        "observed": "Independence assessed" if intake.get("independence_confirmed") is True or "independence" in assumption_text else "Independence not explicitly documented",
+        "detail": "Observations and model inputs should be independent unless a structured dependence mechanism is documented.",
+    })
+    assumptions_items.append({
+        "id": "stationarity",
+        "title": "Stationarity",
+        "status": "PASS" if "stationarity" in assumption_text else "WARN",
+        "observed": "Stationarity assumption documented" if "stationarity" in assumption_text else "Stationarity assumption not explicitly documented",
+        "detail": "Time-series or macroeconomic inputs should be reviewed for stationarity where relevant.",
+    })
+    assumptions_items.append({
+        "id": "default_definition_consistency",
+        "title": "Default definition consistency",
+        "status": "PASS" if str(intake.get("default_definition") or "").strip() else "WARN",
+        "observed": str(intake.get("default_definition") or "No default definition provided"),
+        "detail": "The default definition used for training and monitoring should be consistent with the policy definition.",
+    })
+
     assumptions_checks = [f for f in raw_findings if f.get("check_id") in ("3.7", "3.8", "3.10")]
-    model_assumptions = [_normalize_finding(f) for f in assumptions_checks]
+    model_assumptions = assumptions_items + [_normalize_finding(f) for f in assumptions_checks]
+
+    # Documentation Checklist: structured checklist items that mirror the Streamlit version.
+    documentation_items = []
+    documentation_items.append({
+        "id": "model_development_document",
+        "title": "Model Development Document",
+        "status": "PASS" if mdd_text.strip() else "WARN",
+        "detail": "The model development document should contain methodology, assumptions, and limitations.",
+    })
+    documentation_items.append({
+        "id": "data_lineage",
+        "title": "Data Lineage",
+        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("lineage", "data lineage", "source data", "data provenance")) or intake.get("data_description") else "WARN",
+        "detail": "Data lineage should describe the source systems, transformations, and data quality controls.",
+    })
+    documentation_items.append({
+        "id": "independent_code_review",
+        "title": "Independent Code Review",
+        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("code review", "independent review", "peer review")) else "WARN",
+        "detail": "Independent review of model logic and code is expected for material credit risk models.",
+    })
+    documentation_items.append({
+        "id": "sensitivity_analysis",
+        "title": "Sensitivity Analysis",
+        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("sensitivity", "stress", "scenario")) else "WARN",
+        "detail": "Sensitivity analysis should quantify what happens when key parameters or inputs change.",
+    })
+    documentation_items.append({
+        "id": "reproducibility_package",
+        "title": "Reproducibility Package",
+        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("reproduc", "package", "code", "repository")) else "WARN",
+        "detail": "The reproduction package should contain code, data dictionary and configuration for independent reruns.",
+    })
+    documentation_items.append({
+        "id": "limitations_statement",
+        "title": "Limitations Statement",
+        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("limitation", "limitations")) or intake.get("limitations") else "WARN",
+        "detail": "The model documentation should clearly explain any limitations and boundary conditions.",
+    })
 
     # Documentation Checklist: only documentation-type Stage 3 checks, excluding methodology review items.
     doc_checks = [
         f for f in raw_findings
         if f.get("check_type") == "doc" and f.get("check_id") not in methodology_ids
     ]
-    documentation = [_normalize_finding(f) for f in doc_checks]
+    documentation = documentation_items + [_normalize_finding(f) for f in doc_checks]
 
     # Regulatory Alignment: summarize Stage 3 outcomes, not the full validation report.
     stage3_counts = {
@@ -2663,9 +2823,23 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
     else:
         stage3_verdict = "FAIL"
 
+    remediation_items = []
+    if stage3_high_fails:
+        remediation_items.append(f"Address {len(stage3_high_fails)} high-severity finding(s) before approval.")
+    if stage3_counts["warn"]:
+        remediation_items.append(f"Document and remediate {stage3_counts['warn']} warning(s) in the MDD or model controls.")
+    if not remediation_items:
+        remediation_items.append("No material remediation required at this stage.")
+
+    regulatory_references = sorted({f.get("source") for f in raw_findings if f.get("source")})
+    if not regulatory_references:
+        regulatory_references = ["SS1/23", "SS11/13"]
+
     regulatory = {
         "verdict": stage3_verdict,
         "counts": stage3_counts,
+        "remediation_summary": " ".join(remediation_items),
+        "regulatory_references": regulatory_references,
         "high_severity_fails": [_normalize_finding(f) for f in stage3_high_fails],
     }
 
@@ -2677,7 +2851,7 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
 
     return {
         "featureRelevance": feature_relevance,
-        "methodologyReview": methodology,
+        "methodologyReview": methodology_items,
         "modelAssumptions": model_assumptions,
         "documentationChecklist": documentation,
         "regulatoryAlignment": regulatory,
@@ -2723,7 +2897,7 @@ async def validation_stage3_run(
     # but prefer to extract Stage 3 findings only for response.
     report = run_validation_agent2(df, intake, mdd_text)
 
-    mapped = _group_stage3(report, df=df, model_file=model_file)
+    mapped = _group_stage3(report, df=df, model_file=model_file, intake=intake, mdd_text=mdd_text)
     # add top-level metadata
     mapped["llm_ran"] = False
     mapped["timestamp"] = pd.Timestamp.now().isoformat()
