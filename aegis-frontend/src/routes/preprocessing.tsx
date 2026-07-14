@@ -287,7 +287,7 @@ function Preprocessing() {
     const abs = Math.abs(skew);
     if (abs >= 2.0) return { label: "High skew", className: "bg-red-500/15 text-red-700 border-red-500/30" };
     if (abs >= 1.5) return { label: "Moderate skew", className: "bg-amber-500/15 text-amber-700 border-amber-500/30" };
-    return { label: "Strong skew", className: "bg-yellow-500/15 text-yellow-700 border-yellow-500/30" };
+    return { label: "Mild skew", className: "bg-yellow-500/15 text-yellow-700 border-yellow-500/30" };
   };
 
   return (
@@ -414,6 +414,41 @@ function Preprocessing() {
 
       {preprocess ? (
         <>
+          {classDistributionData.length > 0 && (
+            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold">Class Distribution per Split (stratified)</div>
+                  <div className="mt-2 text-sm text-muted-foreground">Train, validation and test split proportions by class.</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {classKeys.map((label) => (
+                    <div key={label} className="inline-flex items-center gap-2 rounded-full border border-border px-2 py-1 text-muted-foreground">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: label === "Y" ? "#65A30D" : label === "N" ? "#84CC16" : "#94a3b8" }} />
+                      {label}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-5 h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={classDistributionData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <CartesianGrid stroke="rgba(15,23,42,0.06)" strokeDasharray="3 3" />
+                    <XAxis dataKey="split" tickLine={false} axisLine={false} fontSize={12} />
+                    <YAxis tickFormatter={(value) => `${Math.round(value * 100)}%`} tickLine={false} axisLine={false} fontSize={12} />
+                    <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid rgba(15,23,42,0.06)', backgroundColor: '#ffffff' }} formatter={(value: number) => `${(value * 100).toFixed(1)}%`} />
+                    <Legend verticalAlign="top" height={36} />
+                    {classKeys.map((label, idx) => {
+                      const palette = ["#65A30D", "#84CC16", "#94a3b8"];
+                      const fill = palette[idx % palette.length];
+                      return <Bar key={label} dataKey={label} stackId="a" fill={fill} radius={[6, 6, 0, 0]} />;
+                    })}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
             <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
               <div className="text-sm text-muted-foreground flex items-center"><TableIcon className="h-4 w-4 mr-2" />Features After Prep</div>
@@ -569,7 +604,7 @@ function Preprocessing() {
                                   setTreatmentOverrides((prev) => ({ ...prev, [col]: value }))
                                 }
                               >
-                                <SelectTrigger className="h-8 w-[180px] text-xs">
+                                <SelectTrigger className="h-8 w-[180px] border-primary bg-primary text-xs text-primary-foreground hover:bg-primary/90 focus:ring-primary data-[placeholder]:text-primary-foreground [&>span]:text-primary-foreground [&_svg]:text-primary-foreground [&_svg]:opacity-80 disabled:border-primary/40 disabled:bg-primary/40 disabled:text-primary-foreground/70">
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -606,7 +641,7 @@ function Preprocessing() {
                   )}
 
                   {imputationStrategy && (
-                    <div className="rounded-lg border border-border bg-background p-3">
+                    <div className="rounded-lg border border-border border-l-4 border-l-primary bg-background p-3">
                       <div className="text-sm font-medium">
                         Statistical imputation method: <span className="font-mono">{imputationStrategy.method?.toUpperCase()}</span>
                       </div>
@@ -617,7 +652,7 @@ function Preprocessing() {
                           value={strategyOverride ?? "auto"}
                           onValueChange={(value) => setStrategyOverride(value === "auto" ? null : value)}
                         >
-                          <SelectTrigger className="h-8 w-[160px] text-xs">
+                          <SelectTrigger className="h-8 w-[160px] border-primary bg-primary text-xs text-primary-foreground hover:bg-primary/90 focus:ring-primary data-[placeholder]:text-primary-foreground [&>span]:text-primary-foreground [&_svg]:text-primary-foreground [&_svg]:opacity-80">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -671,7 +706,7 @@ function Preprocessing() {
                           value={current}
                           onValueChange={(value) => setTransformChoices((prev) => ({ ...prev, [col]: value }))}
                         >
-                          <SelectTrigger className="h-8 w-[160px] text-xs">
+                          <SelectTrigger className="h-8 w-[160px] border-primary bg-primary text-xs text-primary-foreground hover:bg-primary/90 focus:ring-primary data-[placeholder]:text-primary-foreground [&>span]:text-primary-foreground [&_svg]:text-primary-foreground [&_svg]:opacity-80">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -689,7 +724,7 @@ function Preprocessing() {
           </Card>
 
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="text-sm font-semibold flex items-center"><BarChartIcon className="h-4 w-4 mr-2" />Preprocessing Strategy Summary</div>
+            <div className="text-sm font-semibold flex items-center"><TableIcon className="h-4 w-4 mr-2" />Preprocessing Strategy Summary</div>
             <div className="mt-4 overflow-x-auto">
               {strategySummary.length > 0 ? (
                 <table className="min-w-full border-collapse text-sm">
@@ -721,41 +756,6 @@ function Preprocessing() {
               )}
             </div>
           </div>
-
-          {classDistributionData.length > 0 && (
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold">Class Distribution per Split (stratified)</div>
-                  <div className="mt-2 text-sm text-muted-foreground">Train, validation and test split proportions by class.</div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  {classKeys.map((label) => (
-                    <div key={label} className="inline-flex items-center gap-2 rounded-full border border-border px-2 py-1 text-muted-foreground">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: label === "Y" ? "#65A30D" : label === "N" ? "#84CC16" : "#94a3b8" }} />
-                      {label}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="mt-5 h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={classDistributionData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                    <CartesianGrid stroke="rgba(15,23,42,0.06)" strokeDasharray="3 3" />
-                    <XAxis dataKey="split" tickLine={false} axisLine={false} fontSize={12} />
-                    <YAxis tickFormatter={(value) => `${Math.round(value * 100)}%`} tickLine={false} axisLine={false} fontSize={12} />
-                    <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid rgba(15,23,42,0.06)', backgroundColor: '#ffffff' }} formatter={(value: number) => `${(value * 100).toFixed(1)}%`} />
-                    <Legend verticalAlign="top" height={36} />
-                    {classKeys.map((label, idx) => {
-                      const palette = ["#65A30D", "#84CC16", "#94a3b8"];
-                      const fill = palette[idx % palette.length];
-                      return <Bar key={label} dataKey={label} stackId="a" fill={fill} radius={[6, 6, 0, 0]} />;
-                    })}
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          )}
 
           {/* ── Downloads ───────────────────────────────────────────────── */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

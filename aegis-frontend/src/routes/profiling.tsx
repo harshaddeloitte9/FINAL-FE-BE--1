@@ -3,8 +3,6 @@ import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import {
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   Tooltip,
@@ -23,8 +21,7 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Download, FileText, Info, Table2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, BarChart3, CheckCircle2, ChevronDown, Download, Info } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 export const Route = createFileRoute("/profiling")({
@@ -52,12 +49,13 @@ function formatCsvRow(row: Record<string, any>) {
     .join(",");
 }
 
-// Diverging red/blue scale for correlation cells: blue = negative, red = positive,
-// intensity scales with |value| so weak correlations read as near-neutral.
+// Diverging green-family scale for correlation cells: teal = negative, emerald = positive,
+// intensity scales with |value| so weak correlations read as near-neutral. Both hues stay
+// within the app's green palette while remaining distinguishable by their blue undertone.
 function correlationCellStyle(value: number): { backgroundColor: string; color: string } {
   const clamped = Math.max(-1, Math.min(1, value ?? 0));
   const intensity = Math.abs(clamped);
-  const [r, g, b] = clamped >= 0 ? [239, 68, 68] : [59, 130, 246];
+  const [r, g, b] = clamped >= 0 ? [5, 150, 105] : [13, 148, 136];
   return {
     backgroundColor: `rgba(${r}, ${g}, ${b}, ${(0.1 + intensity * 0.8).toFixed(2)})`,
     color: intensity > 0.5 ? "#ffffff" : "inherit",
@@ -78,6 +76,35 @@ function severityClasses(severity?: string): string {
   return "border-border bg-muted text-muted-foreground";
 }
 
+function severityBadgeClasses(severity?: string): string {
+  if (severity === "high") return "bg-red-100 text-red-700";
+  if (severity === "medium") return "bg-amber-100 text-amber-700";
+  if (severity === "low") return "bg-emerald-100 text-emerald-700";
+  return "bg-muted text-muted-foreground";
+}
+
+function SeverityIcon({ severity }: { severity?: string }) {
+  if (severity === "high") return <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-600" />;
+  if (severity === "medium") return <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-600" />;
+  if (severity === "low") return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />;
+  return <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />;
+}
+
+// Compliance rule text can run to full regulatory paragraphs (e.g. macro
+// variable / leakage rules cite chapter and verse). Show only the first
+// sentence as a summary; the full text is available on expand.
+function summarizeFlag(text: string, maxLength = 110): string {
+  if (!text) return "";
+  const firstSentenceMatch = text.match(/^.*?[.!?](?=\s|$)/);
+  const firstSentence = firstSentenceMatch ? firstSentenceMatch[0].trim() : text;
+  if (firstSentence.length <= maxLength) return firstSentence;
+  return `${firstSentence.slice(0, maxLength).trim()}…`;
+}
+
+function isFlagSummarized(text: string): boolean {
+  return summarizeFlag(text) !== text.trim();
+}
+
 function Profiling() {
   const { file, profile, setProfile } = useDataset();
   const navigate = useNavigate();
@@ -85,6 +112,16 @@ function Profiling() {
   const [activeProfile, setActiveProfile] = useState(profile);
   const [isLoadingTarget, setIsLoadingTarget] = useState(false);
   const [targetError, setTargetError] = useState<string | null>(null);
+  const [expandedFlags, setExpandedFlags] = useState<Set<number>>(new Set());
+
+  const toggleFlagExpanded = (idx: number) => {
+    setExpandedFlags((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
 
   useEffect(() => {
     setActiveProfile(profile);
@@ -154,22 +191,11 @@ function Profiling() {
   const outlierAnalysis = active.outlier_analysis ?? {};
   const outlierEntriesAll = Object.entries(outlierAnalysis as Record<string, any>);
   const outlierEntries = outlierEntriesAll.filter(([, info]) => ((info as any)?.outlier_fraction ?? 0) > 0);
-  const missingByColumn = active.missing_by_column
-    ? Object.entries(active.missing_by_column).map(([col, value]) => ({
-        col,
-        count: (value as any).count,
-        percentage: (value as any).percentage,
-      }))
-    : [];
-  const sortedMissing = [...missingByColumn].sort((a, b) => b.count - a.count).slice(0, 10);
   const classDistribution = active.class_distribution ?? null;
   const targetSummary = active.target_summary ?? null;
   const correlationColumns: string[] = active.correlation_matrix?.columns ?? [];
   const correlationValues: number[][] = active.correlation_matrix?.values ?? [];
   const dataDictionary = active.data_dictionary ?? [];
-  const columnTypeTable = active.column_type_table ?? [];
-  const summaryStats = active.summary_stats ?? [];
-  const distributionHistograms = active.distribution_histograms ?? [];
   const leakageRiskCols = active.leakage_risk_cols ?? [];
   const dateIntegrity = active.date_integrity ?? {};
   const dateIntegrityEntries = Object.entries(dateIntegrity);
@@ -180,6 +206,20 @@ function Profiling() {
     if (!classDistribution) return [];
     return Object.entries(classDistribution).map(([name, value]) => ({ name, value: Number(value) }));
   }, [classDistribution]);
+
+  const sortedFlags = useMemo(
+    () => [...agent2Flags].sort((a: any, b: any) => severityRank(a.severity) - severityRank(b.severity)),
+    [agent2Flags]
+  );
+  const flagSeverityCounts = useMemo(() => {
+    const counts = { high: 0, medium: 0, low: 0 };
+    for (const flag of agent2Flags as any[]) {
+      if (flag.severity === "high") counts.high += 1;
+      else if (flag.severity === "medium") counts.medium += 1;
+      else if (flag.severity === "low") counts.low += 1;
+    }
+    return counts;
+  }, [agent2Flags]);
 
   const downloadDataDictionary = () => {
     const headers = dataDictionary.length > 0 ? Object.keys(dataDictionary[0]) : [];
@@ -273,36 +313,71 @@ function Profiling() {
             </div>
           )}
           {agent2Flags.length > 0 && (
-            <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-              <div className="flex items-center gap-2 font-medium">
-                <AlertTriangle className="h-4 w-4" />
-                <span>{agent2Flags.length} data compliance flag{agent2Flags.length === 1 ? "" : "s"} detected for this dataset.</span>
+            <div className="mt-4 rounded-xl border border-border bg-card">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  <span>{agent2Flags.length} compliance flag{agent2Flags.length === 1 ? "" : "s"}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {flagSeverityCounts.high > 0 && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${severityBadgeClasses("high")}`}>
+                      {flagSeverityCounts.high} high
+                    </span>
+                  )}
+                  {flagSeverityCounts.medium > 0 && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${severityBadgeClasses("medium")}`}>
+                      {flagSeverityCounts.medium} medium
+                    </span>
+                  )}
+                  {flagSeverityCounts.low > 0 && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${severityBadgeClasses("low")}`}>
+                      {flagSeverityCounts.low} low
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="mt-3 space-y-2">
-                {[...agent2Flags]
-                  .sort((a: any, b: any) => severityRank(a.severity) - severityRank(b.severity))
-                  .map((flag: any, idx: number) => (
-                    <div
-                      key={`${flag.rule_id ?? "flag"}-${idx}`}
-                      className={`rounded-lg border-l-4 bg-card p-2.5 text-xs text-foreground ${severityClasses(flag.severity)}`}
-                    >
-                      <div className="font-medium">
-                        <span className="text-muted-foreground">[{flag.rule_id ?? "?"}]</span> {flag.flag}
-                        {flag.not_verifiable && (
-                          <span className="ml-1 italic text-muted-foreground">· not verifiable with current data</span>
+              <div className="divide-y divide-border">
+                {sortedFlags.map((flag: any, idx: number) => {
+                  const isOpen = expandedFlags.has(idx);
+                  const summary = summarizeFlag(flag.flag ?? "");
+                  const hasMore = isFlagSummarized(flag.flag ?? "") || flag.observed_value != null || flag.suggestion || flag.source || flag.principle;
+                  return (
+                    <div key={`${flag.rule_id ?? "flag"}-${idx}`} className={`border-l-4 px-4 py-2.5 ${severityClasses(flag.severity)}`}>
+                      <button
+                        type="button"
+                        onClick={() => hasMore && toggleFlagExpanded(idx)}
+                        className={`flex w-full items-start gap-2 text-left ${hasMore ? "cursor-pointer" : "cursor-default"}`}
+                      >
+                        <SeverityIcon severity={flag.severity} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                            <span>{flag.rule_id ?? "?"}</span>
+                            {flag.not_verifiable && <span className="italic normal-case">· not verifiable</span>}
+                          </div>
+                          <div className="mt-0.5 text-xs text-foreground">{summary}</div>
+                        </div>
+                        {hasMore && (
+                          <ChevronDown className={`mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-180" : ""}`} />
                         )}
-                      </div>
-                      {flag.observed_value !== undefined && flag.observed_value !== null && (
-                        <div className="mt-1 text-muted-foreground">Observed: <code>{String(flag.observed_value)}</code></div>
-                      )}
-                      {flag.suggestion && <div className="mt-1 text-muted-foreground">💡 {flag.suggestion}</div>}
-                      {(flag.source || flag.principle) && (
-                        <div className="mt-1 text-[11px] text-muted-foreground/70">
-                          {flag.source}{flag.source && flag.principle ? " — " : ""}{flag.principle}
+                      </button>
+                      {isOpen && hasMore && (
+                        <div className="mt-2 space-y-1.5 pl-5 text-xs text-muted-foreground">
+                          {isFlagSummarized(flag.flag ?? "") && <div>{flag.flag}</div>}
+                          {flag.observed_value !== undefined && flag.observed_value !== null && (
+                            <div>Observed: <code className="text-foreground">{String(flag.observed_value)}</code></div>
+                          )}
+                          {flag.suggestion && <div>💡 {flag.suggestion}</div>}
+                          {(flag.source || flag.principle) && (
+                            <div className="text-[11px] text-muted-foreground/70">
+                              {flag.source}{flag.source && flag.principle ? " — " : ""}{flag.principle}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
-                  ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -368,7 +443,7 @@ function Profiling() {
                   <PieChart>
                     <Pie data={classChartData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={80} paddingAngle={2}>
                       {classChartData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={["#6366f1", "#f59e0b", "#10b981", "#ef4444"][index % 4]} />
+                        <Cell key={`cell-${index}`} fill={["#065f46", "#10b981", "#6ee7b7", "#a7f3d0"][index % 4]} />
                       ))}
                     </Pie>
                     <Tooltip formatter={(value: number) => [value.toLocaleString(), "Count"]} />
@@ -382,7 +457,7 @@ function Profiling() {
         </div>
       </section>
 
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[0.55fr_1.45fr]">
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-muted-foreground" />
@@ -404,8 +479,8 @@ function Profiling() {
                       .slice(0, 4)
                       .map(([column, info]) => (
                         <div key={column} className="mt-2 flex items-center justify-between gap-2">
-                          <span>{column}</span>
-                          <span className="font-medium tabular-nums">{(((info as any).outlier_fraction ?? 0) * 100).toFixed(1)}%</span>
+                          <span className="truncate">{column}</span>
+                          <span className="shrink-0 font-medium tabular-nums">{(((info as any).outlier_fraction ?? 0) * 100).toFixed(1)}%</span>
                         </div>
                       ))}
                     {outlierEntries.length > 4 && (
@@ -475,7 +550,7 @@ function Profiling() {
                   <span>-1</span>
                   <div
                     className="h-2 flex-1 rounded-full"
-                    style={{ background: "linear-gradient(to right, rgba(59,130,246,0.9), rgba(148,163,184,0.15), rgba(239,68,68,0.9))" }}
+                    style={{ background: "linear-gradient(to right, rgba(13,148,136,0.9), rgba(148,163,184,0.15), rgba(5,150,105,0.9))" }}
                   />
                   <span>+1</span>
                 </div>
@@ -486,163 +561,6 @@ function Profiling() {
           </div>
         </div>
       </section>
-
-      <Tabs defaultValue="summary">
-        <TabsList>
-          <TabsTrigger value="summary">
-            <div className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4" />
-              <span>Summary Stats</span>
-            </div>
-          </TabsTrigger>
-          <TabsTrigger value="missing">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4" />
-              <span>Missing Values</span>
-            </div>
-          </TabsTrigger>
-          <TabsTrigger value="types">
-            <div className="flex items-center gap-2">
-              <Table2 className="h-4 w-4" />
-              <span>Column Types</span>
-            </div>
-          </TabsTrigger>
-          <TabsTrigger value="distributions">
-            <div className="flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              <span>Distributions</span>
-            </div>
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="summary">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            {summaryStats.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="min-w-full border-collapse text-sm">
-                  <thead>
-                    <tr>
-                      {Object.keys(summaryStats[0]).map((column) => (
-                        <th key={column} className="border-b border-border px-3 py-2 text-left text-xs uppercase tracking-wide text-muted-foreground">{column}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summaryStats.map((row: Record<string, any>, rowIndex: number) => (
-                      <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : "bg-card"}>
-                        {Object.values(row).map((value, cellIndex) => (
-                          <td key={cellIndex} className="border-b border-border px-3 py-2 font-mono text-xs text-foreground">{String(value)}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground">Summary statistics are not available for this dataset.</div>
-            )}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="missing">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            {sortedMissing.length > 0 ? (
-              <div className="space-y-6">
-                <div className="overflow-x-auto">
-                  <table className="min-w-full border-collapse text-sm">
-                    <thead>
-                      <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2">Column</th>
-                        <th className="px-3 py-2">Missing</th>
-                        <th className="px-3 py-2">Share</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedMissing.map((row) => (
-                        <tr key={row.col} className="odd:bg-background">
-                          <td className="border-b border-border px-3 py-2">{row.col}</td>
-                          <td className="border-b border-border px-3 py-2 tabular-nums">{row.count.toLocaleString()}</td>
-                          <td className="border-b border-border px-3 py-2">{row.percentage.toFixed(2)}%</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={sortedMissing} layout="vertical" margin={{ left: 30, right: 20 }}>
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={11} unit="%" />
-                      <YAxis type="category" dataKey="col" tickLine={false} axisLine={false} fontSize={11} width={170} />
-                      <Tooltip formatter={(value) => [`${value}%`, "Missing"]} />
-                      <Bar dataKey="percentage" fill="oklch(0.76 0.18 130)" radius={[0, 6, 6, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground">No missing values were detected for this dataset.</div>
-            )}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="types">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant overflow-x-auto">
-            {columnTypeTable.length > 0 ? (
-              <table className="min-w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    {Object.keys(columnTypeTable[0]).map((column) => (
-                      <th key={column} className="px-3 py-2">{column}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {columnTypeTable.map((row: Record<string, any>, rowIndex: number) => (
-                    <tr key={row.Column} className={rowIndex % 2 === 0 ? "bg-background" : "bg-card"}>
-                      {Object.values(row).map((value, cellIndex) => (
-                        <td key={cellIndex} className="border-b border-border px-3 py-2 font-mono text-xs text-foreground">{String(value)}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="text-sm text-muted-foreground">Column type details are not available for this dataset.</div>
-            )}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="distributions">
-          <div className="grid gap-4">
-            {distributionHistograms.length > 0 ? (
-              distributionHistograms.map((hist) => (
-                <div key={hist.column} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-                  <div className="mb-3 flex items-center justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-semibold">{hist.column}</div>
-                      <div className="text-xs text-muted-foreground">Numeric distribution across dataset</div>
-                    </div>
-                  </div>
-                  <div className="h-40">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={hist.bins.map((bin: number, index: number) => ({ bin: `${bin.toFixed(1)}`, count: hist.counts[index] }))}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                        <XAxis dataKey="bin" tickLine={false} axisLine={false} fontSize={10} />
-                        <YAxis tickLine={false} axisLine={false} fontSize={10} />
-                        <Tooltip formatter={(value) => [value.toLocaleString(), "Count"]} />
-                        <Bar dataKey="count" fill="oklch(0.76 0.18 130)" radius={4} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">Numeric distributions are not available for this dataset.</div>
-            )}
-          </div>
-        </TabsContent>
-      </Tabs>
 
       {active && (
         <div className="flex gap-3 pt-4">
