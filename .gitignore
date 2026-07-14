@@ -1,0 +1,33 @@
+# Frontend dependencies and generated build artifacts
+**/node_modules/
+**/.vite/
+**/.vite-cache/
+**/.turbo/
+**/.next/
+**/dist/
+**/coverage/
+**/.cache/
+**/.parcel-cache/
+**/.eslintcache
+**/.stylelintcache
+**/*.tsbuildinfo
+**/.bin/
+
+# Python caches and local environment artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.venv/
+venv/
+
+# Local env overrides (not shared) and real secrets - .env.example is the
+# only env file meant to be committed
+**/.env
+**/.env*.local
+
+# FRED API response cache (runtime data, not source)
+**/.fred_cache/
+
+\n.DS_Store\n
