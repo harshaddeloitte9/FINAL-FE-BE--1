@@ -111,6 +111,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
     ],
+    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -276,13 +277,6 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
         },
     }
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/validation/intake")
