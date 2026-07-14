@@ -22,7 +22,9 @@
 .venv/
 venv/
 
-# Local env overrides (not shared)
+# Local env overrides (not shared) and real secrets — .env.example is the
+# only env file meant to be committed
+**/.env
 **/.env*.local
 
 # FRED API response cache (runtime data, not source)

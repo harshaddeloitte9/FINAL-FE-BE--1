@@ -22,6 +22,14 @@ for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
     if path_str not in sys.path:
         sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
 
+# Load secrets (e.g. FRED_API_KEY) from a local, gitignored 24-06/.env if one
+# exists — see .env.example. Without this, any env var the app needs (FRED
+# macro fetch, etc.) only works on whichever machine happened to have it set
+# at the OS level, which isn't portable across teammates' machines or CI.
+# Never overrides a real OS-level env var that's already set (e.g. in prod).
+from dotenv import load_dotenv
+load_dotenv(BACKEND_DIR / ".env")
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
