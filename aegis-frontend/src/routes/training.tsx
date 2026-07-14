@@ -32,6 +32,8 @@ interface TrainingConfig {
   scale_pos_weight: number;
   use_feature_engineering: boolean;
   manual_params: Record<string, any>;
+  use_oot: boolean;
+  date_col: string | null;
 }
 
 interface ClassDistribution {
@@ -102,6 +104,8 @@ function Training() {
     scale_pos_weight: 1.0,
     use_feature_engineering: false,
     manual_params: {},
+    use_oot: false,
+    date_col: null,
   });
 
   // Keep config's split fields in sync with whatever Preprocessing locked in,
@@ -177,6 +181,14 @@ function Training() {
 
     return { sampleCount, featureCount, imbalanceRatio };
   }, [profile, trainingStats]);
+
+  // Columns detected as datetime by profiling — used to pick an origination/
+  // observation date for Out-of-Time (OOT) validation. Falls back to
+  // backend auto-detection (first datetime column) if none is chosen here.
+  const datetimeColumns: string[] = useMemo(
+    () => (profile as any)?.col_types?.datetime ?? [],
+    [profile]
+  );
 
   const transformedModels: ModelCard[] = useMemo(() => {
     if (!recommendations || !Array.isArray(recommendations) || recommendations.length === 0) return [];
@@ -295,6 +307,10 @@ function Training() {
     trainForm.append("use_cv", String(config.use_cv));
     trainForm.append("cv_folds", String(config.cv_folds));
     trainForm.append("use_hyperopt", String(config.use_hyperopt));
+    trainForm.append("use_oot", String(config.use_oot));
+    if (config.date_col) {
+      trainForm.append("date_col", config.date_col);
+    }
     trainForm.append("use_class_weight", String(config.use_class_weight));
     trainForm.append("scale_pos_weight", String(config.scale_pos_weight));
     trainForm.append("use_feature_engineering", String(config.use_feature_engineering));
@@ -967,6 +983,46 @@ function Training() {
               className="w-5 h-5"
             />
           </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="text-sm font-medium">Enable Out-of-Time (OOT) Validation</label>
+              <p className="text-xs text-muted-foreground mt-1">
+                Holds out the most recent slice of data by date as an untouched final check
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={config.use_oot}
+              onChange={(e) => setConfig(prev => ({ ...prev, use_oot: e.target.checked }))}
+              className="w-5 h-5"
+            />
+          </div>
+
+          {config.use_oot && (
+            <div>
+              <label className="text-sm font-medium block mb-2">Origination / Observation Date Column</label>
+              {datetimeColumns.length > 0 ? (
+                <select
+                  value={config.date_col ?? ""}
+                  onChange={(e) => setConfig(prev => ({ ...prev, date_col: e.target.value || null }))}
+                  className="w-full px-3 py-2 border border-input rounded-lg text-sm bg-background"
+                >
+                  <option value="">Auto-detect ({datetimeColumns[0]})</option>
+                  {datetimeColumns.map((col) => (
+                    <option key={col} value={col}>{col}</option>
+                  ))}
+                </select>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  No datetime column was detected in profiling. OOT will be skipped unless one is available at training time.
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground mt-1">
+                CV (if enabled) and the final fit only ever see development data — the OOT holdout is scored once, after training.
+              </p>
+            </div>
+          )}
         </div>
       </section>
 
@@ -1100,6 +1156,7 @@ function Training() {
               <div><strong>Train / Val / Test:</strong> {((1 - usedTrainingConfig.test_size - usedTrainingConfig.val_size) * 100).toFixed(0)}% / {(usedTrainingConfig.val_size * 100).toFixed(0)}% / {(usedTrainingConfig.test_size * 100).toFixed(0)}%</div>
               <div><strong>CV:</strong> {usedTrainingConfig.use_cv ? `Yes (${usedTrainingConfig.cv_folds} folds)` : "No"}</div>
               <div><strong>Hyperopt:</strong> {usedTrainingConfig.use_hyperopt ? "Yes" : "No"}</div>
+              <div><strong>OOT Validation:</strong> {usedTrainingConfig.use_oot ? `Yes${usedTrainingConfig.date_col ? ` (${usedTrainingConfig.date_col})` : " (auto-detected date column)"}` : "No"}</div>
               <div><strong>Feature engineering:</strong> {usedTrainingConfig.use_feature_engineering ? "Enabled" : "Disabled"}</div>
               <div><strong>Class Weight:</strong> {(usedTrainingConfig.use_class_weight || (selectedModel.name === "XGBoost" && usedTrainingConfig.scale_pos_weight !== 1))
                 ? `Yes${selectedModel.name === "XGBoost" ? ` (scale: ${usedTrainingConfig.scale_pos_weight.toFixed(1)})` : ""}`
@@ -1166,9 +1223,62 @@ function Training() {
                 <div><strong>Training Time:</strong> {trainingInfo.training_time_s?.toFixed(2)}s</div>
                 {trainingInfo.cv_mean && <div><strong>CV Mean Score:</strong> {trainingInfo.cv_mean.toFixed(4)}</div>}
                 {trainingInfo.cv_std && <div><strong>CV Std Dev:</strong> {trainingInfo.cv_std.toFixed(4)}</div>}
+                {trainingInfo.oot?.oot_available && trainingInfo.oot?.oot_roc_auc !== undefined && (
+                  <div><strong>OOT ROC-AUC:</strong> {trainingInfo.oot.oot_roc_auc.toFixed(4)}</div>
+                )}
+                {trainingInfo.oot?.oot_available && trainingInfo.oot?.oot_gini !== undefined && (
+                  <div><strong>OOT Gini:</strong> {trainingInfo.oot.oot_gini.toFixed(4)}</div>
+                )}
               </div>
             </div>
           </section>
+
+          {trainingInfo.oot && (
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">Out-of-Time (OOT) Validation</h2>
+              {trainingInfo.oot.oot_available ? (
+                <>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The most recent {trainingInfo.oot.oot_n?.toLocaleString()} dated row(s) were held out
+                    (cutoff: {trainingInfo.oot.cutoff_date}) and scored once against the final model,
+                    fit on the remaining {trainingInfo.oot.dev_n?.toLocaleString()} development row(s).
+                  </p>
+                  <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                    <div className="rounded-lg border border-border bg-background p-3">
+                      <div className="text-xs text-muted-foreground">OOT ROC-AUC</div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {trainingInfo.oot.oot_roc_auc !== undefined ? trainingInfo.oot.oot_roc_auc.toFixed(4) : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-3">
+                      <div className="text-xs text-muted-foreground">OOT Gini</div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {trainingInfo.oot.oot_gini !== undefined ? trainingInfo.oot.oot_gini.toFixed(4) : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-3">
+                      <div className="text-xs text-muted-foreground">OOT Rows Scored</div>
+                      <div className="mt-1 text-lg font-semibold">{trainingInfo.oot.oot_n_eval?.toLocaleString() ?? "—"}</div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-3">
+                      <div className="text-xs text-muted-foreground">Development Rows</div>
+                      <div className="mt-1 text-lg font-semibold">{trainingInfo.oot.dev_n?.toLocaleString() ?? "—"}</div>
+                    </div>
+                  </div>
+                  {trainingInfo.oot.oot_eval_note && (
+                    <p className="mt-3 text-xs text-muted-foreground">{trainingInfo.oot.oot_eval_note}</p>
+                  )}
+                  {trainingInfo.oot.oot_eval_error && (
+                    <p className="mt-3 text-xs text-destructive">Evaluation error: {trainingInfo.oot.oot_eval_error}</p>
+                  )}
+                </>
+              ) : (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {trainingInfo.oot.oot_reason ?? "OOT validation was not run for this training config."}
+                </p>
+              )}
+            </section>
+          )}
 
           {splitStats && (
             <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">

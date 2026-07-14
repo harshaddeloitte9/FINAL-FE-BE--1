@@ -305,7 +305,7 @@ function Evaluation() {
           label,
           precision: typeof row.precision === "number" ? row.precision : undefined,
           recall: typeof row.recall === "number" ? row.recall : undefined,
-          f1: typeof row.f1 === "number" ? row.f1 : undefined,
+          f1: typeof row["f1-score"] === "number" ? row["f1-score"] : undefined,
           support: typeof row.support === "number" ? row.support : undefined,
         };
       });
