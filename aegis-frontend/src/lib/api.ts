@@ -39,8 +39,6 @@ export async function api<T = unknown>(
 export async function formUpload<T = unknown>(path: string, form: FormData): Promise<T> {
   const url = `${EFFECTIVE_BASE}${path}`;
   console.log("formUpload: POST", url);
-  console.log("VITE_API_URL =", import.meta.env.VITE_API_URL);
-  console.log("EFFECTIVE_BASE =", EFFECTIVE_BASE);
   try {
     const res = await fetch(url, {
       method: "POST",
