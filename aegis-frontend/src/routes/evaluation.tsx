@@ -129,26 +129,10 @@ function enhanceFigureAxes(figure: any) {
   return { ...figure, layout };
 }
 
-// Ensures every heatmap cell in the confusion matrix renders its numeric count as visible text.
-function enhanceConfusionMatrixFigure(figure: any) {
-  if (!figure) return figure;
-
-  const data = (figure.data ?? []).map((trace: any) => {
-    if (trace?.type !== "heatmap" && trace?.type !== "heatmapgl") {
-      return trace;
-    }
-    const z = trace.z ?? [];
-    const text = z.map((row: any[]) => row.map((v) => (typeof v === "number" ? v.toLocaleString() : String(v ?? ""))));
-    return {
-      ...trace,
-      text,
-      texttemplate: "%{text}",
-      textfont: { size: 18, color: "#0f172a", ...(trace.textfont ?? {}) },
-      hoverinfo: trace.hoverinfo ?? "x+y+z",
-    };
-  });
-
-  return enhanceFigureAxes({ ...figure, data });
+function toneClasses(tone: string) {
+  if (tone === "warning") return "border-amber-500/40 bg-amber-500/5";
+  if (tone === "destructive") return "border-destructive/40 bg-destructive/5";
+  return "border-primary/40 bg-primary/5";
 }
 
 function Card({ title, sub, children, className }: { title: string; sub?: string; children: React.ReactNode; className?: string }) {
@@ -202,7 +186,6 @@ function Evaluation() {
 
   const rocFigure = useMemo(() => enhanceFigureAxes(evaluationData?.roc_curve_figure ?? null), [evaluationData?.roc_curve_figure]);
   const prFigure = useMemo(() => enhanceFigureAxes(evaluationData?.pr_curve_figure ?? null), [evaluationData?.pr_curve_figure]);
-  const confusionMatrixFigure = useMemo(() => enhanceConfusionMatrixFigure(evaluationData?.confusion_matrix_figure ?? null), [evaluationData?.confusion_matrix_figure]);
   const thresholdFigure = useMemo(() => enhanceFigureAxes(evaluationData?.threshold_analysis_figure ?? null), [evaluationData?.threshold_analysis_figure]);
   const scoreDistributionFigure = useMemo(() => enhanceFigureAxes(evaluationData?.score_distribution_figure ?? null), [evaluationData?.score_distribution_figure]);
   const liftChartFigure = useMemo(() => enhanceFigureAxes(evaluationData?.lift_chart_figure ?? null), [evaluationData?.lift_chart_figure]);
@@ -219,6 +202,60 @@ function Evaluation() {
 
     return temporalAnalysis.plot_data_by_freq?.[temporalFrequency] ?? [];
   }, [temporalAnalysis, temporalFrequency]);
+
+  const temporalFigure = useMemo(() => {
+    if (!temporalRows || temporalRows.length === 0) return null;
+
+    const periods = temporalRows.map((r: any) => r.period);
+    const actual = temporalRows.map((r: any) => r.actual_rate);
+    const predicted = temporalRows.map((r: any) => r.predicted_rate);
+    const gap = temporalRows.map((r: any) => r.gap);
+    // Flagged periods (significant actual-vs-predicted drift) get a red
+    // marker so they stand out against the rest of the series at a glance.
+    const markerColors = temporalRows.map((r: any) => (r.flagged ? "#ef4444" : "#0ea5e9"));
+
+    return enhanceFigureAxes({
+      data: [
+        {
+          type: "bar",
+          name: "Gap",
+          x: periods,
+          y: gap,
+          yaxis: "y2",
+          marker: { color: "rgba(100,116,139,0.25)" },
+          hovertemplate: "%{x}<br>Gap: %{y:.3f}<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines+markers",
+          name: "Actual Rate",
+          x: periods,
+          y: actual,
+          line: { color: "#0ea5e9", width: 3 },
+          marker: { color: markerColors, size: 8 },
+          hovertemplate: "%{x}<br>Actual: %{y:.3f}<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines+markers",
+          name: "Predicted Rate",
+          x: periods,
+          y: predicted,
+          line: { color: "#6366f1", width: 3, dash: "dot" },
+          marker: { size: 6 },
+          hovertemplate: "%{x}<br>Predicted: %{y:.3f}<extra></extra>",
+        },
+      ],
+      layout: {
+        title: "Actual vs Predicted Default Rate",
+        xaxis: { title: "Period" },
+        yaxis: { title: "Rate" },
+        yaxis2: { title: "Gap", overlaying: "y", side: "right", showgrid: false },
+        legend: { orientation: "h", y: 1.18 },
+        barmode: "overlay",
+      },
+    });
+  }, [temporalRows]);
 
   const temporalSummary = useMemo(() => {
     if (!temporalAnalysis) {
@@ -410,27 +447,51 @@ function Evaluation() {
 
             {activeTab === "confusion" && (
               <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}`}>
-                {confusionMatrixFigure ? (
-                  <PlotlyChart figure={confusionMatrixFigure} style={{ minHeight: 360 }} />
-                ) : (
-                  <p className="text-sm text-muted-foreground">Confusion matrix requires a binary classification prediction threshold.</p>
-                )}
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  {confusion.map(([label, count, tone]) => (
-                    <div
-                      key={label}
-                      className={`rounded-lg border p-3 ${
-                        tone === "warning"
-                          ? "border-amber-500/40 bg-amber-500/5"
-                          : tone === "destructive"
-                          ? "border-destructive/40 bg-destructive/5"
-                          : "border-primary/40 bg-primary/5"
-                      }`}
-                    >
-                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
-                      <div className="mt-1 text-lg font-semibold tabular-nums">{Number(count).toLocaleString()}</div>
-                    </div>
-                  ))}
+                <div className="flex justify-center overflow-auto py-2">
+                  <table className="border-separate" style={{ borderSpacing: 8 }}>
+                    <thead>
+                      <tr>
+                        <th />
+                        <th />
+                        <th colSpan={2} className="pb-1 text-center text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          Predicted
+                        </th>
+                      </tr>
+                      <tr>
+                        <th />
+                        <th />
+                        <th className="px-2 pb-2 text-center text-xs font-medium text-muted-foreground">0</th>
+                        <th className="px-2 pb-2 text-center text-xs font-medium text-muted-foreground">1</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <th
+                          rowSpan={2}
+                          className="pr-1 text-center align-middle text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+                          style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+                        >
+                          Actual
+                        </th>
+                        <th className="pr-2 text-center text-xs font-medium text-muted-foreground">0</th>
+                        {[confusion[0], confusion[1]].map(([label, count, tone]) => (
+                          <td key={label} className={`rounded-lg border p-4 text-center ${toneClasses(tone)}`}>
+                            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                            <div className="mt-1 text-lg font-semibold tabular-nums">{Number(count).toLocaleString()}</div>
+                          </td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th className="pr-2 text-center text-xs font-medium text-muted-foreground">1</th>
+                        {[confusion[2], confusion[3]].map(([label, count, tone]) => (
+                          <td key={label} className={`rounded-lg border p-4 text-center ${toneClasses(tone)}`}>
+                            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                            <div className="mt-1 text-lg font-semibold tabular-nums">{Number(count).toLocaleString()}</div>
+                          </td>
+                        ))}
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </Card>
             )}
@@ -514,28 +575,11 @@ function Evaluation() {
                       {temporalAnalysis?.frequency_options?.map((f: string) => <option key={f} value={f}>{f}</option>)}
                     </select>
                   </div>
-                  <div className="overflow-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                          <th className="py-2 pr-3">Period</th>
-                          <th className="py-2 pr-3">Actual Rate</th>
-                          <th className="py-2 pr-3">Predicted Rate</th>
-                          <th className="py-2">Gap</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {temporalRows.map((r: any, i: number) => (
-                          <tr key={i} className="border-b border-border/60 text-sm">
-                            <td className="py-2 pr-3">{r.period}</td>
-                            <td className="py-2 pr-3">{formatMetricValue(r.actual_rate)}</td>
-                            <td className="py-2 pr-3">{formatMetricValue(r.predicted_rate)}</td>
-                            <td className="py-2">{formatMetricValue(r.gap)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  {temporalFigure ? (
+                    <PlotlyChart figure={temporalFigure} style={{ minHeight: 380 }} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No temporal data available for the selected period.</p>
+                  )}
                 </div>
               </Card>
             )}
