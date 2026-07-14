@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw } from "lucide-react";
 
 export const Route = createFileRoute("/features")({
@@ -57,7 +57,7 @@ interface MacroDateCandidate {
 
 function Features() {
   const navigate = useNavigate();
-  const { file, profile } = useDataset();
+  const { file, profile, setUploadResult } = useDataset();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [engineeringResult, setEngineeringResult] = useState<FeatureEngineeringResponse | null>(null);
@@ -77,6 +77,30 @@ function Features() {
   const [datasetCsvText, setDatasetCsvText] = useState<string | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
   const [macroError, setMacroError] = useState<string | null>(null);
+
+  // Guards against out-of-order responses: runFeatureEngineering() is called
+  // both on mount (no macro yet) and again right after a FRED fetch resolves
+  // (datasetCsvText changes). /data/feature-engineering does non-trivial work
+  // (IV/WOE, MI, VIF, interaction search) so its latency varies — without this,
+  // if the mount request happens to resolve AFTER the macro-triggered one, its
+  // stale (macro-less) result silently overwrites the correct one, even though
+  // the "FRED features attached" banner (driven by separate state) still shows
+  // success. Only the response matching the most recently issued request id
+  // is ever applied.
+  const feRequestIdRef = useRef(0);
+
+  // The FRED fetch always attaches macro_* columns onto THIS pristine file,
+  // never onto whatever ds.file currently is — once a fetch succeeds, ds.file
+  // itself becomes the macro-augmented version (see fetchMacroFeatures), so
+  // without this a second fetch (e.g. after picking a different date column)
+  // would attach macro columns on top of an already-augmented file and
+  // produce duplicate macro_gdp/macro_unemployment/macro_interest_rate columns.
+  const originalFileRef = useRef<File | null>(null);
+  useEffect(() => {
+    if (file && !originalFileRef.current) {
+      originalFileRef.current = file;
+    }
+  }, [file]);
 
   // ── Feature Removal — propose-confirm ──────────────────────────────────────
   const [removeChecked, setRemoveChecked] = useState<Record<string, boolean>>({});
@@ -99,6 +123,7 @@ function Features() {
       setError("Could not determine target column. Please check the uploaded dataset.");
       return;
     }
+    const requestId = ++feRequestIdRef.current;
     try {
       setLoading(true);
       setError(null);
@@ -116,13 +141,22 @@ function Features() {
       }
 
       const result = await formUpload<FeatureEngineeringResponse>("/data/feature-engineering", form);
+      if (requestId !== feRequestIdRef.current) {
+        // A newer request (e.g. triggered by a FRED macro fetch) was issued
+        // while this one was in flight — drop this stale response instead of
+        // overwriting the newer result.
+        return;
+      }
       setEngineeringResult(result);
     } catch (err) {
+      if (requestId !== feRequestIdRef.current) return;
       const message = err instanceof Error ? err.message : "Failed to run feature engineering";
       setError(message);
     } finally {
-      setLoading(false);
-      setApplyingRemoval(false);
+      if (requestId === feRequestIdRef.current) {
+        setLoading(false);
+        setApplyingRemoval(false);
+      }
     }
   };
 
@@ -157,12 +191,13 @@ function Features() {
   }, [file, profile, datasetCsvText]);
 
   const fetchMacroFeatures = async () => {
-    if (!file || !selectedMacroDateCol) return;
+    const baseFile = originalFileRef.current ?? file;
+    if (!baseFile || !selectedMacroDateCol) return;
     try {
       setMacroLoading(true);
       setMacroError(null);
       const form = new FormData();
-      form.append("file", file);
+      form.append("file", baseFile);
       form.append("date_col", selectedMacroDateCol);
       const res = await formUpload<{
         macro_columns: string[];
@@ -172,6 +207,15 @@ function Features() {
       setMacroColumns(res.macro_columns ?? []);
       setMacroDateColUsed(res.date_col_used ?? selectedMacroDateCol);
       setDatasetCsvText(res.csv_with_macro);
+
+      // Carry the macro-augmented dataset forward as the working file so
+      // every later stage (preprocessing, training, explainability) — which
+      // read ds.file from context, not this page's local datasetCsvText —
+      // sees the same macro columns instead of silently falling back to the
+      // original upload.
+      const macroBlob = new Blob([res.csv_with_macro], { type: "text/csv" });
+      const macroFile = new File([macroBlob], baseFile.name, { type: "text/csv" });
+      setUploadResult(macroFile, profile);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to fetch FRED macro features";
       setMacroError(message);
@@ -185,6 +229,11 @@ function Features() {
     setMacroDateColUsed(null);
     setDatasetCsvText(null);
     setMacroError(null);
+    // Revert ds.file to the pristine (pre-macro) dataset so the next fetch
+    // attaches macro columns fresh instead of stacking onto the last result.
+    if (originalFileRef.current) {
+      setUploadResult(originalFileRef.current, profile);
+    }
   };
 
   const plan = engineeringResult?.feature_engineering_plan ?? {};
