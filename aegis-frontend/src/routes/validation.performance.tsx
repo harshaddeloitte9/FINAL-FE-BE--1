@@ -61,7 +61,6 @@ function formatValue(value: unknown, digits = 3) {
 }
 
 function Performance() {
-<<<<<<< HEAD
   const ds = useDataset();
   const [localFile, setLocalFile] = React.useState<File | null>(null);
   const [targetCol, setTargetCol] = React.useState(
@@ -160,11 +159,6 @@ function Performance() {
       { metric: "Recall", champion: benchmarkComparison.recall?.champion, challenger: benchmarkComparison.recall?.challenger },
     ];
   }, [benchmarkComparison]);
-=======
-  const { file, profile } = useDataset();
-  const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
-  const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
->>>>>>> a4d85a79 (Align validation workflow with Streamlit implementation)
 
   return (
     <div className="space-y-8">

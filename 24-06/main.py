@@ -2484,18 +2484,18 @@ async def validation_replication(
     except Exception:
         seed_list = [random_seed]
 
-resolved_model_name = (algorithm or model_name or "").strip()
-if not resolved_model_name:
-    raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+    resolved_model_name = (algorithm or model_name or "").strip()
+    if not resolved_model_name:
+        raise HTTPException(status_code=400, detail="Model or algorithm is required.")
 
-reported: Dict[str, Any] = {}
-if reported_json:
-    try:
-        parsed = json.loads(reported_json)
-        if isinstance(parsed, dict):
-            reported.update({k: v for k, v in parsed.items() if v is not None})
-    except Exception:
-        pass 
+    reported: Dict[str, Any] = {}
+    if reported_json:
+        try:
+            parsed = json.loads(reported_json)
+            if isinstance(parsed, dict):
+                reported.update({k: v for k, v in parsed.items() if v is not None})
+        except Exception:
+            pass 
     if mdd_file is not None:
         try:
             # parse_mdd_file was ported from Streamlit and expects a sync
