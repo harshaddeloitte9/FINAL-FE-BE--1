@@ -16,67 +16,7 @@ from sklearn.metrics import (
     roc_auc_score, confusion_matrix, classification_report,
     roc_curve, precision_recall_curve, average_precision_score,
     mean_squared_error, mean_absolute_error, r2_score,
-)
-
-
-def _to_scores(y_proba) -> np.ndarray:
-    """Return 1-D probability scores regardless of whether y_proba is 1-D or 2-D."""
-    arr = np.asarray(y_proba)
-    if arr.ndim == 1:
-        return arr
-    if arr.ndim == 2:
-        if arr.shape[1] == 1:
-            return arr[:, 0]
-        if arr.shape[1] >= 2:
-            return arr[:, 1]
-    return arr
-
-
-# ─────────────────────────────────────────────
-# Binary Classification Metrics
-# ─────────────────────────────────────────────
-
-def compute_binary_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    y_proba: Optional[np.ndarray] = None,
-    threshold: float = 0.5,
-) -> Dict[str, Any]:
-    """Compute full binary classification metric suite."""
-    if y_proba is not None:
-        _scores = _to_scores(y_proba) if y_proba.ndim == 2 else y_proba
-        y_pred_thresh = (_scores >= threshold).astype(int)
-    else:
-        y_pred_thresh = y_pred
-        _scores = None
-
-    metrics = {
-        "accuracy": round(accuracy_score(y_true, y_pred_thresh), 4),
-        "precision": round(precision_score(y_true, y_pred_thresh, zero_division=0), 4),
-        "recall": round(recall_score(y_true, y_pred_thresh, zero_division=0), 4),
-        "f1": round(f1_score(y_true, y_pred_thresh, zero_division=0), 4),
-        "confusion_matrix": confusion_matrix(y_true, y_pred_thresh).tolist(),
-        "classification_report": classification_report(y_true, y_pred_thresh, output_dict=True, zero_division=0),
-        "threshold_used": threshold,
-    }
-"""
-evaluate.py - Credit Risk Focused Evaluation Engine
-Computes and visualizes all metrics for binary classification and regression.
-"""
-
-import numpy as np
-import pandas as pd
-from typing import Dict, Any, Tuple, Optional, List
-
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, confusion_matrix, classification_report,
-    roc_curve, precision_recall_curve, average_precision_score,
-    mean_squared_error, mean_absolute_error, r2_score,
+    brier_score_loss,
 )
 
 
@@ -156,6 +96,15 @@ def compute_binary_metrics(
             metrics["pr_auc"] = round(average_precision_score(y_true, _scores), 4)
         except Exception:
             metrics["pr_auc"] = None
+        try:
+            metrics.update(compute_ks_statistic(y_true, _scores))
+        except Exception:
+            metrics["ks_statistic"] = None
+            metrics["ks_pvalue"] = None
+        try:
+            metrics["brier_score"] = round(float(brier_score_loss(y_true, _scores)), 4)
+        except Exception:
+            metrics["brier_score"] = None
 
     return metrics
 
@@ -419,14 +368,28 @@ def plot_pr_curve(y_true, y_proba) -> go.Figure:
 
 
 def plot_confusion_matrix(cm: List[List[int]], labels=None) -> go.Figure:
-    cm_array = np.array(cm)
-    if labels is None:
+    cm_array = np.array(cm, dtype=float)
+
+    # Labels must match the matrix's actual shape — a degenerate eval split
+    # (e.g. one class absent) can yield a smaller matrix than the caller's
+    # hardcoded label list, which would otherwise IndexError below.
+    if labels is None or len(labels) != cm_array.shape[0]:
         labels = [f"Class {i}" for i in range(cm_array.shape[0])]
 
-    # Normalize for color intensity
-    cm_norm = cm_array / cm_array.sum(axis=1, keepdims=True)
+    # Normalize for color intensity. A row-sum of 0 (a class with zero
+    # actual instances in this batch) would otherwise divide-by-zero into
+    # NaN, which FastAPI/Starlette's JSON encoder refuses to serialize
+    # (allow_nan=False) — that raises a 500 and the whole Evaluation tab
+    # fails to load, not just this chart. Guard it so those rows render
+    # as 0% instead of poisoning the response.
+    row_sums = cm_array.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm_array, row_sums,
+        out=np.zeros_like(cm_array),
+        where=row_sums != 0,
+    )
 
-    text = [[f"{cm_array[i][j]}<br>({cm_norm[i][j]:.1%})" for j in range(len(labels))]
+    text = [[f"{int(cm_array[i][j])}<br>({cm_norm[i][j]:.1%})" for j in range(len(labels))]
             for i in range(len(labels))]
 
     fig = go.Figure(data=go.Heatmap(
@@ -714,4 +677,37 @@ def compute_temporal_stability_summary(
             }
             for _, row in grouped.iterrows()
         ],
+    }
+
+
+def compute_temporal_analysis_bundle(
+    dates,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    date_columns: Optional[List[str]] = None,
+    gap_threshold: float = 0.05,
+) -> Dict[str, Any]:
+    """
+    Bundle temporal-stability summaries across Monthly/Quarterly/Yearly
+    granularity into the shape the Evaluation page's "Temporal" tab expects:
+    a default (Quarterly) plot_data/summary pair plus per-frequency variants,
+    so the frontend's frequency toggle needs no extra round-trip to the API.
+    """
+    freq_options = ["Monthly", "Quarterly", "Yearly"]
+    plot_data_by_freq: Dict[str, List[Dict[str, Any]]] = {}
+    summaries_by_freq: Dict[str, Dict[str, Any]] = {}
+
+    for freq in freq_options:
+        summary = compute_temporal_stability_summary(dates, y_true, y_proba, freq=freq, gap_threshold=gap_threshold)
+        plot_data_by_freq[freq] = summary.pop("by_period")
+        summaries_by_freq[freq] = summary
+
+    default_freq = "Quarterly"
+    return {
+        "date_columns": date_columns or [],
+        "frequency_options": freq_options,
+        "plot_data": plot_data_by_freq.get(default_freq, []),
+        "plot_data_by_freq": plot_data_by_freq,
+        "summary": summaries_by_freq.get(default_freq),
+        "summaries_by_freq": summaries_by_freq,
     }

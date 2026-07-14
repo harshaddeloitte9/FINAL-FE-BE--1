@@ -15,7 +15,6 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ProfilingRouteImport } from './routes/profiling'
 import { Route as PreprocessingRouteImport } from './routes/preprocessing'
 import { Route as PdRouteImport } from './routes/pd'
-import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LgdRouteImport } from './routes/lgd'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as ExplainabilityRouteImport } from './routes/explainability'
@@ -64,11 +63,6 @@ const PreprocessingRoute = PreprocessingRouteImport.update({
 const PdRoute = PdRouteImport.update({
   id: '/pd',
   path: '/pd',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ModelsRoute = ModelsRouteImport.update({
-  id: '/models',
-  path: '/models',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LgdRoute = LgdRouteImport.update({
@@ -178,7 +172,6 @@ export interface FileRoutesByFullPath {
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
   '/lgd': typeof LgdRoute
-  '/models': typeof ModelsRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -206,7 +199,6 @@ export interface FileRoutesByTo {
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
   '/lgd': typeof LgdRoute
-  '/models': typeof ModelsRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -234,7 +226,6 @@ export interface FileRoutesById {
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
   '/lgd': typeof LgdRoute
-  '/models': typeof ModelsRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -264,7 +255,6 @@ export interface FileRouteTypes {
     | '/explainability'
     | '/features'
     | '/lgd'
-    | '/models'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -292,7 +282,6 @@ export interface FileRouteTypes {
     | '/explainability'
     | '/features'
     | '/lgd'
-    | '/models'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -319,7 +308,6 @@ export interface FileRouteTypes {
     | '/explainability'
     | '/features'
     | '/lgd'
-    | '/models'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -348,7 +336,6 @@ export interface RootRouteChildren {
   ExplainabilityRoute: typeof ExplainabilityRoute
   FeaturesRoute: typeof FeaturesRoute
   LgdRoute: typeof LgdRoute
-  ModelsRoute: typeof ModelsRoute
   PdRoute: typeof PdRoute
   PreprocessingRoute: typeof PreprocessingRoute
   ProfilingRoute: typeof ProfilingRoute
@@ -399,13 +386,6 @@ declare module '@tanstack/react-router' {
       path: '/pd'
       fullPath: '/pd'
       preLoaderRoute: typeof PdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/models': {
-      id: '/models'
-      path: '/models'
-      fullPath: '/models'
-      preLoaderRoute: typeof ModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/lgd': {
@@ -583,7 +563,6 @@ const rootRouteChildren: RootRouteChildren = {
   ExplainabilityRoute: ExplainabilityRoute,
   FeaturesRoute: FeaturesRoute,
   LgdRoute: LgdRoute,
-  ModelsRoute: ModelsRoute,
   PdRoute: PdRoute,
   PreprocessingRoute: PreprocessingRoute,
   ProfilingRoute: ProfilingRoute,

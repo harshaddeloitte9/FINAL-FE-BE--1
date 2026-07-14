@@ -22,7 +22,7 @@
 .venv/
 venv/
 
-# Local env overrides (not shared) and real secrets - .env.example is the
+# Local env overrides (not shared) and real secrets — .env.example is the
 # only env file meant to be committed
 **/.env
 **/.env*.local
@@ -30,4 +30,5 @@ venv/
 # FRED API response cache (runtime data, not source)
 **/.fred_cache/
 
-\n.DS_Store\n
+# macOS Finder metadata
+**/.DS_Store

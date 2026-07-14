@@ -22,6 +22,14 @@ for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
     if path_str not in sys.path:
         sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
 
+# Load secrets (e.g. FRED_API_KEY) from a local, gitignored 24-06/.env if one
+# exists — see .env.example. Without this, any env var the app needs (FRED
+# macro fetch, etc.) only works on whichever machine happened to have it set
+# at the OS level, which isn't portable across teammates' machines or CI.
+# Never overrides a real OS-level env var that's already set (e.g. in prod).
+from dotenv import load_dotenv
+load_dotenv(BACKEND_DIR / ".env")
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -41,9 +49,12 @@ from utils import (
     generate_synthetic_credit_dataset, detect_column_types,
     detect_target_candidates, detect_task_type, df_to_csv_download, model_to_download,
 )
-from preprocessing import (
+from preprocessing_new import (
     build_preprocessing_report, prepare_data, rebuild_preprocessor_for, finalize_xy,
     get_feature_names_from_fitted_preprocessor,
+    classify_missing_treatment, select_imputation_strategy, SemanticImputer,
+    REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
+    estimate_drop_impact,
 )
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
@@ -60,46 +71,30 @@ except ImportError:
     _legacy_fe_spec.loader.exec_module(_legacy_fe)
     resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
-from train import split_data, compute_split_stats, train_model
+from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
-# Prefer the source-of-truth evaluation helpers from the original Streamlit app
-_source_eval_path = SOURCE_OF_TRUTH_DIR / "evaluate.py"
-_source_eval_spec = importlib.util.spec_from_file_location("source_evaluate", _source_eval_path)
-if _source_eval_spec is None or _source_eval_spec.loader is None:
-    raise ImportError(f"Could not load source-of-truth evaluate from {_source_eval_path}")
-_source_eval = importlib.util.module_from_spec(_source_eval_spec)
-_source_eval_spec.loader.exec_module(_source_eval)
-eval_engine = _source_eval
+import evaluate_new as eval_engine
+import fred_client
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
 compute_heteroscedasticity_check = eval_engine.compute_heteroscedasticity_check
-
-_legacy_eval_path = Path(__file__).resolve().parent / "evaluate.py"
-_legacy_eval_spec = importlib.util.spec_from_file_location("legacy_evaluate", _legacy_eval_path)
-if _legacy_eval_spec is None or _legacy_eval_spec.loader is None:
-    raise ImportError(f"Could not load evaluation helpers from {_legacy_eval_path}")
-_legacy_eval = importlib.util.module_from_spec(_legacy_eval_spec)
-_legacy_eval_spec.loader.exec_module(_legacy_eval)
-
-compute_roc_curve = getattr(eval_engine, "compute_roc_curve", _legacy_eval.compute_roc_curve)
-compute_pr_curve = getattr(eval_engine, "compute_pr_curve", _legacy_eval.compute_pr_curve)
-compute_threshold_analysis = getattr(eval_engine, "compute_threshold_analysis", _legacy_eval.compute_threshold_analysis)
-compute_score_distribution = getattr(eval_engine, "compute_score_distribution", _legacy_eval.compute_score_distribution)
-compute_gain_chart = getattr(eval_engine, "compute_gain_chart", _legacy_eval.compute_gain_chart)
-compute_lift_chart = getattr(eval_engine, "compute_lift_chart", _legacy_eval.compute_lift_chart)
-compute_temporal_stability_summary = getattr(
-    eval_engine, "compute_temporal_stability_summary", _legacy_eval.compute_temporal_stability_summary
-)
-_to_scores = getattr(eval_engine, "_to_scores", getattr(_legacy_eval, "_to_scores", None))
-plot_roc_curve = getattr(eval_engine, "plot_roc_curve", None)
-plot_pr_curve = getattr(eval_engine, "plot_pr_curve", None)
-plot_confusion_matrix = getattr(eval_engine, "plot_confusion_matrix", None)
-plot_score_distribution = getattr(eval_engine, "plot_score_distribution", None)
-plot_threshold_analysis = getattr(eval_engine, "plot_threshold_analysis", None)
-plot_lift_chart = getattr(eval_engine, "plot_lift_chart", None)
+compute_roc_curve = eval_engine.compute_roc_curve
+compute_pr_curve = eval_engine.compute_pr_curve
+compute_threshold_analysis = eval_engine.compute_threshold_analysis
+compute_score_distribution = eval_engine.compute_score_distribution
+compute_gain_chart = eval_engine.compute_gain_chart
+compute_lift_chart = eval_engine.compute_lift_chart
+compute_temporal_analysis_bundle = eval_engine.compute_temporal_analysis_bundle
+plot_roc_curve = eval_engine.plot_roc_curve
+plot_pr_curve = eval_engine.plot_pr_curve
+plot_confusion_matrix = eval_engine.plot_confusion_matrix
+plot_threshold_analysis = eval_engine.plot_threshold_analysis
+plot_score_distribution = eval_engine.plot_score_distribution
+plot_lift_chart = eval_engine.plot_lift_chart
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
+    generate_model_summary,
 )
 from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication
 
@@ -114,7 +109,26 @@ ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
 app = FastAPI()
 
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8081",
+        "http://localhost:3001",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8081",
+        "http://127.0.0.1:3001",
+        "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
+    ],
+    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
     agent = ValidationAgent2()
@@ -343,24 +357,6 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
         },
     }
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        # Vite dev server default (if port changed during dev)
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/validation/intake")
@@ -514,6 +510,28 @@ def _serialize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> Dict[str, Any]:
         "columns": df.columns.astype(str).tolist(),
         "preview": df.head(max_rows).replace({pd.NA: None}).to_dict(orient="records"),
     }
+
+
+def _json_safe_scalar(v: Any) -> Any:
+    """Convert a single numpy/pandas scalar to a plain JSON-safe Python value —
+    numpy int/float types aren't natively JSON-serializable, and non-finite
+    floats (inf/-inf/nan) become the non-standard `Infinity`/`NaN` tokens that
+    Python's json encoder tolerates but JavaScript's JSON.parse rejects."""
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        f = float(v)
+        return f if np.isfinite(f) else None
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
 
 
 def _to_base64(obj: Any) -> str:
@@ -827,7 +845,21 @@ async def upload_data(
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     synthetic_samples: Optional[int] = Form(None),
+    demo_mode: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
+    if demo_mode and file is None and csv_text is None and not synthetic_samples:
+        demo_mode = demo_mode.lower()
+        demo_file = SOURCE_OF_TRUTH_DIR / "demo_data" / ("flawed_portfolio.csv" if demo_mode == "flawed" else "clean_portfolio.csv")
+        if not demo_file.exists():
+            raise HTTPException(status_code=400, detail=f"Demo dataset not found for mode '{demo_mode}'.")
+        df = pd.read_csv(demo_file, keep_default_na=True)
+        dataset_name = "Demo B dataset" if demo_mode == "flawed" else "Demo A dataset"
+        profile = _build_data_profile(df, dataset_name=dataset_name)
+        profile["csv_text"] = df.to_csv(index=False)
+        profile["source_type"] = "demo"
+        profile["demo_mode"] = demo_mode
+        return profile
+
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     dataset_name = file.filename if file is not None else "Synthetic Credit Dataset"
     profile = _build_data_profile(df, dataset_name=dataset_name)
@@ -855,6 +887,163 @@ async def data_profile(
     return profile
 
 
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert numpy scalar types to native Python so dict/list
+    structures built from pandas/numpy computations serialize cleanly."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, pd.DataFrame):
+        return _json_safe(obj.to_dict(orient="records"))
+    return obj
+
+
+def _expand_plotly_bdata(obj):
+    """
+    Recursively expand Plotly's compact typed-array JSON encoding back into
+    plain number lists.
+
+    Since plotly.py ~5.24+, fig.to_json() encodes numeric trace arrays as
+    {"dtype": "f8", "bdata": "<base64>"} instead of a plain JSON array, to
+    shrink payload size. This requires a fairly recent plotly.js on the
+    frontend to decode — older/most bundled versions just silently fail to
+    plot that trace, so a chart's tab looks like nothing happened when
+    clicked even though real figure JSON is present. Expanding it back to
+    plain arrays here keeps this working regardless of the frontend's
+    plotly.js version.
+    """
+    if isinstance(obj, dict):
+        if "bdata" in obj and "dtype" in obj and isinstance(obj["bdata"], str):
+            try:
+                raw = base64.b64decode(obj["bdata"])
+                flat = np.frombuffer(raw, dtype=obj["dtype"])
+                # Multi-dimensional arrays (e.g. heatmap z) are flattened into
+                # a single bdata blob with a companion "shape" field like
+                # "2, 2" — without reshaping here we'd hand the frontend a
+                # flat list where it expects nested rows, which breaks any
+                # code that does z.map(row => row.map(...)).
+                shape = obj.get("shape")
+                if shape:
+                    dims = [int(d) for d in str(shape).split(",") if d.strip()]
+                    if len(dims) > 1:
+                        flat = flat.reshape(dims)
+                return flat.tolist()
+            except Exception:
+                return obj
+        return {k: _expand_plotly_bdata(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_plotly_bdata(v) for v in obj]
+    return obj
+
+
+def _figure_json(fig) -> Optional[Dict[str, Any]]:
+    """
+    Convert a Plotly go.Figure into a plain JSON-safe dict for the
+    PlotlyChart React component. Goes through fig.to_json() (Plotly's own
+    encoder) rather than fig.to_dict(), since traces built directly from
+    numpy arrays (as the eval_engine plot_* functions do) aren't otherwise
+    serializable by FastAPI's default JSON encoder — then expands any
+    compact typed-array encoding back to plain arrays (see
+    _expand_plotly_bdata) so the frontend can actually render it.
+    """
+    if fig is None:
+        return None
+    try:
+        return _expand_plotly_bdata(json.loads(fig.to_json()))
+    except Exception:
+        return None
+
+
+def _build_evaluation_data(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: Optional[np.ndarray],
+    task_type: str,
+    threshold: float,
+    dates: Optional[pd.Series] = None,
+    date_columns: Optional[List[str]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Shared by /models/train and /models/evaluate: computes the metric suite
+    (with KS statistic + Brier score for binary tasks) and builds the full
+    evaluation_data payload the Evaluation page's charts read from — Plotly
+    figure JSON per tab (ROC/PR/confusion/threshold/score-distribution/lift),
+    the heteroscedasticity residual check, and the temporal-stability bundle
+    (Monthly/Quarterly/Yearly actual-vs-predicted) when an origination date
+    is available. Returns (metrics, evaluation_data).
+    """
+    if task_type == "binary":
+        metrics = compute_binary_metrics(y_true, y_pred, y_proba, threshold=threshold)
+        hetero_input = y_proba if y_proba is not None else y_pred
+        roc_curve_pts = compute_roc_curve(y_true, y_proba) if y_proba is not None else []
+        pr_curve_pts = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
+        threshold_pts = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
+        score_dist_pts = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
+        gain_chart_pts = compute_gain_chart(y_true, y_proba) if y_proba is not None else []
+        lift_chart_pts = compute_lift_chart(y_true, y_proba) if y_proba is not None else []
+    else:
+        metrics = compute_regression_metrics(y_true, y_pred)
+        hetero_input = y_pred
+        roc_curve_pts = pr_curve_pts = threshold_pts = score_dist_pts = gain_chart_pts = lift_chart_pts = []
+
+    hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
+
+    roc_fig = pr_fig = threshold_fig = score_dist_fig = lift_fig = confusion_fig = None
+    if task_type == "binary" and y_proba is not None:
+        try:
+            roc_fig = _figure_json(plot_roc_curve(y_true, y_proba))
+            pr_fig = _figure_json(plot_pr_curve(y_true, y_proba))
+            threshold_fig = _figure_json(plot_threshold_analysis(y_true, y_proba))
+            score_dist_fig = _figure_json(plot_score_distribution(np.asarray(y_true).astype(int), y_proba))
+            lift_fig = _figure_json(plot_lift_chart(y_true, y_proba))
+        except Exception:
+            pass
+    if task_type == "binary" and metrics.get("confusion_matrix"):
+        try:
+            confusion_fig = _figure_json(
+                plot_confusion_matrix(metrics["confusion_matrix"], labels=["Non-Default (0)", "Default (1)"])
+            )
+        except Exception:
+            confusion_fig = None
+
+    temporal_analysis = None
+    if task_type == "binary" and y_proba is not None and dates is not None:
+        try:
+            temporal_analysis = compute_temporal_analysis_bundle(
+                dates, y_true, y_proba, date_columns=date_columns or [],
+            )
+        except Exception:
+            temporal_analysis = None
+
+    evaluation_data = {
+        "metrics": metrics,
+        "heteroscedasticity_check": hetero_check,
+        "threshold": threshold,
+        "task_type": task_type,
+        "roc_curve": roc_curve_pts,
+        "pr_curve": pr_curve_pts,
+        "threshold_analysis": threshold_pts,
+        "score_distribution": score_dist_pts,
+        "gain_chart": gain_chart_pts,
+        "lift_chart": lift_chart_pts,
+        "roc_curve_figure": roc_fig,
+        "pr_curve_figure": pr_fig,
+        "confusion_matrix_figure": confusion_fig,
+        "threshold_analysis_figure": threshold_fig,
+        "score_distribution_figure": score_dist_fig,
+        "lift_chart_figure": lift_fig,
+        "temporal_analysis": temporal_analysis,
+    }
+    return metrics, evaluation_data
+
+
 @app.post("/data/preprocess")
 async def preprocess_data(
     file: Optional[UploadFile] = File(None),
@@ -864,6 +1053,12 @@ async def preprocess_data(
     test_size: float = Form(0.15),
     val_size: float = Form(0.15),
     random_seed: int = Form(42),
+    # ── Confirmed reviewer choices (all optional; sensible "accept the
+    #    platform's proposal" defaults apply when omitted) ──
+    treatment_overrides: Optional[str] = Form(None),  # JSON {col: treatment}
+    drop_cols: Optional[str] = Form(None),             # JSON [col, ...]
+    transform_choices: Optional[str] = Form(None),     # JSON {col: "none"|"log1p"|"yeo_johnson"}
+    strategy_override: Optional[str] = Form(None),     # "mice" | "knn" | "median"
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     col_types = detect_column_types(df)
@@ -879,17 +1074,117 @@ async def preprocess_data(
     if test_size + val_size >= 1:
         raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
 
+    def _parse_json_form(raw: Optional[str], default):
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {exc}")
+
+    _treatment_overrides: Dict[str, str] = _parse_json_form(treatment_overrides, {})
+    _drop_cols: List[str] = _parse_json_form(drop_cols, [])
+    _transform_choices: Dict[str, str] = _parse_json_form(transform_choices, {})
+
     task_type = detect_task_type(df[target_col])
     X, y, clean_info = finalize_xy(df, col_types, target_col)
 
-    # Preserve original preprocessing reporting semantics:
-    # build the preprocessing strategy on the full cleaned dataset before splitting.
-    prep_report = build_preprocessing_report(X.assign(**{target_col: y}), col_types, target_col)
-
+    # Split FIRST — every statistic learned below (missing-value treatment
+    # proposal, imputation strategy, skew/transform recommendations, the
+    # fitted preprocessor) comes from the TRAINING split only. This matches
+    # /models/train and the Streamlit reference app's leakage-safe design;
+    # the previous version of this endpoint built its report from the full
+    # pre-split dataset, which this fixes.
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(
         X, y, test_size=test_size, val_size=val_size,
         task_type=task_type, random_state=random_seed,
     )
+
+    # ── Phase 1: PROPOSE — classify_missing_treatment() on TRAIN only.
+    #    Nothing is applied yet; this is purely diagnostic. ──
+    missing_treatment_proposal = classify_missing_treatment(X_train, col_types)
+
+    # ── Phase 2: resolve the CONFIRMED treatment per column ──
+    # A column resolved to "review_flag" (>40% missing) that the reviewer
+    # chose to KEEP (not in drop_cols) can't stay "review_flag" — that
+    # treatment means "leave untouched", so it needs a real, recalibrated
+    # treatment instead. See classify_missing_treatment's force_include_cols
+    # docstring.
+    treatment_map: Dict[str, Dict[str, Any]] = {}
+    recalibrated_cols: List[Dict[str, str]] = []
+    for col, info in missing_treatment_proposal.items():
+        if col in _drop_cols:
+            continue
+        resolved_treatment = _treatment_overrides.get(col, info["treatment"])
+
+        if resolved_treatment == "review_flag":
+            recalibrated = classify_missing_treatment(
+                X_train[[col]], col_types, force_include_cols=[col]
+            )
+            if col in recalibrated:
+                treatment_map[col] = {
+                    **recalibrated[col],
+                    "reason": (
+                        f"Recalibrated — kept despite "
+                        f"{info['evidence'].get('missing_pct', 0):.1%} missing (over the "
+                        f"{int(REVIEW_MISSING_THRESHOLD * 100)}% review threshold). "
+                        f"{recalibrated[col]['reason']}"
+                    ),
+                }
+                recalibrated_cols.append({"column": col, "treatment": treatment_map[col]["treatment"]})
+                continue
+            treatment_map[col] = {
+                "treatment": "statistical", "reason": info["reason"], "evidence": info["evidence"],
+            }
+            continue
+
+        if col in _treatment_overrides:
+            treatment_map[col] = {
+                "treatment": resolved_treatment,
+                "reason": f"Manually overridden by reviewer (platform proposed: {info['treatment']}).",
+                "evidence": info["evidence"],
+            }
+        else:
+            treatment_map[col] = info
+
+    # ── Phase 3: joint imputation strategy for the "statistical" block ──
+    statistical_cols = [c for c, v in treatment_map.items() if v["treatment"] == "statistical"]
+    imputation_strategy = select_imputation_strategy(X_train, statistical_cols)
+    if strategy_override in ("mice", "knn", "median") and statistical_cols:
+        imputation_strategy = {
+            "method": strategy_override,
+            "reason": (
+                f"Manually overridden by reviewer "
+                f"(platform proposed: {imputation_strategy['method']})."
+            ),
+            "diagnostics": imputation_strategy.get("diagnostics", {}),
+        }
+
+    # ── Phase 4: fit SemanticImputer on TRAIN only, apply unchanged to val/test ──
+    col_types_for_fit = {k: [c for c in v if c not in _drop_cols] for k, v in col_types.items()}
+    imputer = SemanticImputer(
+        col_types=col_types_for_fit, treatment_map=treatment_map, strategy_choice=imputation_strategy,
+    )
+    imputer.fit(X_train)
+    X_train = imputer.transform(X_train)
+    X_val = imputer.transform(X_val)
+    X_test = imputer.transform(X_test)
+
+    _drop_cols_present = [c for c in _drop_cols if c in X_train.columns]
+    if _drop_cols_present:
+        X_train = X_train.drop(columns=_drop_cols_present)
+        X_val = X_val.drop(columns=[c for c in _drop_cols_present if c in X_val.columns], errors="ignore")
+        X_test = X_test.drop(columns=[c for c in _drop_cols_present if c in X_test.columns], errors="ignore")
+
+    # ── Phase 5: preprocessing report (scaler/encoder strategy + skew/transform
+    #    recommendations) on the now-imputed TRAIN split. transform_choices is
+    #    what actually drives the fitted ColumnTransformer below — nothing
+    #    here auto-applies a log/Yeo-Johnson transform on its own. ──
+    prep_report = build_preprocessing_report(
+        X_train.assign(**{target_col: y_train}), col_types, target_col,
+        transform_choices=_transform_choices,
+    )
+
     preprocessor = rebuild_preprocessor_for(X_train, col_types, target_col, prep_report)
     preprocessor.fit(X_train)
     processed_matrix = preprocessor.transform(X_train)
@@ -897,36 +1192,43 @@ async def preprocess_data(
     processed_df = pd.DataFrame(processed_matrix, columns=processed_feature_names)
     processed_df[target_col] = y_train.reset_index(drop=True)
 
-    def _summary_row(column: str, feature_type: str, scaler: str, imputer: str, encoding: str, outlier_strategy: str):
+    def _summary_row(column: str, feature_type: str, scaler: str, imputer_label: str, encoding: str, outlier_strategy: str, transform: str):
         return {
             "feature": column,
             "type": feature_type,
             "scaler": scaler,
-            "imputer": imputer,
+            "imputer": imputer_label,
             "encoding": encoding,
             "outlier_strategy": outlier_strategy,
+            "transform": transform,
         }
 
     strategy_summary = []
     for col, info in prep_report.get("numeric", {}).items():
         scaler = "Robust" if info.get("scaler") == "robust" else "Standard"
-        imputer = info.get("imputer", "mean").capitalize()
+        imputer_label = info.get("imputer", "mean").capitalize()
         encoding = "-"
         outlier_strategy = "Robust scaling" if info.get("has_outliers") else "Standard scaling"
-        strategy_summary.append(_summary_row(col, "Numeric", scaler, imputer, encoding, outlier_strategy))
+        confirmed_t = _transform_choices.get(col, "none")
+        rec_t = (info.get("transform_recommendation") or {}).get("transform", "none")
+        transform_label = (
+            f"{confirmed_t.replace('_', '-').title()} (confirmed)" if confirmed_t in ("log1p", "yeo_johnson")
+            else (f"Suggested: {rec_t.replace('_', '-').title()}" if rec_t in ("log1p", "yeo_johnson") else "-")
+        )
+        strategy_summary.append(_summary_row(col, "Numeric", scaler, imputer_label, encoding, outlier_strategy, transform_label))
 
     for col, info in prep_report.get("categorical", {}).items():
         scaler = "-"
-        imputer = "Mode" if info.get("missing_pct", 0) >= 0 else "Mode"
+        imputer_label = "Mode"
         encoding = "OneHot" if info.get("encoding") == "onehot" else "Ordinal"
         outlier_strategy = "-"
-        strategy_summary.append(_summary_row(col, "Categorical", scaler, imputer, encoding, outlier_strategy))
+        strategy_summary.append(_summary_row(col, "Categorical", scaler, imputer_label, encoding, outlier_strategy, "-"))
 
     for col in prep_report.get("boolean", {}):
-        strategy_summary.append(_summary_row(col, "Boolean", "-", "-", "-", "-"))
+        strategy_summary.append(_summary_row(col, "Boolean", "-", "-", "-", "-", "-"))
 
     for col in prep_report.get("datetime", {}):
-        strategy_summary.append(_summary_row(col, "Datetime", "-", "-", "-", "-"))
+        strategy_summary.append(_summary_row(col, "Datetime", "-", "-", "-", "-", "-"))
 
     feature_names = list(X_train.columns)
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
@@ -972,7 +1274,81 @@ async def preprocess_data(
         "preprocessing_report": prep_report,
         "preprocessing_strategy_summary": strategy_summary,
         "processed_dataset_csv": processed_df.to_csv(index=False),
+        # ── New: the interactive missing-value + transform workflow ──
+        "missing_treatment_proposal": _json_safe(missing_treatment_proposal),
+        "applied_treatment_map": _json_safe(treatment_map),
+        "imputation_strategy": _json_safe(imputation_strategy),
+        "recalibrated_columns": recalibrated_cols,
+        "dropped_columns": _drop_cols_present,
+        "transform_recommendations": _json_safe(prep_report.get("transform_recommendations", {})),
+        "applied_transform_choices": _transform_choices,
+        "missing_value_limitation_note": MISSING_VALUE_LIMITATION_NOTE,
+        "review_missing_threshold": REVIEW_MISSING_THRESHOLD,
+        "original_dataset_csv": df.to_csv(index=False),
     }
+
+
+@app.post("/data/drop-impact")
+async def drop_impact(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    synthetic_samples: Optional[int] = Form(None),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    columns: str = Form(...),  # JSON list of column names to analyze
+) -> Dict[str, Any]:
+    """
+    On-demand "impact of dropping this feature" analysis for one or more
+    sparse (review_flag) columns — called lazily by the frontend when a
+    reviewer expands a column's impact panel, not on every /data/preprocess
+    call, since it re-derives the correlation matrix per requested column.
+
+    Re-derives the SAME train split /data/preprocess uses (same file, target,
+    split config) so the estimate is computed on training data only — no
+    leakage from validation/test. Returns a lightweight, standalone estimate
+    (predictive importance via a quick IV, redundancy via correlation with
+    other numeric features) — NOT the authoritative IV/WOE from
+    /data/feature-engineering, which runs later on cleaned/engineered data.
+    See preprocessing_new.estimate_drop_impact() for the full explanation.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    col_types = detect_column_types(df)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    test_size = float(test_size)
+    val_size = float(val_size)
+    if not 0 < test_size < 1:
+        raise HTTPException(status_code=400, detail="test_size must be between 0 and 1")
+    if not 0 < val_size < 1:
+        raise HTTPException(status_code=400, detail="val_size must be between 0 and 1")
+    if test_size + val_size >= 1:
+        raise HTTPException(status_code=400, detail="test_size + val_size must be less than 1")
+
+    try:
+        requested_cols: List[str] = json.loads(columns) if columns else []
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in 'columns': {exc}")
+    if not isinstance(requested_cols, list) or not requested_cols:
+        raise HTTPException(status_code=400, detail="'columns' must be a non-empty JSON list of column names")
+
+    task_type = detect_task_type(df[target_col])
+    X, y, _clean_info = finalize_xy(df, col_types, target_col)
+    X_train, _X_val, _X_test, y_train, _y_val, _y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    results: Dict[str, Any] = {}
+    for col in requested_cols:
+        if col not in X_train.columns:
+            results[col] = {"error": f"Column '{col}' not found in the training features."}
+            continue
+        results[col] = estimate_drop_impact(col, X_train, y_train, col_types)
+
+    return {"drop_impact": _json_safe(results)}
 
 
 @app.post("/data/feature-engineering")
@@ -989,7 +1365,24 @@ async def feature_engineering(
     ead_term_col: Optional[str] = Form(None),
     ead_years_months: Optional[str] = Form(None),
     ead_term_months: Optional[str] = Form(None),
+    model_family: str = Form("linear"),
+    transform_choices: Optional[str] = Form(None),
+    confirmed_remove_cols: Optional[str] = Form(None),
+    woe_pending_drop: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
+    try:
+        transform_choices_dict = json.loads(transform_choices) if transform_choices else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"transform_choices must be valid JSON: {exc}")
+    try:
+        confirmed_remove_cols_list = json.loads(confirmed_remove_cols) if confirmed_remove_cols else None
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"confirmed_remove_cols must be valid JSON: {exc}")
+    try:
+        woe_pending_drop_list = json.loads(woe_pending_drop) if woe_pending_drop else []
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"woe_pending_drop must be valid JSON: {exc}")
+
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     col_types = detect_column_types(df)
     if target_col not in df.columns:
@@ -1000,7 +1393,12 @@ async def feature_engineering(
         X, y, test_size=0.15, val_size=0.15,
         task_type=task_type, random_state=42,
     )
-    plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+    plan = analyze_for_feature_engineering(
+        X_train, y_train, col_types, task_type, model_family, transform_choices_dict,
+    )
+    if confirmed_remove_cols_list is not None:
+        plan["confirmed_remove_cols"] = confirmed_remove_cols_list
+    plan["woe_pending_drop"] = woe_pending_drop_list
     X_engineered, fe_summary = apply_feature_engineering(X_train, plan)
     numeric_cols = [c for c in col_types.get("numeric", []) if c in X_train.columns]
     gini_scores = compute_univariate_gini(X_train, y_train, numeric_cols) if task_type == "binary" else {}
@@ -1015,6 +1413,15 @@ async def feature_engineering(
         ye_months=str(ead_years_months).lower() in {"true", "1", "yes"},
         tm_months=str(ead_term_months).lower() in {"true", "1", "yes"},
     )
+    # resolve_ead_configuration() includes a raw pandas Series under "series"
+    # for callers that do further pandas math with it (e.g. the Streamlit
+    # app's ECL workflow). This API only ever returns "summary" (mean/median/
+    # min/max) to the frontend — features.tsx's ead_configuration type doesn't
+    # even declare a "series" field — so drop it here rather than at the
+    # source, to avoid changing resolve_ead_configuration's contract for other
+    # callers. Left in, it makes FastAPI/Pydantic response serialization
+    # crash with "Unable to serialize unknown type: <class 'pandas.Series'>".
+    ead_configuration = {k: v for k, v in ead_configuration.items() if k != "series"}
     engineered_feature_names = list(X_engineered.columns.astype(str))
     dropped_features = [col for col in fe_summary.get("removed", []) if col in X_train.columns]
     selected_features = engineered_feature_names
@@ -1059,6 +1466,81 @@ async def feature_engineering(
         "gini_scores": gini_scores,
         "ead_configuration": ead_configuration,
         "available_numeric_columns": [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])],
+        "interaction_features": plan.get("interaction_features", []),
+        "interaction_scores": plan.get("interaction_scores", {}),
+        "feature_scores": plan.get("feature_scores", {}),
+        "transform_recommendations": plan.get("transform_recommendations", {}),
+    }
+
+
+@app.post("/data/macro/date-columns")
+async def macro_date_columns(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    synthetic_samples: Optional[int] = Form(None),
+) -> Dict[str, Any]:
+    """
+    List the columns in the dataset usable for point-in-time FRED macro
+    alignment (real dates only, origination-pattern matches first), plus the
+    best-effort auto-detected default. Mirrors the old Streamlit app's date
+    dropdown (see fred_client.list_date_columns_for_macro/detect_macro_date_col) —
+    default/charge-off-dated columns are never auto-selected, even as a fallback.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    candidates = fred_client.list_date_columns_for_macro(df)
+    return {
+        "candidates": [{"column": c, "is_preferred": pref} for c, pref in candidates],
+        "default_date_col": fred_client.detect_macro_date_col(df),
+    }
+
+
+@app.post("/data/macro/fetch")
+async def macro_fetch(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    synthetic_samples: Optional[int] = Form(None),
+    date_col: str = Form(...),
+) -> Dict[str, Any]:
+    """
+    Fetch FRED macro features (GDP, unemployment, Fed funds rate) aligned to
+    the calendar month of `date_col` and attach them to the dataset — same
+    semantics as the old app's "Fetch FRED macro features" button. Returns the
+    augmented dataset as CSV text so the frontend can carry it forward as
+    `csv_text` into /data/preprocess and /data/feature-engineering, plus the
+    new macro column names for display.
+
+    The FRED API key is read from the FRED_API_KEY environment variable —
+    never hardcoded (the old app had a live key committed in source; this
+    endpoint deliberately does not repeat that).
+    """
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="FRED_API_KEY environment variable is not set on the server.",
+        )
+
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    if date_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Date column '{date_col}' not found")
+
+    try:
+        client = fred_client.FREDClient(api_key=api_key, cache_dir=".fred_cache")
+        df_with_macro, macro_cols = fred_client.attach_macro_features(
+            df, fred_client=client, date_col=date_col,
+        )
+    except fred_client.FREDError as exc:
+        raise HTTPException(status_code=502, detail=f"FRED fetch failed: {exc}")
+
+    if not macro_cols:
+        raise HTTPException(status_code=400, detail="No macro columns were attached — check the date column.")
+
+    return {
+        "macro_columns": macro_cols,
+        "date_col_used": date_col,
+        "csv_with_macro": df_with_macro.to_csv(index=False),
+        "preview": _serialize_dataframe(df_with_macro, max_rows=5)["preview"],
+        "shape": list(df_with_macro.shape),
     }
 
 
@@ -1143,6 +1625,8 @@ async def train_model_endpoint(
     manual_params: Optional[str] = Form(None),
     use_feature_engineering: bool = Form(False),
     synthetic_samples: Optional[int] = Form(None),
+    use_oot: bool = Form(False),
+    date_col: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
@@ -1154,6 +1638,29 @@ async def train_model_endpoint(
         X, y, test_size=test_size, val_size=val_size,
         task_type=task_type, random_state=random_seed,
     )
+
+    # ── Origination/observation date for Out-of-Time (OOT) validation ──
+    # Use the reviewer-selected date column if provided and valid, otherwise
+    # fall back to the first auto-detected datetime column (same detection
+    # `detect_column_types` already exposes via the data-profile endpoint).
+    origination_date_col = date_col if (date_col and date_col in df.columns) else None
+    if origination_date_col is None:
+        datetime_candidates = col_types.get("datetime", [])
+        if datetime_candidates:
+            origination_date_col = datetime_candidates[0]
+
+    dates_train = None
+    if origination_date_col and origination_date_col in df.columns:
+        try:
+            dates_train = df.loc[X_train.index, origination_date_col]
+        except Exception:
+            dates_train = None
+    dates_test = None
+    if origination_date_col and origination_date_col in df.columns:
+        try:
+            dates_test = df.loc[X_test.index, origination_date_col]
+        except Exception:
+            dates_test = None
     prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
     fe_summary = None
     plan = None
@@ -1196,6 +1703,9 @@ async def train_model_endpoint(
         use_hyperopt=use_hyperopt,
         param_grid=param_grid,
         task_type=task_type,
+        model_name=model_name,
+        dates_train=dates_train,
+        use_oot=use_oot,
     )
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
 
@@ -1208,68 +1718,10 @@ async def train_model_endpoint(
         except Exception:
             y_proba = None
 
-    if task_type == "binary":
-        metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
-        hetero_input = y_proba if y_proba is not None else y_pred
-        roc_curve = compute_roc_curve(y_test.values, y_proba) if y_proba is not None else []
-        pr_curve = compute_pr_curve(y_test.values, y_proba) if y_proba is not None else []
-        threshold_analysis = compute_threshold_analysis(y_test.values, y_proba) if y_proba is not None else []
-        score_distribution = compute_score_distribution(y_test.values, y_proba) if y_proba is not None else []
-        score_distribution_points = [
-            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
-            for score, target in zip(_to_scores(y_proba), y_test.values)
-        ] if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_test.values, y_proba) if y_proba is not None else []
-        lift_chart = compute_lift_chart(y_test.values, y_proba) if y_proba is not None else []
-        positive_rate = float(np.mean(y_test.values))
-        roc_curve_figure = plot_roc_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
-        pr_curve_figure = plot_pr_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
-        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
-        threshold_analysis_figure = plot_threshold_analysis(y_test.values, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
-        score_distribution_figure = plot_score_distribution(y_test.values, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
-        lift_chart_figure = plot_lift_chart(y_test.values, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
-    else:
-        metrics = compute_regression_metrics(y_test.values, y_pred)
-        hetero_input = y_pred
-        roc_curve = []
-        pr_curve = []
-        threshold_analysis = []
-        score_distribution = []
-        score_distribution_points = []
-        gain_chart = []
-        lift_chart = []
-        positive_rate = None
-        roc_curve_figure = None
-        pr_curve_figure = None
-        confusion_matrix_figure = None
-        threshold_analysis_figure = None
-        score_distribution_figure = None
-        lift_chart_figure = None
-
-    hetero_check = compute_heteroscedasticity_check(y_test.values, hetero_input, task_type=task_type)
-    df_test = df.loc[X_test.index] if hasattr(X_test, "index") else df
-    temporal_analysis = _build_temporal_analysis(df_test, y_test.values, y_proba if y_proba is not None else y_pred)
-    evaluation_data = {
-        "metrics": metrics,
-        "heteroscedasticity_check": hetero_check,
-        "threshold": 0.5,
-        "task_type": task_type,
-        "roc_curve": roc_curve,
-        "pr_curve": pr_curve,
-        "threshold_analysis": threshold_analysis,
-        "score_distribution": score_distribution,
-        "score_distribution_points": score_distribution_points,
-        "positive_rate": positive_rate,
-        "gain_chart": gain_chart,
-        "lift_chart": lift_chart,
-        "roc_curve_figure": roc_curve_figure,
-        "pr_curve_figure": pr_curve_figure,
-        "confusion_matrix_figure": confusion_matrix_figure,
-        "threshold_analysis_figure": threshold_analysis_figure,
-        "score_distribution_figure": score_distribution_figure,
-        "lift_chart_figure": lift_chart_figure,
-        "temporal_analysis": temporal_analysis,
-    }
+    metrics, evaluation_data = _build_evaluation_data(
+        y_test.values, y_pred, y_proba, task_type, threshold=0.5,
+        dates=dates_test, date_columns=[origination_date_col] if origination_date_col else [],
+    )
 
     return {
         "task_type": task_type,
@@ -1287,6 +1739,8 @@ async def train_model_endpoint(
             "scale_pos_weight": scale_pos_weight,
             "use_feature_engineering": use_feature_engineering,
             "manual_params": manual_params_dict or {},
+            "use_oot": use_oot,
+            "date_col": origination_date_col,
         },
         "training_info": training_info,
         "split_stats": split_stats,
@@ -1294,6 +1748,116 @@ async def train_model_endpoint(
         "evaluation_metrics": metrics,
         "evaluation_data": evaluation_data,
         "model_artifact": _to_base64(pipeline),
+    }
+
+
+def _lighten_for_comparison(model, model_name: str, max_estimators: int = 100):
+    """
+    Reduce ensemble size for comparison-only runs so each candidate trains
+    fast. Comparison is meant to give a directional read on which model is
+    worth committing to — not a final number — so trading a bit of accuracy
+    for speed here is the right call. Full-fidelity numbers come from the
+    dedicated /models/train run once the user picks a model.
+    """
+    if hasattr(model, "n_estimators") and getattr(model, "n_estimators", None):
+        try:
+            if model.n_estimators > max_estimators:
+                model.set_params(n_estimators=max_estimators)
+        except Exception:
+            pass
+    return model
+
+
+@app.post("/models/compare")
+async def compare_models_endpoint(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    model_names: str = Form(...),  # JSON-encoded list of model names
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    use_feature_engineering: bool = Form(False),
+    synthetic_samples: Optional[int] = Form(None),
+) -> Dict[str, Any]:
+    """
+    Lightweight, fast comparison across candidate models on the SAME split.
+
+    Deliberately skips everything that makes /models/train slow when run
+    N times: no cross-validation, no hyperparameter search, no OOT, no
+    ROC/PR/threshold/gain-chart curves, and no base64 model-artifact
+    serialization. Just fit -> predict -> summary metrics per model, so a
+    reviewer can quickly see which model is worth committing to before
+    running the full, config-rich /models/train on that one model.
+    """
+    try:
+        names = json.loads(model_names)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"model_names must be a JSON array: {exc}")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="model_names must be a non-empty list")
+
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    col_types = detect_column_types(df)
+    task_type = detect_task_type(df[target_col])
+    X, y, _ = finalize_xy(df, col_types, target_col)
+    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+        X, y, test_size=test_size, val_size=val_size,
+        task_type=task_type, random_state=random_seed,
+    )
+
+    prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
+    fe_summary = None
+    if use_feature_engineering:
+        plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+        X_train, fe_summary = apply_feature_engineering(X_train, plan)
+        X_test, _ = apply_feature_engineering(X_test, plan)
+
+    results = []
+    for name in names:
+        try:
+            model = get_model_instance(name, task_type)
+            model = _lighten_for_comparison(model, name)
+            pipeline, training_info, _ = train_model(
+                X_train, y_train,
+                col_types=col_types,
+                target_col=target_col,
+                prep_report=prep_report,
+                model=model,
+                use_cv=False,
+                use_hyperopt=False,
+                task_type=task_type,
+                model_name=name,
+                use_oot=False,
+            )
+            y_pred = pipeline.predict(X_test)
+            y_proba = None
+            if hasattr(pipeline, "predict_proba"):
+                try:
+                    y_proba = pipeline.predict_proba(X_test)
+                except Exception:
+                    y_proba = None
+
+            if task_type == "binary":
+                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
+            else:
+                metrics = compute_regression_metrics(y_test.values, y_pred)
+
+            results.append({
+                "model_name": name,
+                **metrics,
+                "training_time_s": training_info.get("training_time_s"),
+            })
+        except Exception as e:
+            results.append({"model_name": name, "error": str(e)})
+
+    return {
+        "task_type": task_type,
+        "comparison": results,
+        "feature_engineering_summary": fe_summary,
     }
 
 
@@ -1305,6 +1869,7 @@ async def evaluate_model(
     target_col: str = Form(...),
     threshold: float = Form(0.5),
     synthetic_samples: Optional[int] = Form(None),
+    date_col: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
@@ -1320,93 +1885,27 @@ async def evaluate_model(
         except Exception:
             y_proba = None
     task_type = detect_task_type(df[target_col])
-    if task_type == "binary":
-        metrics = compute_binary_metrics(y_true, y_pred, y_proba, threshold=threshold)
-        hetero_input = y_proba if y_proba is not None else y_pred
-        roc_curve = compute_roc_curve(y_true, y_proba) if y_proba is not None else []
-        pr_curve = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
-        threshold_analysis = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
-        score_distribution = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
-        score_distribution_points = [
-            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
-            for score, target in zip(_to_scores(y_proba), y_true)
-        ] if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_true, y_proba) if y_proba is not None else []
-        lift_chart = compute_lift_chart(y_true, y_proba) if y_proba is not None else []
-        positive_rate = float(np.mean(y_true))
-        roc_curve_figure = plot_roc_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
-        pr_curve_figure = plot_pr_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
-        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
-        threshold_analysis_figure = plot_threshold_analysis(y_true, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
-        score_distribution_figure = plot_score_distribution(y_true, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
-        lift_chart_figure = plot_lift_chart(y_true, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
-    else:
-        metrics = compute_regression_metrics(y_true, y_pred)
-        hetero_input = y_pred
-        roc_curve = []
-        pr_curve = []
-        threshold_analysis = []
-        score_distribution = []
-        score_distribution_points = []
-        gain_chart = []
-        lift_chart = []
-        positive_rate = None
-        roc_curve_figure = None
-        pr_curve_figure = None
-        confusion_matrix_figure = None
-        threshold_analysis_figure = None
-        score_distribution_figure = None
-        lift_chart_figure = None
-        metrics = compute_regression_metrics(y_true, y_pred)
-        hetero_input = y_pred
-        roc_curve = []
-        pr_curve = []
-        threshold_analysis = []
-        score_distribution = []
-        score_distribution_points = []
-        gain_chart = []
-        lift_chart = []
-        positive_rate = None
-    hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
-    temporal_analysis = _build_temporal_analysis(df, y_true, y_proba if y_proba is not None else y_pred)
-    evaluation_data = {
-        "metrics": metrics,
-        "heteroscedasticity_check": hetero_check,
-        "threshold": threshold,
-        "task_type": task_type,
-        "roc_curve": roc_curve,
-        "pr_curve": pr_curve,
-        "threshold_analysis": threshold_analysis,
-        "score_distribution": score_distribution,
-        "score_distribution_points": score_distribution_points,
-        "positive_rate": positive_rate,
-        "gain_chart": gain_chart,
-        "lift_chart": lift_chart,
-        "roc_curve_figure": roc_curve_figure,
-        "pr_curve_figure": pr_curve_figure,
-        "confusion_matrix_figure": confusion_matrix_figure,
-        "threshold_analysis_figure": threshold_analysis_figure,
-        "score_distribution_figure": score_distribution_figure,
-        "lift_chart_figure": lift_chart_figure,
-        "temporal_analysis": temporal_analysis,
-    }
+    # Same origination-date resolution as /models/train: reviewer-selected
+    # column if valid, else the first auto-detected datetime column — used
+    # to power the Temporal tab's actual-vs-predicted-over-time analysis.
+    col_types = detect_column_types(df)
+    origination_date_col = date_col if (date_col and date_col in df.columns) else None
+    if origination_date_col is None:
+        datetime_candidates = col_types.get("datetime", [])
+        if datetime_candidates:
+            origination_date_col = datetime_candidates[0]
+    dates_eval = df[origination_date_col] if origination_date_col else None
 
-    # Return both the flat metrics and the nested evaluation_data to match the
-    # original Streamlit app's payload shape consumed by the React UI.
+    metrics, evaluation_data = _build_evaluation_data(
+        y_true, y_pred, y_proba, task_type, threshold=threshold,
+        dates=dates_eval, date_columns=[origination_date_col] if origination_date_col else [],
+    )
+
+    # Same response shape as /models/train so callers can treat both
+    # endpoints' evaluation payload identically.
     return {
         "evaluation_metrics": metrics,
         "evaluation_data": evaluation_data,
-        "metrics": metrics,
-        "heteroscedasticity_check": hetero_check,
-        "threshold": threshold,
-        "task_type": task_type,
-        "roc_curve": roc_curve,
-        "pr_curve": pr_curve,
-        "threshold_analysis": threshold_analysis,
-        "score_distribution": score_distribution,
-        "gain_chart": gain_chart,
-        "lift_chart": lift_chart,
-        "temporal_analysis": temporal_analysis,
     }
 
 
@@ -1419,21 +1918,55 @@ async def explain_model(
     max_shap_samples: int = Form(100),
     sample_idx: int = Form(0),
     synthetic_samples: Optional[int] = Form(None),
+    # ── Same fields /models/train already returns in training_config — needed
+    #    to deterministically re-derive the EXACT engineered test split the
+    #    model was fitted on. Without this, X came straight from the raw
+    #    upload, whose columns don't match what the fitted preprocessor
+    #    expects whenever use_feature_engineering was True at train time
+    #    (bin/WOE/interaction columns are missing) — this is what caused
+    #    "SHAP computation failed" for every model type, not just non-tree
+    #    ones. Mirrors the old Streamlit app's use of X_test_engineered. ──
+    use_feature_engineering: bool = Form(False),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    # ── Summary tab: same inputs generate_model_summary() takes in the old app ──
+    metrics: Optional[str] = Form(None),
+    task_type: Optional[str] = Form(None),
+    # Feature importance is cheap and shown immediately in the old UI; SHAP
+    # (especially KernelExplainer, nsamples=100) is not, and is only computed
+    # on an explicit "Compute SHAP Values" click there. Default True keeps
+    # existing callers working; the frontend passes False for the initial
+    # Feature-Importance-only load.
+    compute_shap: bool = Form(True),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col is not None and target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
     pipeline = _from_base64(model_artifact)
+
     if target_col is not None:
-        X = df.drop(columns=[target_col], errors='ignore')
+        col_types = detect_column_types(df)
+        resolved_task_type = task_type or detect_task_type(df[target_col])
+        X, y, _ = finalize_xy(df, col_types, target_col)
+        X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+            X, y, test_size=test_size, val_size=val_size,
+            task_type=resolved_task_type, random_state=random_seed,
+        )
+        if use_feature_engineering:
+            plan = analyze_for_feature_engineering(X_train, y_train, col_types, resolved_task_type)
+            X_test, _ = apply_feature_engineering(X_test, plan)
+        X_explain = X_test
     else:
-        X = df
+        X_explain = df
+
     importance_df = extract_feature_importance(pipeline)
     importance = []
     if importance_df is not None:
         importance = importance_df.to_dict(orient="records")
+
     shap_info: Dict[str, Any] = {"shap_available": False}
-    shap_result = compute_shap_values(pipeline, X, max_samples=max_shap_samples)
+    shap_result = compute_shap_values(pipeline, X_explain, max_samples=max_shap_samples) if compute_shap else None
     if shap_result is not None:
         explainer, shap_values, X_df, names = shap_result
         mean_abs = list(
@@ -1443,40 +1976,57 @@ async def explain_model(
             .to_dict(orient="records")
         )
         reasoning = None
-        sample_shap = []
-        sample_features = None
+        sample_shap: List[Dict[str, Any]] = []
+        sample_features: Dict[str, Any] = {}
         if 0 <= sample_idx < len(X_df):
             try:
-                model_proba = pipeline.predict_proba(X) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
+                model_proba = pipeline.predict_proba(X_explain) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
             except Exception:
                 model_proba = np.zeros((len(X_df), 2))
             reasoning = generate_prediction_reasoning(shap_values, X_df, model_proba, sample_idx, threshold=0.5)
-            row = X_df.iloc[sample_idx]
-            sample_features = row.to_dict()
             shap_row = shap_values[sample_idx]
-            sample_shap = (
-                pd.DataFrame({
-                    "Feature": X_df.columns.tolist(),
-                    "SHAP": shap_row,
-                    "Value": row.values,
-                })
-                .assign(AbsSHAP=lambda df: np.abs(df["SHAP"]))
-                .sort_values("AbsSHAP", ascending=False)
-                .head(12)
-                .sort_values("SHAP", ascending=True)
-                .to_dict(orient="records")
+            feat_row = X_df.iloc[sample_idx]
+            # Top 12 by |SHAP| magnitude, then re-sorted ascending by signed
+            # value — the explainability chart renders this list top-to-bottom
+            # as-is (no further sort/slice on the frontend), so ordering here
+            # is what determines the bar chart's reading order.
+            sample_shap = sorted(
+                sorted(
+                    (
+                        {
+                            "Feature": feat,
+                            "SHAP": _json_safe_scalar(shap_row[i]),
+                            "Value": _json_safe_scalar(feat_row.iloc[i]),
+                        }
+                        for i, feat in enumerate(X_df.columns)
+                    ),
+                    key=lambda r: abs(r["SHAP"]) if r["SHAP"] is not None else 0.0,
+                    reverse=True,
+                )[:12],
+                key=lambda r: r["SHAP"] if r["SHAP"] is not None else 0.0,
             )
+            sample_features = {feat: _json_safe_scalar(feat_row.iloc[i]) for i, feat in enumerate(X_df.columns)}
         shap_info = {
             "shap_available": True,
             "shap_mean_abs": mean_abs,
             "sample_idx": sample_idx,
             "sample_reasoning": reasoning,
-            "sample_features": sample_features,
             "sample_shap": sample_shap,
+            "sample_features": sample_features,
         }
+
+    summary_text = None
+    if metrics:
+        try:
+            metrics_dict = json.loads(metrics)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"metrics must be valid JSON: {exc}")
+        summary_text = generate_model_summary(metrics_dict, importance_df, task_type or "binary")
+
     return {
         "feature_importance": importance,
         "shap": shap_info,
+        "summary": summary_text,
     }
 
 
