@@ -213,8 +213,10 @@ def detect_task_type(series: pd.Series) -> str:
 
     nunique = clean.nunique()
 
-    # 2 unique values → always binary, regardless of dtype (covers int64 0/1 and float 0.0/1.0)
-    if nunique == 2:
+    # Binary classification is the default for 2-class targets. If the series
+    # is binary-like but only contains one observed class in the split, preserve
+    # binary semantics so evaluation can still run on the holdout slice.
+    if nunique <= 2 and set(clean.astype(int).unique()).issubset({0, 1}):
         return "binary"
 
     # Low-cardinality columns → multiclass only when values are integer-like;

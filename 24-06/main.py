@@ -62,7 +62,14 @@ except ImportError:
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid
 from train import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
-import evaluate as eval_engine
+# Prefer the source-of-truth evaluation helpers from the original Streamlit app
+_source_eval_path = SOURCE_OF_TRUTH_DIR / "evaluate.py"
+_source_eval_spec = importlib.util.spec_from_file_location("source_evaluate", _source_eval_path)
+if _source_eval_spec is None or _source_eval_spec.loader is None:
+    raise ImportError(f"Could not load source-of-truth evaluate from {_source_eval_path}")
+_source_eval = importlib.util.module_from_spec(_source_eval_spec)
+_source_eval_spec.loader.exec_module(_source_eval)
+eval_engine = _source_eval
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -80,6 +87,17 @@ compute_pr_curve = getattr(eval_engine, "compute_pr_curve", _legacy_eval.compute
 compute_threshold_analysis = getattr(eval_engine, "compute_threshold_analysis", _legacy_eval.compute_threshold_analysis)
 compute_score_distribution = getattr(eval_engine, "compute_score_distribution", _legacy_eval.compute_score_distribution)
 compute_gain_chart = getattr(eval_engine, "compute_gain_chart", _legacy_eval.compute_gain_chart)
+compute_lift_chart = getattr(eval_engine, "compute_lift_chart", _legacy_eval.compute_lift_chart)
+compute_temporal_stability_summary = getattr(
+    eval_engine, "compute_temporal_stability_summary", _legacy_eval.compute_temporal_stability_summary
+)
+_to_scores = getattr(eval_engine, "_to_scores", getattr(_legacy_eval, "_to_scores", None))
+plot_roc_curve = getattr(eval_engine, "plot_roc_curve", None)
+plot_pr_curve = getattr(eval_engine, "plot_pr_curve", None)
+plot_confusion_matrix = getattr(eval_engine, "plot_confusion_matrix", None)
+plot_score_distribution = getattr(eval_engine, "plot_score_distribution", None)
+plot_threshold_analysis = getattr(eval_engine, "plot_threshold_analysis", None)
+plot_lift_chart = getattr(eval_engine, "plot_lift_chart", None)
 from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
 )
@@ -95,26 +113,80 @@ ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
 
 app = FastAPI()
-from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://localhost:3000",
-        "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],  
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
     agent = ValidationAgent2()
-    return agent.run_all_checks(val_df if val_df is not None else pd.DataFrame(), intake_json or {}, mdd_text or "")
-    
+    # If no dataframe was provided (or it's empty), pass None so the
+    # ValidationAgent2 checks that expect `None` will short-circuit safely.
+    df_arg = val_df if (val_df is not None and getattr(val_df, "empty", False) is False) else None
+    return agent.run_all_checks(df_arg, intake_json or {}, mdd_text or "")
+
+
+def _detect_temporal_date_columns(df: pd.DataFrame) -> List[str]:
+    date_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    if date_cols:
+        return date_cols
+    for c in df.select_dtypes(include="object").columns:
+        try:
+            parsed = pd.to_datetime(df[c], errors="coerce")
+            if parsed.notna().mean() > 0.8:
+                date_cols.append(c)
+        except Exception:
+            continue
+    return date_cols
+
+
+def _build_temporal_analysis(df: pd.DataFrame, y_true: np.ndarray, y_proba: np.ndarray) -> Dict[str, Any]:
+    date_columns = _detect_temporal_date_columns(df)
+    if not date_columns:
+        return {
+            "date_columns": [],
+            "default_date_column": None,
+            "default_frequency": "Quarterly",
+            "frequency_options": ["Monthly", "Quarterly", "Half-Yearly", "Yearly"],
+            "summary": None,
+            "plot_data": [],
+        }
+
+    default_date_column = date_columns[0]
+    frequency_options = ["Monthly", "Quarterly", "Half-Yearly", "Yearly"]
+    freq_map = {
+        "Monthly": "ME",
+        "Quarterly": "QE",
+        "Half-Yearly": "6ME",
+        "Yearly": "YE",
+    }
+    plot_data_by_freq: Dict[str, Any] = {}
+    summaries: Dict[str, Any] = {}
+    for freq_name in frequency_options:
+        freq_key = freq_map[freq_name]
+        dates = df[default_date_column]
+        summary = compute_temporal_stability_summary(dates, y_true, y_proba, freq=freq_key)
+        plot_data = []
+        for row in summary.get("by_period", []):
+            plot_data.append({
+                "period": row["period"],
+                "actual_rate": row["actual_rate"],
+                "predicted_rate": row["predicted_rate"],
+                "gap": row["gap"],
+                "flagged": row["flagged"],
+            })
+        plot_data_by_freq[freq_name] = plot_data
+        summaries[freq_name] = summary
+    return {
+        "date_columns": date_columns,
+        "default_date_column": default_date_column,
+        "default_frequency": "Quarterly",
+        "frequency_options": frequency_options,
+        "summary": summaries.get("Quarterly"),
+        "plot_data": plot_data_by_freq.get("Quarterly", []),
+        "plot_data_by_freq": plot_data_by_freq,
+        "summaries_by_freq": summaries,
+    }
+
+
 def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
     demo_mode = "flawed" if mode.lower() == "flawed" else "clean"
     if demo_mode == "flawed":
@@ -271,9 +343,20 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
         },
     }
 
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        # Vite dev server default (if port changed during dev)
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1132,7 +1215,19 @@ async def train_model_endpoint(
         pr_curve = compute_pr_curve(y_test.values, y_proba) if y_proba is not None else []
         threshold_analysis = compute_threshold_analysis(y_test.values, y_proba) if y_proba is not None else []
         score_distribution = compute_score_distribution(y_test.values, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_test.values, y_proba)
+        score_distribution_points = [
+            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
+            for score, target in zip(_to_scores(y_proba), y_test.values)
+        ] if y_proba is not None else []
+        gain_chart = compute_gain_chart(y_test.values, y_proba) if y_proba is not None else []
+        lift_chart = compute_lift_chart(y_test.values, y_proba) if y_proba is not None else []
+        positive_rate = float(np.mean(y_test.values))
+        roc_curve_figure = plot_roc_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
+        pr_curve_figure = plot_pr_curve(y_test.values, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
+        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
+        threshold_analysis_figure = plot_threshold_analysis(y_test.values, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
+        score_distribution_figure = plot_score_distribution(y_test.values, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
+        lift_chart_figure = plot_lift_chart(y_test.values, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
     else:
         metrics = compute_regression_metrics(y_test.values, y_pred)
         hetero_input = y_pred
@@ -1140,9 +1235,20 @@ async def train_model_endpoint(
         pr_curve = []
         threshold_analysis = []
         score_distribution = []
+        score_distribution_points = []
         gain_chart = []
+        lift_chart = []
+        positive_rate = None
+        roc_curve_figure = None
+        pr_curve_figure = None
+        confusion_matrix_figure = None
+        threshold_analysis_figure = None
+        score_distribution_figure = None
+        lift_chart_figure = None
 
     hetero_check = compute_heteroscedasticity_check(y_test.values, hetero_input, task_type=task_type)
+    df_test = df.loc[X_test.index] if hasattr(X_test, "index") else df
+    temporal_analysis = _build_temporal_analysis(df_test, y_test.values, y_proba if y_proba is not None else y_pred)
     evaluation_data = {
         "metrics": metrics,
         "heteroscedasticity_check": hetero_check,
@@ -1152,7 +1258,17 @@ async def train_model_endpoint(
         "pr_curve": pr_curve,
         "threshold_analysis": threshold_analysis,
         "score_distribution": score_distribution,
+        "score_distribution_points": score_distribution_points,
+        "positive_rate": positive_rate,
         "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "roc_curve_figure": roc_curve_figure,
+        "pr_curve_figure": pr_curve_figure,
+        "confusion_matrix_figure": confusion_matrix_figure,
+        "threshold_analysis_figure": threshold_analysis_figure,
+        "score_distribution_figure": score_distribution_figure,
+        "lift_chart_figure": lift_chart_figure,
+        "temporal_analysis": temporal_analysis,
     }
 
     return {
@@ -1211,7 +1327,19 @@ async def evaluate_model(
         pr_curve = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
         threshold_analysis = compute_threshold_analysis(y_true, y_proba) if y_proba is not None else []
         score_distribution = compute_score_distribution(y_true, y_proba) if y_proba is not None else []
-        gain_chart = compute_gain_chart(y_true, y_proba)
+        score_distribution_points = [
+            {"prob": float(score), "label": "Default" if int(target) == 1 else "Non-Default"}
+            for score, target in zip(_to_scores(y_proba), y_true)
+        ] if y_proba is not None else []
+        gain_chart = compute_gain_chart(y_true, y_proba) if y_proba is not None else []
+        lift_chart = compute_lift_chart(y_true, y_proba) if y_proba is not None else []
+        positive_rate = float(np.mean(y_true))
+        roc_curve_figure = plot_roc_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_roc_curve else None
+        pr_curve_figure = plot_pr_curve(y_true, y_proba).to_dict() if y_proba is not None and plot_pr_curve else None
+        confusion_matrix_figure = plot_confusion_matrix(metrics["confusion_matrix"]).to_dict() if plot_confusion_matrix else None
+        threshold_analysis_figure = plot_threshold_analysis(y_true, y_proba).to_dict() if y_proba is not None and plot_threshold_analysis else None
+        score_distribution_figure = plot_score_distribution(y_true, y_proba).to_dict() if y_proba is not None and plot_score_distribution else None
+        lift_chart_figure = plot_lift_chart(y_true, y_proba).to_dict() if y_proba is not None and plot_lift_chart else None
     else:
         metrics = compute_regression_metrics(y_true, y_pred)
         hetero_input = y_pred
@@ -1219,9 +1347,55 @@ async def evaluate_model(
         pr_curve = []
         threshold_analysis = []
         score_distribution = []
+        score_distribution_points = []
         gain_chart = []
+        lift_chart = []
+        positive_rate = None
+        roc_curve_figure = None
+        pr_curve_figure = None
+        confusion_matrix_figure = None
+        threshold_analysis_figure = None
+        score_distribution_figure = None
+        lift_chart_figure = None
+        metrics = compute_regression_metrics(y_true, y_pred)
+        hetero_input = y_pred
+        roc_curve = []
+        pr_curve = []
+        threshold_analysis = []
+        score_distribution = []
+        score_distribution_points = []
+        gain_chart = []
+        lift_chart = []
+        positive_rate = None
     hetero_check = compute_heteroscedasticity_check(y_true, hetero_input, task_type=task_type)
+    temporal_analysis = _build_temporal_analysis(df, y_true, y_proba if y_proba is not None else y_pred)
+    evaluation_data = {
+        "metrics": metrics,
+        "heteroscedasticity_check": hetero_check,
+        "threshold": threshold,
+        "task_type": task_type,
+        "roc_curve": roc_curve,
+        "pr_curve": pr_curve,
+        "threshold_analysis": threshold_analysis,
+        "score_distribution": score_distribution,
+        "score_distribution_points": score_distribution_points,
+        "positive_rate": positive_rate,
+        "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "roc_curve_figure": roc_curve_figure,
+        "pr_curve_figure": pr_curve_figure,
+        "confusion_matrix_figure": confusion_matrix_figure,
+        "threshold_analysis_figure": threshold_analysis_figure,
+        "score_distribution_figure": score_distribution_figure,
+        "lift_chart_figure": lift_chart_figure,
+        "temporal_analysis": temporal_analysis,
+    }
+
+    # Return both the flat metrics and the nested evaluation_data to match the
+    # original Streamlit app's payload shape consumed by the React UI.
     return {
+        "evaluation_metrics": metrics,
+        "evaluation_data": evaluation_data,
         "metrics": metrics,
         "heteroscedasticity_check": hetero_check,
         "threshold": threshold,
@@ -1231,6 +1405,8 @@ async def evaluate_model(
         "threshold_analysis": threshold_analysis,
         "score_distribution": score_distribution,
         "gain_chart": gain_chart,
+        "lift_chart": lift_chart,
+        "temporal_analysis": temporal_analysis,
     }
 
 
@@ -1267,17 +1443,36 @@ async def explain_model(
             .to_dict(orient="records")
         )
         reasoning = None
+        sample_shap = []
+        sample_features = None
         if 0 <= sample_idx < len(X_df):
             try:
                 model_proba = pipeline.predict_proba(X) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
             except Exception:
                 model_proba = np.zeros((len(X_df), 2))
             reasoning = generate_prediction_reasoning(shap_values, X_df, model_proba, sample_idx, threshold=0.5)
+            row = X_df.iloc[sample_idx]
+            sample_features = row.to_dict()
+            shap_row = shap_values[sample_idx]
+            sample_shap = (
+                pd.DataFrame({
+                    "Feature": X_df.columns.tolist(),
+                    "SHAP": shap_row,
+                    "Value": row.values,
+                })
+                .assign(AbsSHAP=lambda df: np.abs(df["SHAP"]))
+                .sort_values("AbsSHAP", ascending=False)
+                .head(12)
+                .sort_values("SHAP", ascending=True)
+                .to_dict(orient="records")
+            )
         shap_info = {
             "shap_available": True,
             "shap_mean_abs": mean_abs,
             "sample_idx": sample_idx,
             "sample_reasoning": reasoning,
+            "sample_features": sample_features,
+            "sample_shap": sample_shap,
         }
     return {
         "feature_importance": importance,
@@ -1459,6 +1654,216 @@ async def validation_agent2(
     except Exception:
         flags = []
     return {"stage": "agent2", "flags": flags, "report": report}
+
+
+def _normalize_finding(f: dict) -> dict:
+    """Return a frontend-friendly normalized finding dict."""
+    return {
+        "id": f.get("check_id"),
+        "stage": f.get("stage"),
+        "title": f.get("title"),
+        "status": f.get("status"),
+        "severity": f.get("severity"),
+        "observed": f.get("observed"),
+        "detail": f.get("detail"),
+        "mdd_reference": f.get("mdd_reference"),
+        "check_type": f.get("check_type"),
+        "source": f.get("source"),
+        "principle": f.get("principle"),
+    }
+
+
+def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None) -> dict:
+    """Map ValidationAgent2 report into the five UI sections.
+
+    Returns a dict with keys: featureRelevance, methodologyReview, modelAssumptions,
+    documentationChecklist, regulatoryAlignment, raw_findings, replicated_importances
+    """
+    findings = []
+    try:
+        findings = report.get("findings_by_stage", {}).get("Stage 3: Conceptual Soundness", [])
+    except Exception:
+        findings = []
+
+    raw_findings = [f for f in findings]
+
+    # Feature relevance: prefer model artifact importances first, else fallback to replicated importances.
+    replicated = report.get("replicated_importances", {}) or {}
+    importance_df = None
+
+    if model_file is not None:
+        try:
+            # attempt to load pipeline artifact and extract importances
+            model_bytes = model_file.file.read()
+            import io, joblib
+            _buf = io.BytesIO(model_bytes)
+            pipeline = joblib.load(_buf)
+            df_imp = extract_feature_importance(pipeline)
+            if df_imp is not None:
+                importance_df = df_imp.to_dict(orient="records")
+        except Exception:
+            importance_df = None
+
+    if importance_df is None and replicated:
+        try:
+            importance_df = [
+                {"Feature": feature, "Importance": float(score)}
+                for feature, score in sorted(replicated.items(), key=lambda item: item[1], reverse=True)
+            ]
+        except Exception:
+            importance_df = None
+
+    feature_relevance = {"replicated_importances": replicated, "importance_df": importance_df}
+
+    # Methodology Review: modelling methodology checks only.
+    methodology_ids = ("3.1", "3.2", "3.6", "3.9")
+    methodology_checks = [f for f in raw_findings if f.get("check_id") in methodology_ids]
+    methodology = [_normalize_finding(f) for f in methodology_checks]
+
+    # Model Assumptions: assumptions and boundary checks from Stage 3.
+    assumptions_checks = [f for f in raw_findings if f.get("check_id") in ("3.7", "3.8", "3.10")]
+    model_assumptions = [_normalize_finding(f) for f in assumptions_checks]
+
+    # Documentation Checklist: only documentation-type Stage 3 checks, excluding methodology review items.
+    doc_checks = [
+        f for f in raw_findings
+        if f.get("check_type") == "doc" and f.get("check_id") not in methodology_ids
+    ]
+    documentation = [_normalize_finding(f) for f in doc_checks]
+
+    # Regulatory Alignment: summarize Stage 3 outcomes, not the full validation report.
+    stage3_counts = {
+        "pass": sum(1 for f in raw_findings if f.get("status") == "PASS"),
+        "warn": sum(1 for f in raw_findings if f.get("status") == "WARN"),
+        "fail": sum(1 for f in raw_findings if f.get("status") == "FAIL"),
+        "pending": sum(1 for f in raw_findings if f.get("status") == "PENDING"),
+    }
+    stage3_high_fails = [f for f in raw_findings if f.get("status") == "FAIL" and f.get("severity") == "HIGH"]
+    if len(stage3_high_fails) == 0 and stage3_counts["fail"] == 0 and stage3_counts["pending"] == 0:
+        stage3_verdict = "PASS"
+    elif len(stage3_high_fails) == 0 and stage3_counts["fail"] == 0:
+        stage3_verdict = "CONDITIONAL"
+    elif len(stage3_high_fails) <= 2:
+        stage3_verdict = "CONDITIONAL"
+    else:
+        stage3_verdict = "FAIL"
+
+    regulatory = {
+        "verdict": stage3_verdict,
+        "counts": stage3_counts,
+        "high_severity_fails": [_normalize_finding(f) for f in stage3_high_fails],
+    }
+
+    pending_llm_ids = []
+    # identify doc checks that are PENDING and likely need LLM deep-check
+    for f in raw_findings:
+        if f.get("status") in ("PENDING",) or f.get("check_type") == "doc" and f.get("status") != "PASS":
+            pending_llm_ids.append(f.get("check_id"))
+
+    return {
+        "featureRelevance": feature_relevance,
+        "methodologyReview": methodology,
+        "modelAssumptions": model_assumptions,
+        "documentationChecklist": documentation,
+        "regulatoryAlignment": regulatory,
+        "raw_findings": raw_findings,
+        "replicated_importances": replicated,
+        "pending_llm_ids": list(set(pending_llm_ids)),
+    }
+
+
+@app.post("/validation/stage3/run")
+async def validation_stage3_run(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+    model_file: Optional[UploadFile] = File(None),
+) -> Dict[str, Any]:
+    """Run Stage 3 Conceptual Soundness checks and return mapped JSON.
+
+    Accepts the same upload pattern as other endpoints. Keeps calculations server-side.
+    """
+    df = None
+    try:
+        df = await _read_dataframe(file=file, csv_text=csv_text)
+    except HTTPException:
+        df = None
+
+    intake = {}
+    if intake_json:
+        try:
+            intake = json.loads(intake_json)
+        except Exception:
+            intake = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            mdd_text = parse_mdd_file(mdd_file)
+        except Exception:
+            mdd_text = ""
+
+    # Run the full ValidationAgent2 to reuse replicated_importances if available,
+    # but prefer to extract Stage 3 findings only for response.
+    report = run_validation_agent2(df, intake, mdd_text)
+
+    mapped = _group_stage3(report, df=df, model_file=model_file)
+    # add top-level metadata
+    mapped["llm_ran"] = False
+    mapped["timestamp"] = pd.Timestamp.now().isoformat()
+
+    return mapped
+
+
+@app.post("/validation/stage3/llm-check")
+async def validation_stage3_llm(
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+    only_rule_ids: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """Run optional LLM deep-checks for Stage 3 documentation items.
+
+    This calls the local `Agent2` LLM helpers if available. Returns updated findings.
+    """
+    # Load Agent2 if present
+    try:
+        agent = Agent2()
+    except Exception:
+        agent = None
+
+    intake = {}
+    if intake_json:
+        try:
+            intake = json.loads(intake_json)
+        except Exception:
+            intake = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            mdd_text = parse_mdd_file(mdd_file)
+        except Exception:
+            mdd_text = ""
+
+    if agent is None:
+        raise HTTPException(status_code=500, detail="Agent2 LLM component unavailable")
+
+    docs = []
+    if mdd_text:
+        docs = [mdd_text]
+
+    only_ids = None
+    if only_rule_ids:
+        only_ids = [s.strip() for s in only_rule_ids.split(",") if s.strip()]
+
+    # Agent2 exposes a method `check_documents_with_llm` in the POC; adapt if missing.
+    try:
+        llm_results = agent.check_documents_with_llm(docs, stage="Stage 3: Conceptual Soundness", only_rule_ids=only_ids)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM deep-check failed: {e}")
+
+    return {"llm_results": llm_results}
 
 
 @app.post("/ecl/compute")
