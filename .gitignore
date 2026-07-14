@@ -21,3 +21,9 @@
 **/.ruff_cache/
 .venv/
 venv/
+
+# Local env overrides (not shared)
+**/.env*.local
+
+# FRED API response cache (runtime data, not source)
+**/.fred_cache/

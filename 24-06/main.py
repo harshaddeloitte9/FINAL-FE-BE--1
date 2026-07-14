@@ -66,6 +66,7 @@ from model_selector import recommend_models, get_model_instance, get_hyperparame
 from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
 import evaluate_new as eval_engine
+import fred_client
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -1371,6 +1372,77 @@ async def feature_engineering(
         "interaction_scores": plan.get("interaction_scores", {}),
         "feature_scores": plan.get("feature_scores", {}),
         "transform_recommendations": plan.get("transform_recommendations", {}),
+    }
+
+
+@app.post("/data/macro/date-columns")
+async def macro_date_columns(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    synthetic_samples: Optional[int] = Form(None),
+) -> Dict[str, Any]:
+    """
+    List the columns in the dataset usable for point-in-time FRED macro
+    alignment (real dates only, origination-pattern matches first), plus the
+    best-effort auto-detected default. Mirrors the old Streamlit app's date
+    dropdown (see fred_client.list_date_columns_for_macro/detect_macro_date_col) —
+    default/charge-off-dated columns are never auto-selected, even as a fallback.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    candidates = fred_client.list_date_columns_for_macro(df)
+    return {
+        "candidates": [{"column": c, "is_preferred": pref} for c, pref in candidates],
+        "default_date_col": fred_client.detect_macro_date_col(df),
+    }
+
+
+@app.post("/data/macro/fetch")
+async def macro_fetch(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    synthetic_samples: Optional[int] = Form(None),
+    date_col: str = Form(...),
+) -> Dict[str, Any]:
+    """
+    Fetch FRED macro features (GDP, unemployment, Fed funds rate) aligned to
+    the calendar month of `date_col` and attach them to the dataset — same
+    semantics as the old app's "Fetch FRED macro features" button. Returns the
+    augmented dataset as CSV text so the frontend can carry it forward as
+    `csv_text` into /data/preprocess and /data/feature-engineering, plus the
+    new macro column names for display.
+
+    The FRED API key is read from the FRED_API_KEY environment variable —
+    never hardcoded (the old app had a live key committed in source; this
+    endpoint deliberately does not repeat that).
+    """
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="FRED_API_KEY environment variable is not set on the server.",
+        )
+
+    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+    if date_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Date column '{date_col}' not found")
+
+    try:
+        client = fred_client.FREDClient(api_key=api_key, cache_dir=".fred_cache")
+        df_with_macro, macro_cols = fred_client.attach_macro_features(
+            df, fred_client=client, date_col=date_col,
+        )
+    except fred_client.FREDError as exc:
+        raise HTTPException(status_code=502, detail=f"FRED fetch failed: {exc}")
+
+    if not macro_cols:
+        raise HTTPException(status_code=400, detail="No macro columns were attached — check the date column.")
+
+    return {
+        "macro_columns": macro_cols,
+        "date_col_used": date_col,
+        "csv_with_macro": df_with_macro.to_csv(index=False),
+        "preview": _serialize_dataframe(df_with_macro, max_rows=5)["preview"],
+        "shape": list(df_with_macro.shape),
     }
 
 
