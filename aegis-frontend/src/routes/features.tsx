@@ -57,10 +57,14 @@ interface MacroDateCandidate {
 
 function Features() {
   const navigate = useNavigate();
-  const { file, profile, setUploadResult } = useDataset();
+  const { file, profile, setUploadResult, featureEngineeringResult, setFeatureEngineeringResult } = useDataset();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [engineeringResult, setEngineeringResult] = useState<FeatureEngineeringResponse | null>(null);
+  // Seed from the shared context so returning to this page (e.g. via Back from
+  // Training) shows the already-computed result instead of looking reset.
+  const [engineeringResult, setEngineeringResult] = useState<FeatureEngineeringResponse | null>(
+    (featureEngineeringResult as FeatureEngineeringResponse | null) ?? null,
+  );
   const [vifSortKey, setVifSortKey] = useState<"feature" | "value">("value");
   const [vifSortAsc, setVifSortAsc] = useState(false);
 
@@ -148,6 +152,9 @@ function Features() {
         return;
       }
       setEngineeringResult(result);
+      // Publish to shared context so navigating away and back (or forward to
+      // Training) reuses this result instead of forcing a recompute.
+      setFeatureEngineeringResult(result as unknown as Record<string, any>);
     } catch (err) {
       if (requestId !== feRequestIdRef.current) return;
       const message = err instanceof Error ? err.message : "Failed to run feature engineering";
@@ -181,9 +188,20 @@ function Features() {
     })();
   }, [file]);
 
+  // Consumed once: if we mounted with a cached result already in context (e.g.
+  // navigating back from Training and forward again), skip the very next
+  // auto-run and reuse it instead of silently recomputing feature engineering
+  // from scratch. Any later change to file/profile/datasetCsvText (a genuinely
+  // new dataset or macro fetch) still triggers a real recompute.
+  const skipInitialAutoRun = useRef(engineeringResult !== null);
+
   useEffect(() => {
     if (!file || !profile) {
       setError("No dataset uploaded. Please upload a dataset first.");
+      return;
+    }
+    if (skipInitialAutoRun.current) {
+      skipInitialAutoRun.current = false;
       return;
     }
     runFeatureEngineering();

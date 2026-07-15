@@ -57,6 +57,7 @@ type DatasetState = {
   validationMddMetrics?: Record<string, any> | null;
   validationProfile?: Record<string, any> | null;
   validationResults?: Record<string, any> | null;
+  validationStage3Result?: Record<string, any> | null;
   setUploadResult: (file: File | null, profile: DatasetProfile | null) => void;
   setProfile: (profile: DatasetProfile | null) => void;
   setRecommendations: (recommendations: ModelRecommendation[] | null) => void;
@@ -73,6 +74,7 @@ type DatasetState = {
   setValidationMddMetrics: (metrics: Record<string, any> | null) => void;
   setValidationProfile: (profile: Record<string, any> | null) => void;
   setValidationResults: (results: Record<string, any> | null) => void;
+  setValidationStage3Result: (result: Record<string, any> | null) => void;
 };
 
 const DatasetContext = React.createContext<DatasetState | null>(null);
@@ -94,6 +96,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [validationMddMetrics, setValidationMddMetricsState] = React.useState<Record<string, any> | null>(null);
   const [validationProfile, setValidationProfileState] = React.useState<Record<string, any> | null>(null);
   const [validationResults, setValidationResultsState] = React.useState<Record<string, any> | null>(null);
+  const [validationStage3Result, setValidationStage3ResultState] = React.useState<Record<string, any> | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
   React.useEffect(() => {
@@ -228,6 +231,10 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setValidationResultsState(results);
   }, []);
 
+  const setValidationStage3Result = React.useCallback((result: Record<string, any> | null) => {
+    setValidationStage3ResultState(result);
+  }, []);
+
   const value = React.useMemo(
     () => ({
       file,
@@ -246,6 +253,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationMddMetrics,
       validationProfile,
       validationResults,
+      validationStage3Result,
       setUploadResult,
       setProfile: setProfileState,
       setRecommendations,
@@ -262,6 +270,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationMddMetrics,
       setValidationProfile,
       setValidationResults,
+      setValidationStage3Result,
     }),
     [
       file,
@@ -280,6 +289,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationMddMetrics,
       validationProfile,
       validationResults,
+      validationStage3Result,
       setUploadResult,
       setRecommendations,
       setSelectedModel,
@@ -295,6 +305,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationMddMetrics,
       setValidationProfile,
       setValidationResults,
+      setValidationStage3Result,
     ],
   );
 

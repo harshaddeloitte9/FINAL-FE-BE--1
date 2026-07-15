@@ -1,8 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
 import { formUpload } from "@/lib/api";
+import { useDataset } from "@/lib/app-context";
 
 export const Route = createFileRoute("/validation/conceptual")({
   head: () => ({ meta: [{ title: "Stage 3 — Conceptual Soundness — Aegis Credit" }] }),
@@ -54,23 +55,70 @@ type Stage3Response = {
 // Component renders entirely from backend response; no local mock data kept.
 
 function Conceptual() {
-  const [loading, setLoading] = useState(true);
+  const {
+    file,
+    profile,
+    trainingResult,
+    validationIntakeData,
+    validationMddText,
+    validationStage3Result,
+    setValidationStage3Result,
+  } = useDataset();
+
+  // Seed from shared context so returning to this page (e.g. via Back from
+  // Stage 4) shows the already-computed result instead of forcing a re-run.
+  const [loading, setLoading] = useState(!validationStage3Result);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<Stage3Response | null>(null);
+  const [data, setData] = useState<Stage3Response | null>((validationStage3Result as Stage3Response | null) ?? null);
+
+  const datasetLoaded = Boolean(file || profile?.csv_text || profile?.dataset_name);
+  const skipInitialAutoRun = useRef(validationStage3Result !== null && validationStage3Result !== undefined);
 
   useEffect(() => {
+    if (!datasetLoaded) {
+      setLoading(false);
+      return;
+    }
+    if (skipInitialAutoRun.current) {
+      skipInitialAutoRun.current = false;
+      setLoading(false);
+      return;
+    }
+
     let active = true;
     setLoading(true);
     setError(null);
 
     const form = new FormData();
-    // No files by default; empty intake will be accepted by backend.
-    form.append("intake_json", JSON.stringify({}));
+    // Mirrors Stage 2 (validation.data-quality.tsx): use the real working
+    // dataset from context rather than posting an empty intake, which is why
+    // the RAG Agent Rules column previously came back empty — check_for_validation
+    // needs dataset metrics and check_mdd_keywords needs the MDD text to match
+    // against, neither of which were ever being sent.
+    if (file) {
+      form.append("file", file);
+    } else if (profile?.csv_text) {
+      form.append("csv_text", profile.csv_text);
+    }
+    // check_conceptual_soundness() reads intake_json.methodology (check 3.1),
+    // but the Intake form has no dedicated methodology field — the actual
+    // algorithm choice lives on Training's trainingResult. Fill it in here
+    // when the Intake form didn't already provide one.
+    const intakePayload: Record<string, any> = { ...(validationIntakeData ?? {}) };
+    if (!intakePayload.methodology && trainingResult?.model_name) {
+      intakePayload.methodology = trainingResult.model_name;
+    }
+    form.append("intake_json", JSON.stringify(intakePayload));
+    if (validationMddText) {
+      const mddBlob = new Blob([validationMddText], { type: "text/plain" });
+      form.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
+    }
 
     void formUpload<Stage3Response>("/validation/stage3/run", form)
       .then((resp) => {
         if (!active) return;
         setData(resp);
+        setValidationStage3Result(resp as unknown as Record<string, any>);
       })
       .catch((err) => {
         console.error("Stage3 fetch error", err);
@@ -85,7 +133,8 @@ function Conceptual() {
     return () => {
       active = false;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetLoaded, file, profile?.csv_text]);
 
   const summary = data?.summary ?? { total: 0, pass: 0, warn: 0, fail: 0 };
   const progress = summary.total > 0 ? Math.round((summary.pass / summary.total) * 100) : 0;
@@ -97,7 +146,14 @@ function Conceptual() {
         description="Are the chosen features, methodology, and assumptions appropriate for the stated business objective and regulatory context?"
       />
 
-      {loading ? (
+      {!datasetLoaded ? (
+        <div className="rounded-xl border border-border bg-card p-6 text-center">
+          <h3 className="text-lg font-semibold">No dataset available</h3>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Upload a dataset and complete Intake before conceptual soundness checks can run.
+          </p>
+        </div>
+      ) : loading ? (
         <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Conceptual Soundness...</div>
       ) : error ? (
         <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 3: {error}</div>

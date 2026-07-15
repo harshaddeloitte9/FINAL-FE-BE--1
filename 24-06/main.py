@@ -501,6 +501,32 @@ def _load_agent2() -> Optional[Agent2]:
     return _agent2
 
 
+class _SyncFileLike:
+    """Wraps a FastAPI UploadFile's underlying SpooledTemporaryFile with the
+    sync .name/.seek()/.read() interface parse_mdd_file() expects (ported from
+    Streamlit's UploadedFile). SpooledTemporaryFile.name is a read-only property
+    in this Python version, so it can't just be assigned onto the file object
+    directly (that raises AttributeError, and call sites that swallow it end up
+    silently parsing "" instead of the document — every keyword-search RAG rule
+    then reports 0 keyword hits against an MDD that was never actually read).
+    """
+
+    def __init__(self, upload_file: UploadFile):
+        self._file = upload_file.file
+        self.name = upload_file.filename or ""
+
+    def seek(self, *args, **kwargs):
+        return self._file.seek(*args, **kwargs)
+
+    def read(self, *args, **kwargs):
+        return self._file.read(*args, **kwargs)
+
+
+def _sync_file_like(upload_file: UploadFile) -> _SyncFileLike:
+    upload_file.file.seek(0)
+    return _SyncFileLike(upload_file)
+
+
 def _load_source_agent2() -> Optional["SourceAgent2"]:
     """Cached loader for the RAG rule-matching Agent2 (val_mdd_rules.json)."""
     global _source_agent2
@@ -2836,7 +2862,15 @@ async def validation_stage3_run(
     mdd_text = ""
     if mdd_file is not None:
         try:
-            mdd_text = parse_mdd_file(mdd_file)
+            # parse_mdd_file expects a sync file-like object with .name/.seek()/
+            # .read() (ported from Streamlit's UploadedFile). FastAPI's UploadFile
+            # is async, so calling parse_mdd_file(mdd_file) directly silently
+            # "succeeds" but reads the repr of an unawaited coroutine instead of
+            # the document text — every keyword-search RAG rule then sees empty/
+            # garbage MDD content and reports 0 keyword hits. Reach through to
+            # the underlying SpooledTemporaryFile, same fix already applied in
+            # /validation/replication.
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
         except Exception:
             mdd_text = ""
 
@@ -2908,7 +2942,9 @@ async def validation_stage3_llm(
     mdd_text = ""
     if mdd_file is not None:
         try:
-            mdd_text = parse_mdd_file(mdd_file)
+            # See /validation/stage3/run — parse_mdd_file needs the sync
+            # underlying file, not the async UploadFile directly.
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
         except Exception:
             mdd_text = ""
 

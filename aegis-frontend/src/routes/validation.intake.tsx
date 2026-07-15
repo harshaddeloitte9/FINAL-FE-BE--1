@@ -530,6 +530,12 @@ function Intake() {
                     const resp = await formUpload<Record<string, any>>("/validation/parse-mdd", form);
                     setMddText(resp?.mdd_text ?? null);
                     setMddMetrics(resp?.metrics ?? null);
+                    // Publish to shared context — Stage 3's RAG keyword-search
+                    // check (check_mdd_keywords) reads validationMddText from
+                    // here. Without this, an MDD uploaded via this input never
+                    // reaches Stage 3 and its RAG Agent Rules column stays empty.
+                    setValidationMddText(resp?.mdd_text ?? null);
+                    setValidationMddMetrics(resp?.metrics ?? null);
                   } catch (err) {
                     console.error("MDD parse failed", err);
                     setMddText(null);

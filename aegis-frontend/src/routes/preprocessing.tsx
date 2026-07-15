@@ -113,9 +113,21 @@ function Preprocessing() {
     }
   };
 
+  // Consumed once: if we mounted with a cached result already in context (e.g.
+  // navigating back from Feature Engineering/Training and forward again), skip
+  // the very next auto-run and reuse it instead of silently re-POSTing and
+  // potentially producing a fresh (if non-deterministic) split. Any later
+  // change the reviewer makes to test size, seed, or treatments still runs.
+  const skipInitialAutoRun = useRef(preprocessingResult !== null);
+
   useEffect(() => {
     const runPreprocess = async () => {
       if (!profile) return;
+
+      if (skipInitialAutoRun.current) {
+        skipInitialAutoRun.current = false;
+        return;
+      }
 
       const allColumns = Array.isArray(profile.columns) ? profile.columns : [];
       let targetCol: string | null = null;

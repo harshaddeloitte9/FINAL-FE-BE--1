@@ -165,6 +165,24 @@ function Training() {
     if (trainingStats) {
       return { sampleCount: trainingStats.train_n, featureCount: trainingStats.train_features, imbalanceRatio: trainingStats.imbalance_ratio };
     }
+    // trainingStats only lives in local component state (from /models/recommend),
+    // so it's empty right after this page remounts (e.g. Back then Forward from
+    // Feature Engineering) even though a completed trainingResult already exists
+    // in shared context. Without this, the summary card would silently regress
+    // to the raw pre-FE dataset shape and look like the pipeline had reset.
+    if (trainingResult && splitStats?.train_n) {
+      const featureCount = trainingResult.real_feature_names?.length ?? 0;
+      let imbalanceRatio = 1.0;
+      const trainDist = (splitStats as any)?.train_class_dist ?? (splitStats as any)?.train_class_counts;
+      if (trainDist && typeof trainDist === "object") {
+        const values = Object.values(trainDist) as number[];
+        if (values.length >= 2) {
+          const sorted = [...values].sort((a, b) => b - a);
+          imbalanceRatio = sorted[0] / (sorted[1] || 1);
+        }
+      }
+      return { sampleCount: splitStats.train_n, featureCount, imbalanceRatio };
+    }
     if (!profile) return null;
     const shape = profile.shape ?? [0, 0];
     const sampleCount = shape[0] ?? 0;
@@ -180,7 +198,7 @@ function Training() {
     }
 
     return { sampleCount, featureCount, imbalanceRatio };
-  }, [profile, trainingStats]);
+  }, [profile, trainingStats, trainingResult, splitStats]);
 
   // Columns detected as datetime by profiling — used to pick an origination/
   // observation date for Out-of-Time (OOT) validation. Falls back to
