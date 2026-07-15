@@ -107,6 +107,18 @@ _validation_agent2_module = importlib.util.module_from_spec(_validation_agent2_s
 _validation_agent2_spec.loader.exec_module(_validation_agent2_module)
 ValidationAgent2 = _validation_agent2_module.ValidationAgent2
 
+# Source-of-truth Agent2: the RAG rule-matching agent (rag_store/val_mdd_rules.json,
+# check_for_validation / check_mdd_keywords / check_documents_with_llm). This is a
+# different class from the local `Agent2` above (24-06/agent2.py, rag_store/rules.json)
+# which only handles Stage 1/2/4/5 compliance flags and has no RAG rule methods.
+_source_agent2_path = SOURCE_OF_TRUTH_DIR / "agent2.py"
+_source_agent2_spec = importlib.util.spec_from_file_location("source_agent2", _source_agent2_path)
+if _source_agent2_spec is None or _source_agent2_spec.loader is None:
+    raise ImportError(f"Could not load source Agent2 from {_source_agent2_path}")
+_source_agent2_module = importlib.util.module_from_spec(_source_agent2_spec)
+_source_agent2_spec.loader.exec_module(_source_agent2_module)
+SourceAgent2 = _source_agent2_module.Agent2
+
 
 app = FastAPI()
 
@@ -469,6 +481,13 @@ class ECLConfigRequest(BaseModel):
 
 
 _agent2: Optional[Agent2] = None
+_source_agent2: Optional["SourceAgent2"] = None
+# The local 24-06/rag_store/val_mdd_rules.json copy is stale (pre-dates the
+# "conceptual_soundness"/"data_validation" stage-name rename in the rules'
+# `stage` field, still has the old "conceptual"/"data" short forms), which
+# silently makes check_mdd_keywords()/check_for_validation() match zero rules.
+# Load from the source-of-truth copy instead, same as ValidationAgent2 above.
+VAL_MDD_RULES_PATH = SOURCE_OF_TRUTH_DIR / "rag_store" / "val_mdd_rules.json"
 
 
 def _load_agent2() -> Optional[Agent2]:
@@ -480,6 +499,18 @@ def _load_agent2() -> Optional[Agent2]:
     except Exception:
         _agent2 = None
     return _agent2
+
+
+def _load_source_agent2() -> Optional["SourceAgent2"]:
+    """Cached loader for the RAG rule-matching Agent2 (val_mdd_rules.json)."""
+    global _source_agent2
+    if _source_agent2 is not None:
+        return _source_agent2
+    try:
+        _source_agent2 = SourceAgent2(str(VAL_MDD_RULES_PATH))
+    except Exception:
+        _source_agent2 = None
+    return _source_agent2
 
 
 async def _read_dataframe(
@@ -2660,11 +2691,46 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
     }
 
 
-def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None, intake: Optional[dict] = None, mdd_text: str = "") -> dict:
-    """Map ValidationAgent2 report into the five UI sections.
+def _normalize_threshold_check(f: dict) -> dict:
+    """Normalize a check_conceptual_soundness() finding into the
+    'Recommended Threshold Checks' card schema (mirrors app.py's left column)."""
+    return {
+        "check_id": f.get("check_id", ""),
+        "title": f.get("title", ""),
+        "severity": str(f.get("severity", "medium")).upper(),
+        "status": f.get("status", "WARN"),
+        "source": f.get("source", ""),
+        "principle": f.get("principle", ""),
+        "observed": f.get("observed", ""),
+        "threshold": f.get("threshold", ""),
+        "detail": f.get("detail", ""),
+    }
 
-    Returns a dict with keys: featureRelevance, methodologyReview, modelAssumptions,
-    documentationChecklist, regulatoryAlignment, raw_findings, replicated_importances
+
+def _normalize_rag_rule(r: dict) -> dict:
+    """Normalize an Agent2 RAG rule result (check_for_validation / check_mdd_keywords /
+    check_documents_with_llm) into the 'RAG Agent Rules' card schema (mirrors app.py's
+    right column)."""
+    return {
+        "rule_id": r.get("rule_id", r.get("check_id", "?")),
+        "flag": r.get("flag", r.get("title", "")),
+        "suggestion": r.get("suggestion", r.get("detail", "")),
+        "severity": str(r.get("severity", "medium")).upper(),
+        "status": r.get("status", "WARN"),
+        "source": r.get("source", ""),
+        "principle": r.get("principle", ""),
+        "observed_value": r.get("observed_value", r.get("observed")),
+        "not_verifiable": bool(r.get("not_verifiable", False)),
+        "check_source": r.get("check_source", ""),
+        "reasoning": r.get("reasoning", ""),
+    }
+
+
+def _group_stage3(report: dict, rag_results: Optional[List[dict]] = None, df=None, model_file: Optional[UploadFile] = None, intake: Optional[dict] = None, mdd_text: str = "") -> dict:
+    """Map ValidationAgent2 + Agent2 RAG results into the Stage 3 UI payload.
+
+    Returns a dict with keys: thresholdChecks, ragRules, summary, regulatoryAlignment,
+    featureRelevance, raw_findings, replicated_importances, pending_llm_ids.
     """
     findings = []
     try:
@@ -2673,158 +2739,23 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
         findings = []
 
     raw_findings = [f for f in findings]
+    rag_results = rag_results or []
 
     feature_relevance = _derive_feature_importance_payload(report, df=df, model_file=model_file, intake=intake)
     replicated = feature_relevance.get("replicated_importances", {}) or {}
 
-    # Methodology Review: a human-readable summary of the modelling approach.
-    methodology_items = []
-    methodology_name = str(intake.get("methodology") or intake.get("algorithm") or "").strip() if intake else ""
-    algo_title = methodology_name or "Not specified"
-    methodology_items.append({
-        "id": "model_algorithm",
-        "title": "Model algorithm",
-        "status": "PASS" if algo_title and algo_title.lower() != "not specified" else "WARN",
-        "observed": algo_title or "Not specified",
-        "detail": "The documented model algorithm should be consistent with the training approach and submitted artifacts.",
-    })
+    threshold_checks = [_normalize_threshold_check(f) for f in raw_findings]
+    rag_rules = [_normalize_rag_rule(r) for r in rag_results]
 
-    monotonic = intake.get("monotonic_constraints") if intake else None
-    if monotonic in (None, "", []):
-        monotonic = "Not specified"
-    methodology_items.append({
-        "id": "monotonic_constraints",
-        "title": "Monotonic constraints",
-        "status": "PASS" if isinstance(monotonic, list) and monotonic or (isinstance(monotonic, str) and monotonic.lower() not in {"not specified", "none"}) else "WARN",
-        "observed": monotonic if isinstance(monotonic, str) else ", ".join(map(str, monotonic)) if isinstance(monotonic, list) else str(monotonic),
-        "detail": "Monotonic constraints should be documented when regulatory expectations or risk policy require them.",
-    })
-
-    cv_value = intake.get("cross_validation_strategy") or intake.get("cv_strategy") or "Not specified"
-    methodology_items.append({
-        "id": "cross_validation_strategy",
-        "title": "Cross-validation strategy",
-        "status": "PASS" if str(cv_value).lower() not in {"not specified", "none", ""} else "WARN",
-        "observed": str(cv_value) if cv_value else "Not specified",
-        "detail": "Cross-validation should be documented to demonstrate that the model is not overfit to one sample split.",
-    })
-
-    calibration = intake.get("calibration_method") or intake.get("calibration") or "Not specified"
-    methodology_items.append({
-        "id": "calibration_method",
-        "title": "Calibration method",
-        "status": "PASS" if str(calibration).lower() not in {"not specified", "none", ""} else "WARN",
-        "observed": str(calibration) or "Not specified",
-        "detail": "Calibration should be documented where the model produces probability outputs used for decisioning.",
-    })
-
-    class_weight = intake.get("class_weight") or intake.get("class_weighting") or "Not specified"
-    methodology_items.append({
-        "id": "class_weighting",
-        "title": "Class weighting",
-        "status": "PASS" if str(class_weight).lower() not in {"not specified", "none", ""} else "WARN",
-        "observed": str(class_weight) or "Not specified",
-        "detail": "Class weighting or resampling should be documented when the target distribution is imbalanced.",
-    })
-
-    # Preserve the existing Stage 3 findings as extra detail if present.
-    methodology_ids = ("3.1", "3.2", "3.6", "3.9")
-    methodology_checks = [f for f in raw_findings if f.get("check_id") in methodology_ids]
-    methodology_items.extend(_normalize_finding(f) for f in methodology_checks)
-
-    # Model Assumptions: assumptions and boundary checks from Stage 3.
-    assumptions_items = []
-    assumptions = intake.get("assumptions") if intake else []
-    if not isinstance(assumptions, list):
-        assumptions = []
-    assumption_text = {item.lower() for item in assumptions if isinstance(item, str)}
-
-    assumptions_items.append({
-        "id": "linearity",
-        "title": "Linearity",
-        "status": "PASS" if "linearity" in assumption_text else "WARN",
-        "observed": "Linearity assumption documented" if "linearity" in assumption_text else "Linearity assumption not explicitly documented",
-        "detail": "The relationship between the predictors and log-odds should be assessed for linear models.",
-    })
-    assumptions_items.append({
-        "id": "independence",
-        "title": "Independence",
-        "status": "PASS" if intake.get("independence_confirmed") is True or "independence" in assumption_text else "WARN",
-        "observed": "Independence assessed" if intake.get("independence_confirmed") is True or "independence" in assumption_text else "Independence not explicitly documented",
-        "detail": "Observations and model inputs should be independent unless a structured dependence mechanism is documented.",
-    })
-    assumptions_items.append({
-        "id": "stationarity",
-        "title": "Stationarity",
-        "status": "PASS" if "stationarity" in assumption_text else "WARN",
-        "observed": "Stationarity assumption documented" if "stationarity" in assumption_text else "Stationarity assumption not explicitly documented",
-        "detail": "Time-series or macroeconomic inputs should be reviewed for stationarity where relevant.",
-    })
-    assumptions_items.append({
-        "id": "default_definition_consistency",
-        "title": "Default definition consistency",
-        "status": "PASS" if str(intake.get("default_definition") or "").strip() else "WARN",
-        "observed": str(intake.get("default_definition") or "No default definition provided"),
-        "detail": "The default definition used for training and monitoring should be consistent with the policy definition.",
-    })
-
-    assumptions_checks = [f for f in raw_findings if f.get("check_id") in ("3.7", "3.8", "3.10")]
-    model_assumptions = assumptions_items + [_normalize_finding(f) for f in assumptions_checks]
-
-    # Documentation Checklist: structured checklist items that mirror the Streamlit version.
-    documentation_items = []
-    documentation_items.append({
-        "id": "model_development_document",
-        "title": "Model Development Document",
-        "status": "PASS" if mdd_text.strip() else "WARN",
-        "detail": "The model development document should contain methodology, assumptions, and limitations.",
-    })
-    documentation_items.append({
-        "id": "data_lineage",
-        "title": "Data Lineage",
-        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("lineage", "data lineage", "source data", "data provenance")) or intake.get("data_description") else "WARN",
-        "detail": "Data lineage should describe the source systems, transformations, and data quality controls.",
-    })
-    documentation_items.append({
-        "id": "independent_code_review",
-        "title": "Independent Code Review",
-        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("code review", "independent review", "peer review")) else "WARN",
-        "detail": "Independent review of model logic and code is expected for material credit risk models.",
-    })
-    documentation_items.append({
-        "id": "sensitivity_analysis",
-        "title": "Sensitivity Analysis",
-        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("sensitivity", "stress", "scenario")) else "WARN",
-        "detail": "Sensitivity analysis should quantify what happens when key parameters or inputs change.",
-    })
-    documentation_items.append({
-        "id": "reproducibility_package",
-        "title": "Reproducibility Package",
-        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("reproduc", "package", "code", "repository")) else "WARN",
-        "detail": "The reproduction package should contain code, data dictionary and configuration for independent reruns.",
-    })
-    documentation_items.append({
-        "id": "limitations_statement",
-        "title": "Limitations Statement",
-        "status": "PASS" if any(k in (mdd_text or "").lower() for k in ("limitation", "limitations")) or intake.get("limitations") else "WARN",
-        "detail": "The model documentation should clearly explain any limitations and boundary conditions.",
-    })
-
-    # Documentation Checklist: only documentation-type Stage 3 checks, excluding methodology review items.
-    doc_checks = [
-        f for f in raw_findings
-        if f.get("check_type") == "doc" and f.get("check_id") not in methodology_ids
-    ]
-    documentation = documentation_items + [_normalize_finding(f) for f in doc_checks]
-
-    # Regulatory Alignment: summarize Stage 3 outcomes, not the full validation report.
+    # Regulatory Alignment: summarize combined threshold + RAG outcomes for Stage 3.
+    combined = raw_findings + rag_results
     stage3_counts = {
-        "pass": sum(1 for f in raw_findings if f.get("status") == "PASS"),
-        "warn": sum(1 for f in raw_findings if f.get("status") == "WARN"),
-        "fail": sum(1 for f in raw_findings if f.get("status") == "FAIL"),
-        "pending": sum(1 for f in raw_findings if f.get("status") == "PENDING"),
+        "pass": sum(1 for f in combined if f.get("status") == "PASS"),
+        "warn": sum(1 for f in combined if f.get("status") == "WARN"),
+        "fail": sum(1 for f in combined if f.get("status") == "FAIL"),
+        "pending": sum(1 for f in combined if f.get("status") == "PENDING"),
     }
-    stage3_high_fails = [f for f in raw_findings if f.get("status") == "FAIL" and f.get("severity") == "HIGH"]
+    stage3_high_fails = [f for f in combined if f.get("status") == "FAIL" and str(f.get("severity", "")).upper() == "HIGH"]
     if len(stage3_high_fails) == 0 and stage3_counts["fail"] == 0 and stage3_counts["pending"] == 0:
         stage3_verdict = "PASS"
     elif len(stage3_high_fails) == 0 and stage3_counts["fail"] == 0:
@@ -2842,7 +2773,7 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
     if not remediation_items:
         remediation_items.append("No material remediation required at this stage.")
 
-    regulatory_references = sorted({f.get("source") for f in raw_findings if f.get("source")})
+    regulatory_references = sorted({f.get("source") for f in combined if f.get("source")})
     if not regulatory_references:
         regulatory_references = ["SS1/23", "SS11/13"]
 
@@ -2854,21 +2785,26 @@ def _group_stage3(report: dict, df=None, model_file: Optional[UploadFile] = None
         "high_severity_fails": [_normalize_finding(f) for f in stage3_high_fails],
     }
 
-    pending_llm_ids = []
-    # identify doc checks that are PENDING and likely need LLM deep-check
-    for f in raw_findings:
-        if f.get("status") in ("PENDING",) or f.get("check_type") == "doc" and f.get("status") != "PASS":
-            pending_llm_ids.append(f.get("check_id"))
+    pending_llm_ids = [
+        r.get("check_id", r.get("rule_id"))
+        for r in rag_results
+        if r.get("check_source") == "keyword_search" and r.get("status") != "PASS"
+    ]
 
     return {
-        "featureRelevance": feature_relevance,
-        "methodologyReview": methodology_items,
-        "modelAssumptions": model_assumptions,
-        "documentationChecklist": documentation,
+        "thresholdChecks": threshold_checks,
+        "ragRules": rag_rules,
+        "summary": {
+            "total": len(combined),
+            "pass": stage3_counts["pass"],
+            "warn": stage3_counts["warn"],
+            "fail": stage3_counts["fail"],
+        },
         "regulatoryAlignment": regulatory,
+        "featureRelevance": feature_relevance,
         "raw_findings": raw_findings,
         "replicated_importances": replicated,
-        "pending_llm_ids": list(set(pending_llm_ids)),
+        "pending_llm_ids": list(dict.fromkeys(pending_llm_ids)),
     }
 
 
@@ -2908,7 +2844,38 @@ async def validation_stage3_run(
     # but prefer to extract Stage 3 findings only for response.
     report = run_validation_agent2(df, intake, mdd_text)
 
-    mapped = _group_stage3(report, df=df, model_file=model_file, intake=intake, mdd_text=mdd_text)
+    # RAG rule-matching pipeline (mirrors app.py:5202-5231): quantitative rules
+    # checked against dataset metrics, plus a keyword-search cross-check of the
+    # MDD text for qualitative rules. Without this, only the 11 threshold checks
+    # (3.1-3.11) are returned and the "RAG Agent Rules" column has nothing to show.
+    rag_results: List[dict] = []
+    source_agent = _load_source_agent2()
+    if source_agent is not None:
+        corr_max = 0.0
+        if df is not None:
+            try:
+                numeric_df = df.select_dtypes(include=["number"])
+                if numeric_df.shape[1] >= 2:
+                    corr_matrix = numeric_df.corr().abs().values
+                    np.fill_diagonal(corr_matrix, 0.0)
+                    corr_max = float(corr_matrix.max())
+            except Exception:
+                corr_max = 0.0
+
+        try:
+            rag_results.extend(source_agent.check_for_validation("conceptual_soundness", {
+                "correlation_max": corr_max,
+            }))
+        except Exception:
+            pass
+
+        if mdd_text:
+            try:
+                rag_results.extend(source_agent.check_mdd_keywords(mdd_text, stage="conceptual_soundness"))
+            except Exception:
+                pass
+
+    mapped = _group_stage3(report, rag_results=rag_results, df=df, model_file=model_file, intake=intake, mdd_text=mdd_text)
     # add top-level metadata
     mapped["llm_ran"] = False
     mapped["timestamp"] = pd.Timestamp.now().isoformat()
@@ -2924,13 +2891,12 @@ async def validation_stage3_llm(
 ) -> Dict[str, Any]:
     """Run optional LLM deep-checks for Stage 3 documentation items.
 
-    This calls the local `Agent2` LLM helpers if available. Returns updated findings.
+    Mirrors app.py's "Run AI Deep-Check" button (app.py:5257-5293): sends the MDD
+    text plus the RAG rule set to the LLM checker agent for rules keyword search
+    could not confidently resolve. Uses the source-of-truth Agent2 (val_mdd_rules.json),
+    not the local 24-06 Agent2, which has no LLM/RAG rule methods.
     """
-    # Load Agent2 if present
-    try:
-        agent = Agent2()
-    except Exception:
-        agent = None
+    agent = _load_source_agent2()
 
     intake = {}
     if intake_json:
@@ -2947,23 +2913,20 @@ async def validation_stage3_llm(
             mdd_text = ""
 
     if agent is None:
-        raise HTTPException(status_code=500, detail="Agent2 LLM component unavailable")
+        raise HTTPException(status_code=500, detail="Agent2 RAG component unavailable")
 
-    docs = []
-    if mdd_text:
-        docs = [mdd_text]
+    docs = {"MDD": mdd_text} if mdd_text else {}
 
     only_ids = None
     if only_rule_ids:
         only_ids = [s.strip() for s in only_rule_ids.split(",") if s.strip()]
 
-    # Agent2 exposes a method `check_documents_with_llm` in the POC; adapt if missing.
     try:
-        llm_results = agent.check_documents_with_llm(docs, stage="Stage 3: Conceptual Soundness", only_rule_ids=only_ids)
+        llm_results = agent.check_documents_with_llm(docs, stage="conceptual_soundness", only_rule_ids=only_ids)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM deep-check failed: {e}")
 
-    return {"llm_results": llm_results}
+    return {"llm_results": [_normalize_rag_rule(r) for r in llm_results]}
 
 
 @app.post("/ecl/compute")

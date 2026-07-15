@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
-import { ArrowRight, CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { formUpload } from "@/lib/api";
 
 export const Route = createFileRoute("/validation/conceptual")({
@@ -9,12 +9,54 @@ export const Route = createFileRoute("/validation/conceptual")({
   component: Conceptual,
 });
 
+type Status = "PASS" | "WARN" | "FAIL" | string;
+
+type ThresholdCheck = {
+  check_id: string;
+  title: string;
+  severity: string;
+  status: Status;
+  source: string;
+  principle: string;
+  observed: string;
+  threshold: string;
+  detail: string;
+};
+
+type RagRule = {
+  rule_id: string;
+  flag: string;
+  suggestion: string;
+  severity: string;
+  status: Status;
+  source: string;
+  principle: string;
+  observed_value?: string | string[] | null;
+  not_verifiable?: boolean;
+  check_source?: "llm" | "llm_error" | "quantitative" | "keyword_search" | "" | string;
+  reasoning?: string;
+};
+
+type Stage3Response = {
+  thresholdChecks: ThresholdCheck[];
+  ragRules: RagRule[];
+  summary: { total: number; pass: number; warn: number; fail: number };
+  regulatoryAlignment: {
+    verdict: "PASS" | "CONDITIONAL" | "FAIL" | string;
+    counts: { pass: number; warn: number; fail: number; pending: number };
+    remediation_summary: string;
+    regulatory_references: string[];
+    high_severity_fails: unknown[];
+  };
+  featureRelevance?: { importance_df?: unknown[]; top_drivers?: unknown[] };
+};
+
 // Component renders entirely from backend response; no local mock data kept.
 
 function Conceptual() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<Stage3Response | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -25,7 +67,7 @@ function Conceptual() {
     // No files by default; empty intake will be accepted by backend.
     form.append("intake_json", JSON.stringify({}));
 
-    void formUpload<any>("/validation/stage3/run", form)
+    void formUpload<Stage3Response>("/validation/stage3/run", form)
       .then((resp) => {
         if (!active) return;
         setData(resp);
@@ -45,10 +87,8 @@ function Conceptual() {
     };
   }, []);
 
-  const renderStatusIcon = (s: string | undefined) =>
-    s === "PASS" ? <CheckCircle2 className="h-4 w-4 text-primary" /> :
-    s === "WARN" ? <AlertTriangle className="h-4 w-4 text-warning" /> :
-    <XCircle className="h-4 w-4 text-destructive" />;
+  const summary = data?.summary ?? { total: 0, pass: 0, warn: 0, fail: 0 };
+  const progress = summary.total > 0 ? Math.round((summary.pass / summary.total) * 100) : 0;
 
   return (
     <div className="space-y-8">
@@ -63,108 +103,84 @@ function Conceptual() {
         <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 3: {error}</div>
       ) : (
         <>
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <div className="lg:col-span-2 rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h3 className="text-sm font-semibold">Feature relevance</h3>
-              <p className="text-xs text-muted-foreground">Top SHAP-ranked drivers · economic plausibility check</p>
-              <div className="mt-4 space-y-2">
-                {(() => {
-                  const importanceRows = data?.featureRelevance?.importance_df ?? data?.featureRelevance?.top_drivers ?? [];
-                  if (Array.isArray(importanceRows) && importanceRows.length > 0) {
-                    const maxImportance = Math.max(...importanceRows.map((f: any) => Number(f.Importance ?? 0)), 1);
-                    return importanceRows.slice(0, 8).map((f: any) => {
-                      const importance = Number(f.Importance ?? 0);
-                      const width = Math.max(8, (importance / maxImportance) * 100);
-                      return (
-                        <div key={f.Feature} className="flex items-center gap-3 rounded-lg border border-border bg-background p-3">
-                          <span className="w-44 truncate text-sm font-medium">{f.Feature}</span>
-                          <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                            <div className="h-full rounded-full bg-primary" style={{ width: `${width}%` }} />
-                          </div>
-                          <span className="w-12 text-right text-xs font-mono text-muted-foreground">{importance.toFixed(3)}</span>
-                          <CheckCircle2 className="h-4 w-4 text-primary" />
-                        </div>
-                      );
-                    });
-                  }
-                  return <div className="text-sm text-muted-foreground">No feature importance available.</div>;
-                })()}
-              </div>
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h3 className="text-sm font-semibold">Conceptual Soundness Results</h3>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <SummaryTile label="Total Checks" value={summary.total} tone="neutral" />
+              <SummaryTile label="PASS" value={summary.pass} tone="pass" />
+              <SummaryTile label="WARN" value={summary.warn} tone="warn" />
+              <SummaryTile label="FAIL" value={summary.fail} tone="fail" />
             </div>
-
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h3 className="text-sm font-semibold">Methodology review</h3>
-              <ul className="mt-4 space-y-3 text-sm">
-                {data?.methodologyReview && data.methodologyReview.length > 0 ? (
-                  data.methodologyReview.map((m: any) => (
-                    <li key={m.id} className="flex gap-2 items-start">
-                      {renderStatusIcon(m.status)}
-                      <div className="flex-1">{m.title} <div className="text-xs text-muted-foreground">{m.observed}</div></div>
-                    </li>
-                  ))
-                ) : (
-                  <li className="text-sm text-muted-foreground">No methodology items returned.</li>
-                )}
-              </ul>
+            <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />
             </div>
           </section>
 
           <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h3 className="text-sm font-semibold">Model assumptions</h3>
-              <div className="mt-3 divide-y divide-border">
-                {data?.modelAssumptions && data.modelAssumptions.length > 0 ? (
-                  data.modelAssumptions.map((a: any) => (
-                    <div key={a.id} className="flex items-center justify-between gap-3 py-3 text-sm">
-                      <span className="flex-1">{a.title}</span>
-                      <span className="text-xs text-muted-foreground">{a.observed}</span>
-                      {renderStatusIcon(a.status)}
-                    </div>
-                  ))
+            <div>
+              <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                <div className="text-sm font-bold text-primary">📐 Recommended Threshold Checks</div>
+                <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
+              </div>
+              <div className="space-y-3">
+                {data?.thresholdChecks && data.thresholdChecks.length > 0 ? (
+                  data.thresholdChecks.map((c) => <ThresholdCheckCard key={c.check_id} check={c} />)
                 ) : (
-                  <div className="text-sm text-muted-foreground">No model assumptions returned.</div>
+                  <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                    No threshold checks generated for this stage.
+                  </div>
                 )}
               </div>
             </div>
 
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h3 className="text-sm font-semibold">Documentation checklist</h3>
-              <ul className="mt-3 divide-y divide-border">
-                {data?.documentationChecklist && data.documentationChecklist.length > 0 ? (
-                  data.documentationChecklist.map((d: any) => (
-                    <li key={d.id || d.title} className="flex items-center justify-between py-3 text-sm">
-                      <span>{d.title ?? d.title}</span>
-                      {renderStatusIcon(d.status)}
-                    </li>
-                  ))
+            <div>
+              <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                <div className="text-sm font-bold text-violet-500">🤖 RAG Agent Rules</div>
+                <div className="text-xs text-muted-foreground">
+                  Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)
+                </div>
+              </div>
+              <div className="space-y-3">
+                {data?.ragRules && data.ragRules.length > 0 ? (
+                  data.ragRules.map((r) => <RagRuleCard key={r.rule_id} rule={r} />)
                 ) : (
-                  <li className="text-sm text-muted-foreground">No documentation items returned.</li>
+                  <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                    No RAG agent flags generated for this stage.
+                  </div>
                 )}
-              </ul>
+              </div>
             </div>
           </section>
 
           <section className="rounded-xl border border-primary/30 bg-primary-soft p-6">
             <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
             <p className="mt-2 text-sm">
-              Verdict: <span className="font-semibold">{data?.regulatoryAlignment?.verdict ?? "—"}</span>.
-              Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/{data?.regulatoryAlignment?.counts?.fail ?? 0}.
+              Verdict: <VerdictBadge verdict={data?.regulatoryAlignment?.verdict} />
+            </p>
+            <p className="mt-2 text-sm">
+              Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/
+              {data?.regulatoryAlignment?.counts?.fail ?? 0}
             </p>
             {data?.regulatoryAlignment?.remediation_summary && (
               <p className="mt-3 text-sm text-muted-foreground">{data.regulatoryAlignment.remediation_summary}</p>
             )}
-            {data?.regulatoryAlignment?.regulatory_references?.length > 0 && (
+            {data?.regulatoryAlignment?.regulatory_references?.length ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 {data.regulatoryAlignment.regulatory_references.map((ref: string) => (
-                  <span key={ref} className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80">
+                  <span
+                    key={ref}
+                    className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80"
+                  >
                     {ref}
                   </span>
                 ))}
               </div>
-            )}
-            {data?.regulatoryAlignment?.high_severity_fails?.length > 0 && (
-              <div className="mt-3 text-sm text-destructive">High severity fails: {data.regulatoryAlignment.high_severity_fails.length}</div>
-            )}
+            ) : null}
+            {data?.regulatoryAlignment?.high_severity_fails?.length ? (
+              <div className="mt-3 text-sm text-destructive">
+                High severity fails: {data.regulatoryAlignment.high_severity_fails.length}
+              </div>
+            ) : null}
           </section>
         </>
       )}
@@ -177,6 +193,128 @@ function Conceptual() {
           Continue to Stage 4
           <ArrowRight className="h-4 w-4" />
         </Link>
+      </div>
+    </div>
+  );
+}
+
+const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string; icon: string }> = {
+  PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", badge: "bg-emerald-500 text-emerald-950", icon: "✅" },
+  WARN: { border: "border-amber-500/40", bg: "bg-amber-500/10", badge: "bg-amber-500 text-amber-950", icon: "🟡" },
+  FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950", icon: "🔴" },
+};
+
+const SEVERITY_STYLES: Record<string, string> = {
+  HIGH: "bg-red-500 text-red-950",
+  MEDIUM: "bg-amber-500 text-amber-950",
+  LOW: "bg-emerald-500 text-emerald-950",
+};
+
+const CHECK_SOURCE_LABELS: Record<string, { label: string; classes: string }> = {
+  llm: { label: "🤖 LLM", classes: "bg-violet-500 text-violet-950" },
+  llm_error: { label: "⚠️ LLM (call failed)", classes: "bg-amber-500 text-amber-950" },
+  quantitative: { label: "📐 Rule-based", classes: "bg-sky-500 text-sky-950" },
+  keyword_search: { label: "🔤 Keyword search", classes: "bg-slate-400 text-slate-950" },
+};
+
+function statusStyle(status: string | undefined) {
+  return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
+}
+
+function SummaryTile({ label, value, tone }: { label: string; value: number; tone: "neutral" | "pass" | "warn" | "fail" }) {
+  const classes =
+    tone === "pass"
+      ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+      : tone === "warn"
+      ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300"
+      : tone === "fail"
+      ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
+      : "border-border bg-background text-foreground";
+
+  return (
+    <div className={`rounded-xl border p-4 ${classes}`}>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-2 text-2xl font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function VerdictBadge({ verdict }: { verdict?: string }) {
+  const classes =
+    verdict === "PASS"
+      ? "bg-emerald-500 text-emerald-950"
+      : verdict === "CONDITIONAL"
+      ? "bg-amber-500 text-amber-950"
+      : verdict === "FAIL"
+      ? "bg-red-500 text-red-950"
+      : "bg-muted text-foreground";
+  return (
+    <span className={`ml-1 rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide ${classes}`}>
+      {verdict ?? "—"}
+    </span>
+  );
+}
+
+function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
+  const s = statusStyle(check.status);
+  const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "bg-muted text-foreground";
+  return (
+    <div className={`rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-semibold text-foreground">
+          {s.icon} <span className="text-muted-foreground">[{check.check_id}]</span> {check.title}{" "}
+          <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
+            {check.severity}
+          </span>
+        </div>
+        <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        📋 {check.source} — {check.principle}
+      </div>
+      <div className="mt-2 text-sm text-foreground">
+        📊 Observed: <code className="text-foreground/90">{check.observed}</code>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">📐 Threshold: {check.threshold}</div>
+      <div className="mt-2 text-sm text-muted-foreground">💡 {check.detail}</div>
+    </div>
+  );
+}
+
+function RagRuleCard({ rule }: { rule: RagRule }) {
+  const s = statusStyle(rule.status);
+  const sevClasses = SEVERITY_STYLES[rule.severity?.toUpperCase()] ?? "bg-muted text-foreground";
+  const csrc = CHECK_SOURCE_LABELS[rule.check_source ?? ""];
+  const observed = Array.isArray(rule.observed_value) ? rule.observed_value.join(", ") : rule.observed_value;
+
+  return (
+    <div className={`rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-semibold text-foreground">
+          {s.icon} <span className="text-muted-foreground">[{rule.rule_id}]</span> {rule.flag}
+          {rule.not_verifiable ? (
+            <span className="ml-1 text-xs italic text-muted-foreground"> · not verifiable with current data</span>
+          ) : null}
+          {csrc ? (
+            <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${csrc.classes}`}>{csrc.label}</span>
+          ) : null}
+          <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
+            {rule.severity}
+          </span>
+        </div>
+        <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{rule.status}</span>
+      </div>
+      {observed != null && observed !== "" ? (
+        <div className="mt-2 text-sm text-foreground">
+          📊 Observed: <code className="text-foreground/90">{observed}</code>
+        </div>
+      ) : null}
+      {rule.reasoning ? (
+        <div className="mt-2 text-xs italic text-violet-600 dark:text-violet-300">🧠 {rule.reasoning}</div>
+      ) : null}
+      <div className="mt-2 text-sm text-muted-foreground">💡 {rule.suggestion}</div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        📋 {rule.source} — {rule.principle}
       </div>
     </div>
   );
