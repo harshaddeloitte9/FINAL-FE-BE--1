@@ -636,6 +636,22 @@ def _from_base64(encoded: str) -> Any:
         raise HTTPException(status_code=400, detail=f"Failed to load artifact: {exc}")
 
 
+async def _load_model_artifact(model_artifact: UploadFile) -> Any:
+    """
+    Read a base64-encoded, pickled model pipeline sent as a multipart FILE
+    part (not a plain Form field). A serialized sklearn Pipeline (encoder +
+    estimator) easily exceeds the non-file form-field size cap that
+    Starlette/python-multipart enforce to keep memory-only fields small —
+    file parts stream to a spooled temp file instead and aren't subject to
+    that cap, which is why this must be File(...) rather than Form(...).
+    """
+    try:
+        raw_b64 = (await model_artifact.read()).decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to read model artifact upload: {exc}")
+    return _from_base64(raw_b64)
+
+
 def _infer_target_column(df: pd.DataFrame, requested_target: Optional[str] = None) -> Optional[str]:
     if requested_target is not None:
         if requested_target not in df.columns:
@@ -1725,7 +1741,6 @@ async def train_model_endpoint(
     use_cv: bool = Form(False),
     cv_folds: int = Form(5),
     use_hyperopt: bool = Form(False),
-    use_class_weight: bool = Form(False),
     scale_pos_weight: float = Form(1.0),
     manual_params: Optional[str] = Form(None),
     use_feature_engineering: bool = Form(False),
@@ -1790,7 +1805,6 @@ async def train_model_endpoint(
         model = get_model_instance(
             model_name,
             task_type,
-            class_weight="balanced" if use_class_weight else None,
             scale_pos_weight=scale_pos_weight if model_name == "XGBoost" else None,
         )
     param_grid = None
@@ -1802,7 +1816,6 @@ async def train_model_endpoint(
         target_col=target_col,
         prep_report=prep_report,
         model=model,
-        use_smote=False,
         use_cv=use_cv,
         cv_folds=cv_folds,
         use_hyperopt=use_hyperopt,
@@ -1840,7 +1853,6 @@ async def train_model_endpoint(
             "use_cv": use_cv,
             "cv_folds": cv_folds,
             "use_hyperopt": use_hyperopt,
-            "use_class_weight": use_class_weight,
             "scale_pos_weight": scale_pos_weight,
             "use_feature_engineering": use_feature_engineering,
             "manual_params": manual_params_dict or {},
@@ -1972,7 +1984,7 @@ async def compare_models_endpoint(
 
 @app.post("/models/evaluate")
 async def evaluate_model(
-    model_artifact: str = Form(...),
+    model_artifact: UploadFile = File(...),
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     target_col: str = Form(...),
@@ -1983,7 +1995,7 @@ async def evaluate_model(
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
-    pipeline = _from_base64(model_artifact)
+    pipeline = await _load_model_artifact(model_artifact)
     y_true = df[target_col].values
     X_eval = df.drop(columns=[target_col], errors='ignore')
     y_pred = pipeline.predict(X_eval)
@@ -2020,7 +2032,7 @@ async def evaluate_model(
 
 @app.post("/models/explain")
 async def explain_model(
-    model_artifact: str = Form(...),
+    model_artifact: UploadFile = File(...),
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     target_col: Optional[str] = Form(None),
@@ -2052,7 +2064,7 @@ async def explain_model(
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col is not None and target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
-    pipeline = _from_base64(model_artifact)
+    pipeline = await _load_model_artifact(model_artifact)
 
     if target_col is not None:
         col_types = detect_column_types(df)
@@ -2978,7 +2990,7 @@ async def validation_stage3_llm(
 
 @app.post("/ecl/compute")
 async def compute_ecl(
-    model_artifact: str = Form(...),
+    model_artifact: UploadFile = File(...),
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     target_col: Optional[str] = Form(None),
@@ -2989,7 +3001,7 @@ async def compute_ecl(
     synthetic_samples: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
-    pipeline = _from_base64(model_artifact)
+    pipeline = await _load_model_artifact(model_artifact)
     if target_col is not None and target_col in df.columns:
         X = df.drop(columns=[target_col], errors='ignore')
     else:
