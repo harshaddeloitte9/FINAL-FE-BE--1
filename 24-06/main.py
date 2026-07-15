@@ -1053,7 +1053,7 @@ def _build_evaluation_data(
     y_pred: np.ndarray,
     y_proba: Optional[np.ndarray],
     task_type: str,
-    threshold: float,
+    threshold: Optional[float] = None,
     dates: Optional[pd.Series] = None,
     date_columns: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -1065,9 +1065,19 @@ def _build_evaluation_data(
     the heteroscedasticity residual check, and the temporal-stability bundle
     (Monthly/Quarterly/Yearly actual-vs-predicted) when an origination date
     is available. Returns (metrics, evaluation_data).
+
+    `threshold=None` (the default) auto-selects the F1-maximizing threshold
+    via compute_binary_metrics()/select_best_threshold() instead of a fixed
+    0.5 cut-off — every downstream chart (confusion matrix, threshold curve,
+    etc.) is built against that same resolved threshold so nothing drifts
+    out of sync. Pass an explicit float to pin a specific operating point
+    instead (e.g. a reviewer-chosen threshold on the /models/evaluate page).
     """
     if task_type == "binary":
         metrics = compute_binary_metrics(y_true, y_pred, y_proba, threshold=threshold)
+        # Resolve to the threshold actually used (auto-selected or explicit)
+        # so every chart/payload field below is consistent with `metrics`.
+        threshold = metrics.get("threshold_used", threshold if threshold is not None else 0.5)
         hetero_input = y_proba if y_proba is not None else y_pred
         roc_curve_pts = compute_roc_curve(y_true, y_proba) if y_proba is not None else []
         pr_curve_pts = compute_pr_curve(y_true, y_proba) if y_proba is not None else []
@@ -1113,6 +1123,7 @@ def _build_evaluation_data(
         "metrics": metrics,
         "heteroscedasticity_check": hetero_check,
         "threshold": threshold,
+        "threshold_selection": metrics.get("threshold_selection") if task_type == "binary" else None,
         "task_type": task_type,
         "roc_curve": roc_curve_pts,
         "pr_curve": pr_curve_pts,
@@ -1813,7 +1824,7 @@ async def train_model_endpoint(
             y_proba = None
 
     metrics, evaluation_data = _build_evaluation_data(
-        y_test.values, y_pred, y_proba, task_type, threshold=0.5,
+        y_test.values, y_pred, y_proba, task_type, threshold=None,
         dates=dates_test, date_columns=[origination_date_col] if origination_date_col else [],
     )
 
@@ -1940,7 +1951,7 @@ async def compare_models_endpoint(
                     y_proba = None
 
             if task_type == "binary":
-                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=0.5)
+                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=None)
             else:
                 metrics = compute_regression_metrics(y_test.values, y_pred)
 
@@ -1965,7 +1976,7 @@ async def evaluate_model(
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     target_col: str = Form(...),
-    threshold: float = Form(0.5),
+    threshold: Optional[float] = Form(None),
     synthetic_samples: Optional[int] = Form(None),
     date_col: Optional[str] = Form(None),
 ) -> Dict[str, Any]:

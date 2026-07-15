@@ -62,17 +62,84 @@ def compute_ks_statistic(y_true: np.ndarray, y_proba) -> Dict[str, Any]:
 # Binary Classification Metrics
 # ─────────────────────────────────────────────
 
+# Same grid used everywhere threshold sweeps happen (compute_threshold_analysis,
+# plot_threshold_analysis, select_best_threshold) so the "best" point reported
+# in metrics always lines up exactly with what the threshold-analysis chart shows.
+_THRESHOLD_GRID = np.linspace(0.01, 0.99, 99)
+
+
+def select_best_threshold(
+    y_true: np.ndarray,
+    y_proba,
+    metric: str = "f1",
+    thresholds: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """
+    Sweep decision thresholds and return the one that maximizes `metric`
+    (currently only "f1" is supported). Ties are broken by the lowest
+    threshold among the winners, which favors recall slightly and avoids
+    picking an arbitrarily high cutoff on a flat plateau.
+
+    Returns a dict: {threshold, metric, f1, precision, recall} — `metric`
+    names which score was optimized, the rest are the values achieved at
+    the winning threshold (so the caller doesn't need a second pass).
+    """
+    scores = _to_scores(y_proba)
+    grid = thresholds if thresholds is not None else _THRESHOLD_GRID
+
+    best_idx = 0
+    best_score = -1.0
+    precisions, recalls, f1s = [], [], []
+    for i, t in enumerate(grid):
+        y_pred_t = (scores >= t).astype(int)
+        p = precision_score(y_true, y_pred_t, zero_division=0)
+        r = recall_score(y_true, y_pred_t, zero_division=0)
+        f1 = f1_score(y_true, y_pred_t, zero_division=0)
+        precisions.append(p)
+        recalls.append(r)
+        f1s.append(f1)
+        target = {"f1": f1}.get(metric, f1)
+        if target > best_score:
+            best_score = target
+            best_idx = i
+
+    return {
+        "threshold": float(round(grid[best_idx], 4)),
+        "metric": metric,
+        "f1": round(float(f1s[best_idx]), 4),
+        "precision": round(float(precisions[best_idx]), 4),
+        "recall": round(float(recalls[best_idx]), 4),
+    }
+
+
 def compute_binary_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_proba: Optional[np.ndarray] = None,
-    threshold: float = 0.5,
+    threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Compute full binary classification metric suite."""
+    """
+    Compute full binary classification metric suite.
+
+    `threshold=None` (the default) auto-selects the threshold that maximizes
+    F1 on this data via `select_best_threshold()`, and the choice is recorded
+    in `metrics["threshold_selection"]`. Pass an explicit float to override
+    (e.g. a business-chosen operating point) — that value is used as-is and
+    no auto-selection happens.
+    """
+    threshold_selection = None
     if y_proba is not None:
         _scores = _to_scores(y_proba) if y_proba.ndim == 2 else y_proba
+        if threshold is None:
+            threshold_selection = select_best_threshold(y_true, _scores, metric="f1")
+            threshold = threshold_selection["threshold"]
         y_pred_thresh = (_scores >= threshold).astype(int)
     else:
+        # No probabilities available (e.g. model has no predict_proba) — can't
+        # sweep thresholds, so fall back to the caller's hard predictions and
+        # a nominal 0.5 label for reporting purposes only.
+        if threshold is None:
+            threshold = 0.5
         y_pred_thresh = y_pred
         _scores = None
 
@@ -85,6 +152,8 @@ def compute_binary_metrics(
         "classification_report": classification_report(y_true, y_pred_thresh, output_dict=True, zero_division=0),
         "threshold_used": threshold,
     }
+    if threshold_selection is not None:
+        metrics["threshold_selection"] = threshold_selection
 
     if y_proba is not None and _scores is not None:
         try:
@@ -132,7 +201,7 @@ def compute_threshold_analysis(y_true: np.ndarray, y_proba: Optional[np.ndarray]
     if y_proba is None:
         return []
     scores = _to_scores(y_proba)
-    thresholds = np.linspace(0.01, 0.99, 99)
+    thresholds = _THRESHOLD_GRID
     rows = []
     for threshold in thresholds:
         y_pred_t = (scores >= threshold).astype(int)
@@ -440,7 +509,7 @@ def plot_score_distribution(y_true, y_proba) -> go.Figure:
 
 def plot_threshold_analysis(y_true, y_proba) -> go.Figure:
     """Plot precision, recall, F1 across probability thresholds."""
-    thresholds = np.linspace(0.01, 0.99, 99)
+    thresholds = _THRESHOLD_GRID
     precisions, recalls, f1s = [], [], []
     for t in thresholds:
         y_pred_t = (_to_scores(y_proba) >= t).astype(int)
@@ -456,8 +525,9 @@ def plot_threshold_analysis(y_true, y_proba) -> go.Figure:
     fig.add_trace(go.Scatter(x=thresholds, y=f1s, name="F1",
                               line=dict(color=COLORS["success"], width=2)))
 
-    # Mark best F1 threshold
-    best_t = thresholds[np.argmax(f1s)]
+    # Mark best F1 threshold — same selection logic used for the reported metrics.
+    best = select_best_threshold(y_true, y_proba, metric="f1", thresholds=thresholds)
+    best_t = best["threshold"]
     fig.add_vline(x=best_t, line_dash="dash", line_color=COLORS["danger"],
                    annotation_text=f"Best F1 @ {best_t:.2f}")
 

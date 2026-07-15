@@ -25,6 +25,28 @@ FIX v5 (Out-of-Time validation added — ported from Credit-Risk-Poc-main):
       4. The fitted model is scored exactly once against the OOT holdout —
          never re-fit, never re-tuned against it — and OOT ROC-AUC / Gini
          are reported back in `training_info["oot"]`.
+
+FIX v6 (Automatic class weighting; SMOTE option removed):
+  - Credit-risk targets are heavily imbalanced (e.g. ~10% default rate), and
+    the pipeline had a `use_smote` flag that did nothing — no resampling was
+    ever wired up. Left on a default 0.5 threshold, models trained on raw
+    imbalanced data with no weighting learn to mostly predict the majority
+    class, producing near-zero precision/recall/F1 despite reasonable
+    ROC-AUC.
+  - `use_smote` has been removed. It's replaced with automatic, always-on
+    class weighting: `train_model()` computes balanced sample weights
+    (sklearn's `compute_sample_weight("balanced", y_dev)`) from the
+    DEVELOPMENT data only (post-OOT-carve-off) and passes them into every
+    fit — the plain fit, the hyperparameter search, and Stratified K-Fold
+    CV — for binary and multiclass tasks. There is no toggle for this; it
+    always runs for classification tasks.
+  - Weighting up-weights the rare class instead of duplicating/synthesizing
+    rows (what SMOTE would do), so no synthetic data is introduced and val/
+    test/OOT stay completely untouched, exactly as before.
+  - Not every estimator's `fit()` accepts `sample_weight` (e.g.
+    KNeighborsClassifier). If the model rejects it, training falls back to
+    an unweighted fit automatically and `training_info["class_weighting"]`
+    records that fallback so it isn't silent.
 """
 
 import time
@@ -39,6 +61,7 @@ from sklearn.model_selection import (
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import roc_auc_score
+from sklearn.utils.class_weight import compute_sample_weight
 
 from preprocessing_new import (
     rebuild_preprocessor_for,
@@ -209,7 +232,6 @@ def train_model(
     target_col: str,
     prep_report: Dict[str, Any],
     model,
-    use_smote: bool = False,
     use_cv: bool = False,
     cv_folds: int = 5,
     use_hyperopt: bool = False,
@@ -236,6 +258,12 @@ def train_model(
 
     `dates_train`: a date-like Series indexed the same as X_train (e.g. the
     loan origination date). Required for OOT; ignored if `use_oot=False`.
+
+    Class imbalance: for binary/multiclass tasks, balanced sample weights
+    are computed automatically from the development data (post-OOT) and
+    applied to every fit (plain fit, hyperparameter search, and CV) — there
+    is no `use_smote`/toggle for this, it always runs. See `training_info
+    ["class_weighting"]` for what happened (applied / skipped / fallback).
     """
     training_info: Dict[str, Any] = {"preprocessing_method": "standard"}
     start_time = time.time()
@@ -256,6 +284,25 @@ def train_model(
 
     training_info["oot"] = oot_info
 
+    # ── Automatic class weighting (replaces the old no-op use_smote flag) ──
+    # Computed from development data only (post-OOT), never from val/test/OOT.
+    # No resampling / synthetic rows — just up-weights the rare class so the
+    # loss function stops treating "always predict majority class" as a good
+    # solution. Always on for classification; not a user-facing toggle.
+    sample_weight = None
+    class_weighting_info: Dict[str, Any] = {"applied": False}
+    if task_type in ("binary", "multiclass"):
+        if y_dev.nunique() < 2:
+            class_weighting_info["reason"] = "Development target has fewer than 2 classes — weighting skipped."
+        else:
+            sample_weight = compute_sample_weight(class_weight="balanced", y=y_dev)
+            class_weighting_info = {
+                "applied": True,
+                "method": "balanced (sklearn compute_sample_weight)",
+                "class_counts": {str(k): int(v) for k, v in y_dev.value_counts().items()},
+            }
+    training_info["class_weighting"] = class_weighting_info
+
     # ── Preprocessing — identical path for every model ──
     preprocessor = rebuild_preprocessor_for(X_dev, col_types, target_col, prep_report)
 
@@ -263,6 +310,10 @@ def train_model(
         ("preprocessor", preprocessor),
         ("model", model),
     ])
+
+    fit_kwargs: Dict[str, Any] = {}
+    if sample_weight is not None:
+        fit_kwargs["model__sample_weight"] = sample_weight
 
     # ── Hyperparameter search (development data only) ──
     if use_hyperopt and param_grid:
@@ -273,12 +324,28 @@ def train_model(
             n_iter=8, cv=cv, scoring=scoring,
             random_state=42, n_jobs=-1, verbose=0,
         )
-        search.fit(X_dev, y_dev)
+        try:
+            search.fit(X_dev, y_dev, **fit_kwargs)
+        except TypeError:
+            # Estimator's fit() doesn't accept sample_weight (e.g. KNN) — fall
+            # back to an unweighted fit rather than failing training outright.
+            training_info["class_weighting"]["applied"] = False
+            training_info["class_weighting"]["reason"] = (
+                "Model does not support sample_weight — fell back to unweighted fit."
+            )
+            search.fit(X_dev, y_dev)
         fitted_pipeline = search.best_estimator_
         training_info["best_params"] = {k.replace("model__", ""): v for k, v in search.best_params_.items()}
         training_info["cv_best_score"] = round(search.best_score_, 4)
     else:
-        pipeline.fit(X_dev, y_dev)
+        try:
+            pipeline.fit(X_dev, y_dev, **fit_kwargs)
+        except TypeError:
+            training_info["class_weighting"]["applied"] = False
+            training_info["class_weighting"]["reason"] = (
+                "Model does not support sample_weight — fell back to unweighted fit."
+            )
+            pipeline.fit(X_dev, y_dev)
         fitted_pipeline = pipeline
         training_info["best_params"] = {}
 
@@ -286,16 +353,31 @@ def train_model(
 
     # ── Optional Stratified K-Fold CV — development data only ──
     if use_cv:
+        scoring = "roc_auc" if task_type == "binary" else "accuracy"
+        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
         try:
-            scoring = "roc_auc" if task_type == "binary" else "accuracy"
             cv_scores = cross_val_score(
                 fitted_pipeline, X_dev, y_dev,
-                cv=StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42),
-                scoring=scoring, n_jobs=-1,
+                cv=cv_splitter, scoring=scoring, n_jobs=-1,
+                params=fit_kwargs if fit_kwargs else None,
             )
             training_info["cv_scores"] = cv_scores.tolist()
             training_info["cv_mean"] = round(cv_scores.mean(), 4)
             training_info["cv_std"] = round(cv_scores.std(), 4)
+        except TypeError:
+            # Older sklearn (< 1.4) uses `fit_params=` instead of `params=`,
+            # or the estimator rejects sample_weight entirely — retry
+            # unweighted rather than losing CV reporting altogether.
+            try:
+                cv_scores = cross_val_score(
+                    fitted_pipeline, X_dev, y_dev,
+                    cv=cv_splitter, scoring=scoring, n_jobs=-1,
+                )
+                training_info["cv_scores"] = cv_scores.tolist()
+                training_info["cv_mean"] = round(cv_scores.mean(), 4)
+                training_info["cv_std"] = round(cv_scores.std(), 4)
+            except Exception as e:
+                training_info["cv_error"] = str(e)
         except Exception as e:
             training_info["cv_error"] = str(e)
 
