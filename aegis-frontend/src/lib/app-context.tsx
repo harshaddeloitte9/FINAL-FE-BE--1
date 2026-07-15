@@ -57,6 +57,7 @@ type DatasetState = {
   validationProfile?: Record<string, any> | null;
   validationResults?: Record<string, any> | null;
   validationStage3Result?: Record<string, any> | null;
+  validationStage4Result?: Record<string, any> | null;
   validationStage5Result?: Record<string, any> | null;
   setUploadResult: (file: File | null, profile: DatasetProfile | null) => void;
   setProfile: (profile: DatasetProfile | null) => void;
@@ -75,6 +76,7 @@ type DatasetState = {
   setValidationProfile: (profile: Record<string, any> | null) => void;
   setValidationResults: (results: Record<string, any> | null) => void;
   setValidationStage3Result: (result: Record<string, any> | null) => void;
+  setValidationStage4Result: (result: Record<string, any> | null) => void;
   setValidationStage5Result: (result: Record<string, any> | null) => void;
 };
 
@@ -98,6 +100,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [validationProfile, setValidationProfileState] = React.useState<Record<string, any> | null>(null);
   const [validationResults, setValidationResultsState] = React.useState<Record<string, any> | null>(null);
   const [validationStage3Result, setValidationStage3ResultState] = React.useState<Record<string, any> | null>(null);
+  const [validationStage4Result, setValidationStage4ResultState] = React.useState<Record<string, any> | null>(null);
   const [validationStage5Result, setValidationStage5ResultState] = React.useState<Record<string, any> | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
@@ -251,6 +254,10 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setValidationStage3ResultState(result);
   }, []);
 
+  const setValidationStage4Result = React.useCallback((result: Record<string, any> | null) => {
+    setValidationStage4ResultState(result);
+  }, []);
+
   const setValidationStage5Result = React.useCallback((result: Record<string, any> | null) => {
     setValidationStage5ResultState(result);
   }, []);
@@ -274,6 +281,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationProfile,
       validationResults,
       validationStage3Result,
+      validationStage4Result,
       validationStage5Result,
       setUploadResult,
       setProfile: setProfileState,
@@ -292,6 +300,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationProfile,
       setValidationResults,
       setValidationStage3Result,
+      setValidationStage4Result,
       setValidationStage5Result,
     }),
     [
@@ -312,6 +321,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationProfile,
       validationResults,
       validationStage3Result,
+      validationStage4Result,
       validationStage5Result,
       setUploadResult,
       setRecommendations,
@@ -329,6 +339,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationProfile,
       setValidationResults,
       setValidationStage3Result,
+      setValidationStage4Result,
       setValidationStage5Result,
     ],
   );

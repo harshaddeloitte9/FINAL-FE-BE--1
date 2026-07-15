@@ -79,9 +79,25 @@ function Performance() {
     (ds.validationStage5Result as PerformanceResponse | null) ?? null,
   );
 
-  const datasetFile = localFile ?? ds.file ?? null;
   const datasetName = localFile?.name ?? ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
   const datasetReady = Boolean(localFile || ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
+
+  // By the time a reviewer reaches Stage 5, the working dataset often only
+  // exists as profile.csv_text (not a literal File object) — carried forward
+  // through preprocessing/FE/macro-fetch as text, same as Stage 4's activeFile
+  // pattern. Without this reconstruction, the auto-run below silently no-ops
+  // whenever ds.file is null, leaving the page stuck on the bare input form.
+  const datasetFile = React.useMemo<File | null>(() => {
+    if (localFile) return localFile;
+    if (ds.file) return ds.file;
+    const csvText = typeof ds.profile?.csv_text === "string" ? ds.profile.csv_text : "";
+    if (!csvText.trim()) return null;
+    const resolvedName = ds.profile?.dataset_name ?? "validation_dataset.csv";
+    const safeName = resolvedName.endsWith(".csv") || resolvedName.endsWith(".xlsx")
+      ? resolvedName
+      : `${resolvedName}.csv`;
+    return new File([csvText], safeName, { type: "text/csv" });
+  }, [localFile, ds.file, ds.profile?.csv_text, ds.profile?.dataset_name]);
 
   const handleRun = React.useCallback(async (fileOverride?: File | null) => {
     const fileToUse = fileOverride ?? datasetFile;
@@ -134,12 +150,12 @@ function Performance() {
   const autoRunAttempted = React.useRef(payload !== null);
   React.useEffect(() => {
     if (autoRunAttempted.current) return;
-    if (!datasetReady || !ds.file) return;
+    if (!datasetReady || !datasetFile) return;
     if (!targetCol.trim() || !modelName.trim()) return;
     autoRunAttempted.current = true;
-    void handleRun(ds.file);
+    void handleRun(datasetFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetReady, ds.file, targetCol, modelName]);
+  }, [datasetReady, datasetFile, targetCol, modelName]);
 
   const metricCards = React.useMemo(() => {
     const metrics = payload?.report?.metrics ?? {};

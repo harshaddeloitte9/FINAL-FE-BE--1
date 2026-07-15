@@ -120,8 +120,14 @@ function ModelReplicationPanel() {
   const [availableModels, setAvailableModels] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(null);
-  const [flags, setFlags] = React.useState<string[]>([]);
+  // Seed from shared context so returning to this page (e.g. via Back from
+  // Stage 5) shows the already-computed R4.1-R4.8 checks and model ranking
+  // instead of forcing a full rerun — replication/flags previously lived
+  // only in this local state and were lost on every remount.
+  const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
+    (ds.validationStage4Result?.replication as { result: ReplicationResult; checks: ReplicationCheck[] } | null) ?? null,
+  );
+  const [flags, setFlags] = React.useState<string[]>((ds.validationStage4Result?.flags as string[] | null) ?? []);
 
   // profile / trainingResult shapes aren't strictly typed on the context
   // (Record<string, any>), so field access below is defensive with fallbacks.
@@ -273,6 +279,7 @@ function ModelReplicationPanel() {
       const res = await formUpload<ReplicationResponse>("/validation/replication", form);
       setReplication(res.report.replication);
       setFlags(res.flags ?? []);
+      ds.setValidationStage4Result({ replication: res.report.replication, flags: res.flags ?? [] });
     } catch (err) {
       if (err instanceof ApiError) {
         const detail =
