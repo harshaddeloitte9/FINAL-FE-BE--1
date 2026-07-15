@@ -2993,6 +2993,46 @@ async def validation_stage3_run(
     return mapped
 
 
+@app.post("/validation/stage7/run")
+async def validation_stage7_run(
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+) -> Dict[str, Any]:
+    """Run Stage 7 Regulatory Compliance checks (7.1-7.10).
+
+    Mirrors app.py's render_val_regulatory() Tab 1: hardcoded keyword/threshold
+    checks against the MDD text and intake_json (not RAG-based, unlike Stage 3).
+    Reuses ValidationAgent2.check_regulatory_compliance() via run_all_checks(),
+    same pattern as /validation/stage3/run.
+    """
+    intake = {}
+    if intake_json:
+        try:
+            intake = json.loads(intake_json)
+        except Exception:
+            intake = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
+        except Exception:
+            mdd_text = ""
+
+    report = run_validation_agent2(None, intake, mdd_text)
+    findings = report.get("findings_by_stage", {}).get("Stage 7: Regulatory Compliance", [])
+    checks = [_normalize_threshold_check(f) for f in findings]
+
+    summary = {
+        "total": len(checks),
+        "pass": sum(1 for c in checks if c.get("status") == "PASS"),
+        "warn": sum(1 for c in checks if c.get("status") == "WARN"),
+        "fail": sum(1 for c in checks if c.get("status") == "FAIL"),
+    }
+
+    return {"checks": checks, "summary": summary}
+
+
 @app.post("/validation/stage3/llm-check")
 async def validation_stage3_llm(
     intake_json: Optional[str] = Form(None),

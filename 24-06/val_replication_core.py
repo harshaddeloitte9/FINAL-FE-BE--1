@@ -22,6 +22,7 @@ from feature_engineering import analyze_for_feature_engineering, apply_feature_e
 from train import split_data, compute_split_stats, train_model
 from evaluate import compute_binary_metrics
 from model_selector import CLASSIFICATION_MODELS
+from explainability import extract_feature_importance
 
 
 def _gini(y_true: np.ndarray, y_score: np.ndarray) -> float:
@@ -183,6 +184,7 @@ def run_replication(
         "y_test": None,
         "y_proba": None,
         "y_pred": None,
+        "feature_importance": [],
     }
     t0 = time.time()
     try:
@@ -269,6 +271,17 @@ def run_replication(
         metrics["gini"] = _gini(y_test.values, y_proba)
         metrics["ks"] = _ks(y_test.values, y_proba)
 
+        # Feature importance of the replicated model, exposed so Stage 7
+        # (Explainability & Fairness) can chart it without re-running
+        # replication or requiring a separately-trained model artifact.
+        feature_importance: List[Dict[str, Any]] = []
+        try:
+            importance_df = extract_feature_importance(pipeline)
+            if importance_df is not None:
+                feature_importance = importance_df.to_dict(orient="records")
+        except Exception:
+            feature_importance = []
+
         out.update({
             "success": True,
             "metrics": metrics,
@@ -281,6 +294,7 @@ def run_replication(
             "y_test": y_test,
             "y_proba": y_proba,
             "y_pred": y_pred,
+            "feature_importance": feature_importance,
         })
 
         seed_aucs = []
