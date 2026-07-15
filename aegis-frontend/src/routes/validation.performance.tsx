@@ -75,6 +75,7 @@ function Performance() {
 
   const datasetFile = localFile ?? ds.file ?? null;
   const datasetName = localFile?.name ?? ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
+  const datasetReady = Boolean(localFile || ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
 
   const handleRun = async () => {
     if (!datasetFile) {
@@ -222,6 +223,23 @@ function Performance() {
             <span>{error}</span>
           </div>
         ) : null}
+      </section>
+
+      <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
+        {datasetReady ? (
+          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-foreground">{datasetName}</span>.</>
+        ) : (
+          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+        )}
+      </section>
+
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        {metricCards.map((m) => (
+          <div key={m.label} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{m.label}</div>
+            <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{m.value}</div>
+          </div>
+        ))}
       </section>
 
       {!payload && !loading ? (

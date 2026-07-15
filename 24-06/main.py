@@ -2495,7 +2495,7 @@ async def validation_replication(
             if isinstance(parsed, dict):
                 reported.update({k: v for k, v in parsed.items() if v is not None})
         except Exception:
-            pass 
+            pass
     if mdd_file is not None:
         try:
             # parse_mdd_file was ported from Streamlit and expects a sync
@@ -2533,7 +2533,13 @@ async def validation_replication(
 
     # Build flags similar to Agent2: list of failing check ids
     flags = [c["id"] for c in checks if c.get("status") in ("FAIL",)]
-    return {"stage": "replication", "flags": flags, "report": {"replication": {"result": result, "checks": checks}}}
+
+    safe_result = dict(result)
+    for key in ["X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
+        safe_result.pop(key, None)
+    safe_result = _serialize_stage5_payload(safe_result)
+
+    return {"stage": "replication", "flags": flags, "report": {"replication": {"result": safe_result, "checks": checks}}}
 
 
 @app.post("/validation/agent2")
