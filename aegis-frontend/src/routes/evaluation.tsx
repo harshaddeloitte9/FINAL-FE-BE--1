@@ -165,6 +165,10 @@ function Evaluation() {
     : typeof evaluationData?.threshold === "number"
       ? evaluationData.threshold
       : 0.5;
+  // Present only when the backend auto-picked the threshold (i.e. no explicit
+  // override was passed to /models/train) — see evaluate_new.select_best_threshold.
+  const thresholdSelection = evaluationMetrics?.threshold_selection ?? evaluationData?.threshold_selection ?? null;
+  const isAutoThreshold = thresholdSelection != null;
 
   const confusion = useMemo(() => {
     const matrix = evaluationMetrics?.confusion_matrix;
@@ -379,7 +383,21 @@ function Evaluation() {
 
           {activeTab === "summary" ? (
             <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-              <Card title="Hold-out performance" sub={`Key evaluation metrics from the test split · decision threshold ${threshold.toFixed(2)}`}>
+              <Card
+                title="Hold-out performance"
+                sub={`Key evaluation metrics from the test split · decision threshold ${threshold.toFixed(2)}${isAutoThreshold ? " (auto-selected, max F1)" : ""}`}
+              >
+                {isAutoThreshold && (
+                  <div className="mb-4 flex items-start gap-2 rounded-lg border border-blue-200 bg-blue-500/10 p-3">
+                    <Info className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+                    <p className="text-xs text-blue-900">
+                      Threshold <strong>{threshold.toFixed(2)}</strong> was chosen automatically — it's the cut-off
+                      that maximizes F1 ({(thresholdSelection.f1 * 100).toFixed(1)}%) on this hold-out set, out of
+                      99 candidate thresholds swept from 0.01 to 0.99. At this cut-off: precision{" "}
+                      {(thresholdSelection.precision * 100).toFixed(1)}%, recall {(thresholdSelection.recall * 100).toFixed(1)}%.
+                    </p>
+                  </div>
+                )}
                 <div className="grid gap-3 sm:grid-cols-2">
                   {summaryMetricRows.map((metric) => (
                     <div key={metric.label} className="rounded-lg border border-border bg-background/70 p-3">
@@ -446,7 +464,7 @@ function Evaluation() {
             )}
 
             {activeTab === "confusion" && (
-              <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}`}>
+              <Card title="Confusion matrix" sub={`Threshold ${threshold.toFixed(2)}${isAutoThreshold ? " (auto-selected, max F1)" : ""}`}>
                 <div className="flex justify-center overflow-auto py-2">
                   <table className="border-separate" style={{ borderSpacing: 8 }}>
                     <thead>
@@ -507,7 +525,10 @@ function Evaluation() {
             )}
 
             {activeTab === "threshold" && (
-              <Card title="Threshold analysis" sub="Precision · Recall · F1 across cut-offs">
+              <Card
+                title="Threshold analysis"
+                sub={isAutoThreshold ? `Precision · Recall · F1 across cut-offs · best F1 at ${threshold.toFixed(2)}` : "Precision · Recall · F1 across cut-offs"}
+              >
                 {thresholdFigure ? (
                   <PlotlyChart figure={thresholdFigure} style={{ minHeight: 360 }} />
                 ) : (
