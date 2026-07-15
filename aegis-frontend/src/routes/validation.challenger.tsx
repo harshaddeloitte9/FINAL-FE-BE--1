@@ -20,7 +20,7 @@ import { api, formUpload, ApiError } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
 export const Route = createFileRoute("/validation/challenger")({
-  head: () => ({ meta: [{ title: "Replication & Benchmarking — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Model Replication — Aegis Credit" }] }),
   component: Challenger,
 });
 
@@ -638,8 +638,8 @@ function Challenger() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 4 — Replication & Benchmarking"
-        description="Replicate developer outputs and benchmark the champion model against approved challengers."
+        title="Stage 4 — Model Replication"
+        description="Independently reproduce the developer's submitted model and outputs, and verify results against the R4.1-R4.8 replication checks."
       />
 
       <ModelReplicationPanel />
