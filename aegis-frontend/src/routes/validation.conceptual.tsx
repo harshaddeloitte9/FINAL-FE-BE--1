@@ -172,8 +172,8 @@ function Conceptual() {
             </div>
           </section>
 
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <div>
+          <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
                 <div className="text-sm font-bold text-primary">📐 Recommended Threshold Checks</div>
                 <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
@@ -189,7 +189,7 @@ function Conceptual() {
               </div>
             </div>
 
-            <div>
+            <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
                 <div className="text-sm font-bold text-violet-500">🤖 RAG Agent Rules</div>
                 <div className="text-xs text-muted-foreground">
@@ -315,9 +315,9 @@ function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
   const s = statusStyle(check.status);
   const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "bg-muted text-foreground";
   return (
-    <div className={`rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+    <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">
+        <div className="min-w-0 flex-1 break-words text-sm font-semibold text-foreground">
           {s.icon} <span className="text-muted-foreground">[{check.check_id}]</span> {check.title}{" "}
           <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
             {check.severity}
@@ -344,9 +344,9 @@ function RagRuleCard({ rule }: { rule: RagRule }) {
   const observed = Array.isArray(rule.observed_value) ? rule.observed_value.join(", ") : rule.observed_value;
 
   return (
-    <div className={`rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+    <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">
+        <div className="min-w-0 flex-1 break-words text-sm font-semibold text-foreground">
           {s.icon} <span className="text-muted-foreground">[{rule.rule_id}]</span> {rule.flag}
           {rule.not_verifiable ? (
             <span className="ml-1 text-xs italic text-muted-foreground"> · not verifiable with current data</span>

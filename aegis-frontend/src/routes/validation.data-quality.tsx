@@ -524,14 +524,14 @@ function DataQuality() {
           </section>
 
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="grid gap-4 xl:grid-cols-[0.75fr_1.25fr]">
-              <div>
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[0.75fr_1.25fr]">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="min-w-0">
                     <p className="text-sm font-semibold text-foreground">Validation results</p>
                     <p className="text-xs text-muted-foreground">Automated rule and threshold checks performed against the active dataset.</p>
                   </div>
-                  <div className="text-right">
+                  <div className="shrink-0 text-right">
                     <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Total agent rules</div>
                     <div className="mt-1 text-2xl font-semibold text-foreground">{totalChecks}</div>
                   </div>
@@ -545,17 +545,17 @@ function DataQuality() {
                   <div className="h-2 rounded-full bg-emerald-500" style={{ width: totalChecks ? `${Math.round((passCount / totalChecks) * 100)}%` : "0%" }} />
                 </div>
               </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-xl border border-border bg-background p-4">
+              <div className="grid min-w-0 gap-3 md:grid-cols-2">
+                <div className="min-w-0 rounded-xl border border-border bg-background p-4">
                   <div className="text-sm font-semibold text-foreground">Recommended threshold checks</div>
                   <p className="mt-2 text-xs text-muted-foreground">Quantitative checks against dataset quality and validation requirements.</p>
                 </div>
-                <div className="rounded-xl border border-border bg-background p-4">
+                <div className="min-w-0 rounded-xl border border-border bg-background p-4">
                   <div className="text-sm font-semibold text-foreground">RAG agent rules</div>
                   <p className="mt-2 text-xs text-muted-foreground">Regulatory findings from the knowledge store and dataset rule checks.</p>
                   <div className="mt-3 space-y-1 text-xs text-foreground">
                     {sourceSummary.length > 0 ? sourceSummary.map((summary) => (
-                      <div key={summary}>• {summary}</div>
+                      <div key={summary} className="break-words">• {summary}</div>
                     )) : <div>No source summary available.</div>}
                   </div>
                 </div>
@@ -563,8 +563,8 @@ function DataQuality() {
             </div>
           </section>
 
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="min-w-0 rounded-xl border border-border bg-card p-6 shadow-elegant">
               <h3 className="text-sm font-semibold">Recommended threshold checks</h3>
               <div className="mt-5 space-y-4">
                 {thresholdChecks.length > 0 ? (
@@ -579,7 +579,7 @@ function DataQuality() {
               </div>
             </div>
 
-            <div className="space-y-6">
+            <div className="min-w-0 space-y-6">
               <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
                 <h3 className="text-sm font-semibold">RAG Agent validation flags</h3>
                 <div className="mt-5 space-y-4">
@@ -702,13 +702,13 @@ function ThresholdCheckCard({ check }: { check: ValidationResultRow }) {
       : "border-red-500/30 bg-red-500/10";
 
   return (
-    <div className={`rounded-xl border p-4 ${borderClasses}`}>
+    <div className={`min-w-0 rounded-xl border p-4 ${borderClasses}`}>
       <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold text-foreground">[{check.id}] {check.title}</div>
-          <div className="mt-2 text-xs text-muted-foreground">{check.source} · {check.principle}</div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-foreground break-words">[{check.id}] {check.title}</div>
+          <div className="mt-2 text-xs text-muted-foreground break-words">{check.source} · {check.principle}</div>
         </div>
-        <div className="space-y-1 text-right">
+        <div className="shrink-0 space-y-1 text-right">
           <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{check.status}</div>
           <div className="rounded-full border border-current px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">{check.severity}</div>
         </div>
@@ -728,13 +728,13 @@ function ValidationFlagCard({ flag }: { flag: any }) {
       ? "border-amber-500/30 bg-amber-500/10"
       : "border-emerald-500/30 bg-emerald-500/10";
   return (
-    <div className={`rounded-xl border p-4 ${severityClasses}`}>
+    <div className={`min-w-0 rounded-xl border p-4 ${severityClasses}`}>
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] font-semibold text-foreground">[{flag.rule_id}] {flag.flag}</div>
-          <div className="mt-2 text-xs text-muted-foreground">{flag.source} · {flag.principle}</div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-semibold text-foreground break-words">[{flag.rule_id}] {flag.flag}</div>
+          <div className="mt-2 text-xs text-muted-foreground break-words">{flag.source} · {flag.principle}</div>
         </div>
-        <span className="rounded-full border border-current px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">
+        <span className="shrink-0 rounded-full border border-current px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">
           {flag.severity?.toString()?.toUpperCase()}
         </span>
       </div>
