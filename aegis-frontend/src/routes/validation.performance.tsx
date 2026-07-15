@@ -71,7 +71,13 @@ function Performance() {
   const [benchmarkModel, setBenchmarkModel] = React.useState("Logistic Regression (Industry Standard)");
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [payload, setPayload] = React.useState<PerformanceResponse | null>(null);
+  // Seed from shared context so returning to this page (e.g. via Back from
+  // Stage 6) shows the already-computed result instead of resetting to the
+  // bare input form — payload previously lived only in this local state and
+  // was lost on every remount.
+  const [payload, setPayload] = React.useState<PerformanceResponse | null>(
+    (ds.validationStage5Result as PerformanceResponse | null) ?? null,
+  );
 
   const datasetFile = localFile ?? ds.file ?? null;
   const datasetName = localFile?.name ?? ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
@@ -102,6 +108,7 @@ function Performance() {
       form.append("benchmark_model", benchmarkModel.trim());
       const res = await formUpload<PerformanceResponse>("/validation/performance", form);
       setPayload(res);
+      ds.setValidationStage5Result(res as unknown as Record<string, any>);
     } catch (err) {
       if (err instanceof ApiError) {
         const detail =
