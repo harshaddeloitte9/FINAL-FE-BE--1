@@ -57,20 +57,6 @@ function Landing() {
           cta="Open Model Validation"
         />
       </div>
-
-      <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {[
-          ["47", "Models in inventory"],
-          ["92.4%", "Compliance score"],
-          ["12", "Active validations"],
-          ["Tier 2", "Risk classification"],
-        ].map(([v, l]) => (
-          <div key={l} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-            <div className="text-2xl font-semibold tracking-tight">{v}</div>
-            <div className="mt-1 text-[11px] uppercase tracking-wider text-muted-foreground">{l}</div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

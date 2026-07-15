@@ -218,7 +218,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <ShieldCheck className="h-5 w-5 text-primary-foreground" />
               </div>
               <div className="leading-tight">
-                <div className="text-sm font-semibold tracking-tight">Aegis Credit</div>
+                <div className="text-sm font-semibold tracking-tight">Credit Risk POC</div>
                 <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">AI Model Platform</div>
               </div>
             </Link>
@@ -250,12 +250,6 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 Validate
               </Link>
-            )}
-            {!isLanding && (
-              <div className="hidden items-center gap-2 rounded-full bg-primary-soft px-3 py-1.5 text-xs font-medium text-foreground sm:flex">
-                <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-                Production · Tier 2
-              </div>
             )}
             <button className="relative inline-flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground">
               <Bell className="h-4 w-4" />
