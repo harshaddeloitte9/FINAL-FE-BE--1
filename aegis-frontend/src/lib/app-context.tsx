@@ -10,7 +10,6 @@ type TrainingConfig = {
   use_cv: boolean;
   cv_folds: number;
   use_hyperopt: boolean;
-  use_class_weight: boolean;
   scale_pos_weight: number;
   use_feature_engineering: boolean;
   manual_params: Record<string, any>;
@@ -149,16 +148,30 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (typeof window === "undefined" || !isHydrated) return;
 
+    // model_artifact is a base64-encoded, pickled sklearn pipeline — it can
+    // easily be several MB and blows past localStorage's ~5-10MB per-origin
+    // quota. It only needs to live in memory for this session (it's used
+    // to call /models/evaluate), so it's deliberately excluded here rather
+    // than persisted. A page reload will require re-training to get a
+    // fresh artifact, but that's a much better trade-off than crashing the
+    // whole app on every training run.
+    const { model_artifact, ...trainingResultToPersist } = trainingResult ?? {};
     const persisted = {
       trainingConfig,
-      trainingResult,
+      trainingResult: trainingResult ? trainingResultToPersist : null,
       comparisonResults,
       compareModels,
       selectedModel,
       selectedComparisonModel,
     };
 
-    window.localStorage.setItem("aegis_dataset_state", JSON.stringify(persisted));
+    try {
+      window.localStorage.setItem("aegis_dataset_state", JSON.stringify(persisted));
+    } catch (err) {
+      // Quota exceeded (or any other storage failure) — state still works
+      // fine in memory for this session, it just won't survive a refresh.
+      console.warn("Failed to persist dataset state to localStorage:", err);
+    }
   }, [trainingConfig, trainingResult, comparisonResults, compareModels, selectedModel, selectedComparisonModel, isHydrated]);
 
   const setUploadResult = React.useCallback((f: File | null, p: DatasetProfile | null) => {

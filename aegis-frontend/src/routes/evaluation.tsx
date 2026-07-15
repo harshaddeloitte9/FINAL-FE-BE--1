@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
 import PlotlyChart from "@/components/plotly-chart";
-import { ArrowLeft, ArrowRight, Download } from "lucide-react";
+import { ArrowLeft, ArrowRight, Download, Info } from "lucide-react";
 import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/evaluation")({

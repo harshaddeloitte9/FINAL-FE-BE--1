@@ -100,7 +100,11 @@ function Explainability() {
 
   const explainParams = () => {
     const form = new FormData();
-    form.append("model_artifact", modelArtifact!);
+    // Sent as a file part (not a plain text field): the base64-encoded
+    // pipeline can be several MB, and multipart parsers cap plain form
+    // fields much lower than file parts, which was causing 400s here.
+    const modelArtifactBlob = new Blob([modelArtifact!], { type: "text/plain" });
+    form.append("model_artifact", modelArtifactBlob, "model_artifact.b64");
     form.append("file", file!);
     form.append("target_col", targetColumn);
     form.append("use_feature_engineering", String(Boolean(trainingConfig.use_feature_engineering)));
