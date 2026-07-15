@@ -83,8 +83,9 @@ function Performance() {
   const datasetName = localFile?.name ?? ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
   const datasetReady = Boolean(localFile || ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
 
-  const handleRun = async () => {
-    if (!datasetFile) {
+  const handleRun = React.useCallback(async (fileOverride?: File | null) => {
+    const fileToUse = fileOverride ?? datasetFile;
+    if (!fileToUse) {
       setError("Upload a dataset or use the file from Intake before running Stage 5.");
       return;
     }
@@ -102,7 +103,7 @@ function Performance() {
     setPayload(null);
     try {
       const form = new FormData();
-      form.append("file", datasetFile);
+      form.append("file", fileToUse);
       form.append("model_name", modelName.trim());
       form.append("target_col", targetCol.trim());
       form.append("benchmark_model", benchmarkModel.trim());
@@ -122,7 +123,23 @@ function Performance() {
     } finally {
       setLoading(false);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetFile, targetCol, modelName, benchmarkModel]);
+
+  // Auto-run once the shared dataset from Intake/Data Upload is available,
+  // same as Stage 2/Stage 3 — the reviewer shouldn't have to manually
+  // re-upload a file that's already sitting in context just to see Stage 5
+  // results. Skipped if we already restored a cached result from context
+  // (Back/Forward nav) or the reviewer already ran it locally this session.
+  const autoRunAttempted = React.useRef(payload !== null);
+  React.useEffect(() => {
+    if (autoRunAttempted.current) return;
+    if (!datasetReady || !ds.file) return;
+    if (!targetCol.trim() || !modelName.trim()) return;
+    autoRunAttempted.current = true;
+    void handleRun(ds.file);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetReady, ds.file, targetCol, modelName]);
 
   const metricCards = React.useMemo(() => {
     const metrics = payload?.report?.metrics ?? {};
@@ -214,7 +231,7 @@ function Performance() {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={handleRun}
+            onClick={() => handleRun()}
             disabled={!datasetFile || loading}
             className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -383,7 +400,7 @@ function Performance() {
                 </label>
                 <button
                   type="button"
-                  onClick={handleRun}
+                  onClick={() => handleRun()}
                   disabled={loading || !datasetFile}
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
