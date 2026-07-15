@@ -26,12 +26,15 @@ import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean };
-type ModelTab = { to: string; label: string; key: "pd" | "lgd" | "ead" };
 
-const modelTabs: ModelTab[] = [
-  { to: "/pd", label: "PD Model", key: "pd" },
-  { to: "/lgd", label: "LGD Model", key: "lgd" },
-  { to: "/ead", label: "EAD Model", key: "ead" },
+const workflowSteps: Array<{ to: string; label: string }> = [
+  { to: "/data-upload", label: "Data Upload" },
+  { to: "/profiling", label: "Data Profiling" },
+  { to: "/preprocessing", label: "Preprocessing" },
+  { to: "/features", label: "Feature Engineering" },
+  { to: "/training", label: "Model Training" },
+  { to: "/evaluation", label: "Model Evaluation" },
+  { to: "/explainability", label: "Explainability" },
 ];
 
 const developmentNav: NavItem[] = [
@@ -118,7 +121,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
             {!collapsed && (
               <div className="flex flex-col leading-tight">
-                <span className="text-sm font-semibold tracking-tight">Aegis Credit</span>
+                <span className="text-sm font-semibold tracking-tight">Credit Risk POC</span>
                 <span className="text-[10px] uppercase tracking-[0.18em] text-sidebar-foreground/60">
                   {workspaceLabel}
                 </span>
@@ -260,39 +263,37 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
             <div className="flex h-10 items-center gap-2 rounded-lg border border-border bg-card px-2 pr-3">
               <div className="flex h-7 w-7 items-center justify-center rounded-md gradient-primary text-[11px] font-semibold text-primary-foreground">
-                AK
+                HK
               </div>
               <div className="hidden text-left leading-tight sm:block">
-                <div className="text-xs font-semibold">A. Khurana</div>
+                <div className="text-xs font-semibold">Harshad</div>
                 <div className="text-[10px] text-muted-foreground">Risk Validator</div>
               </div>
             </div>
           </div>
         </header>
 
-        {showModelTabs && (
-          <div className="border-b border-border/70 bg-background/80 px-4 md:px-8">
-            <div className="mx-auto flex max-w-7xl flex-wrap gap-2 py-3">
-              {modelTabs.map((tab) => {
-                const active = activeModelTab === tab.key;
-                return (
-                  <Link
-                    key={tab.to}
-                    to={tab.to}
-                    className={cn(
-                      "rounded-full border px-4 py-2 text-sm font-medium transition-colors",
-                      active
-                        ? "border-primary bg-primary text-primary-foreground shadow-sm"
-                        : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",
-                    )}
-                  >
-                    {tab.label}
-                  </Link>
-                );
-              })}
-            </div>
+        <div className="border-b border-border/70 bg-background/80 px-4 md:px-8">
+          <div className="mx-auto flex max-w-7xl flex-wrap gap-2 py-3">
+            {workflowSteps.map((step) => {
+              const active = pathname === step.to || pathname.startsWith(step.to + "/");
+              return (
+                <Link
+                  key={step.to}
+                  to={step.to}
+                  className={cn(
+                    "rounded-full border px-4 py-2 text-sm font-medium transition-colors",
+                    active
+                      ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                      : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                  )}
+                >
+                  {step.label}
+                </Link>
+              );
+            })}
           </div>
-        )}
+        </div>
 
         <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
       </div>
