@@ -994,7 +994,38 @@ class BooleanToIntTransformer(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        return pd.DataFrame(X).astype(float).values
+        df = pd.DataFrame(X).copy()
+        mapping = {
+            "yes": 1,
+            "y": 1,
+            "true": 1,
+            "t": 1,
+            "1": 1,
+            "no": 0,
+            "n": 0,
+            "false": 0,
+            "f": 0,
+            "0": 0,
+        }
+
+        for col in df.columns:
+            if df[col].dtype == bool:
+                df[col] = df[col].astype(float)
+                continue
+
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                continue
+
+            normalized = df[col].astype(str).str.strip().str.lower()
+            mapped = normalized.map(mapping)
+            if mapped.notna().all():
+                df[col] = mapped.astype(float)
+            else:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df[col] = mapped.combine_first(df[col]).fillna(0.0)
+
+        return df.astype(float).values
 
     def get_feature_names_out(self, input_features=None):
         return np.array(input_features) if input_features is not None else np.array([])

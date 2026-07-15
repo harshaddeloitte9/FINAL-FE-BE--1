@@ -13,6 +13,10 @@ export const Route = createFileRoute("/data-upload")({
 function DataUpload() {
   const [dataSourceType, setDataSourceType] = useState("upload");
   const [syntheticSamples, setSyntheticSamples] = useState(2000);
+  const [apiUrl, setApiUrl] = useState("");
+  const [apiMethod, setApiMethod] = useState("GET");
+  const [isFetchingApi, setIsFetchingApi] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<{
     kind: "file" | "synthetic";
     name: string;
@@ -60,6 +64,30 @@ function DataUpload() {
       applyUploadResult(f, profile);
     } catch (err) {
       console.error("DataUpload: upload failed", err);
+    }
+  };
+
+  const fetchApiData = async () => {
+    if (!apiUrl.trim()) {
+      setApiError("API URL is required.");
+      return;
+    }
+
+    setApiError(null);
+    setIsFetchingApi(true);
+    try {
+      const form = new FormData();
+      form.append("api_url", apiUrl.trim());
+      form.append("http_method", apiMethod);
+      console.log("DataUpload: sending POST to /data/api", { api_url: apiUrl.trim(), http_method: apiMethod });
+      const profile = await formUpload("/data/api", form);
+      console.log("DataUpload: received API profile", profile);
+      applyUploadResult(null, profile);
+    } catch (err) {
+      console.error("DataUpload: API fetch failed", err);
+      setApiError(err instanceof Error ? err.message : "Failed to fetch data from API.");
+    } finally {
+      setIsFetchingApi(false);
     }
   };
 
@@ -198,13 +226,48 @@ function DataUpload() {
               <Globe2 className="h-5 w-5 text-muted-foreground" />
             </div>
             <div>
-              <div className="text-sm font-semibold text-foreground">API connection setup</div>
-              <div className="mt-2 text-sm text-muted-foreground">API connectivity is not yet implemented in this POC. This UI demonstrates the intended workflow.</div>
+              <div className="text-sm font-semibold text-foreground">API endpoint</div>
+              <div className="mt-2 text-sm text-muted-foreground">Fetch a CSV dataset directly from a remote API.</div>
             </div>
           </div>
-          <button type="button" disabled className="mt-4 w-full rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-muted-foreground">
-            Fetch Data
-          </button>
+
+          <div className="mt-6 space-y-4">
+            <label className="block text-sm font-medium text-foreground">
+              API URL
+              <input
+                value={apiUrl}
+                onChange={(e) => setApiUrl(e.target.value)}
+                placeholder="https://example.com/data.csv"
+                className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
+              />
+            </label>
+
+            <label className="block text-sm font-medium text-foreground">
+              HTTP Method
+              <select
+                value={apiMethod}
+                onChange={(e) => setApiMethod(e.target.value)}
+                className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
+              >
+                <option value="GET">GET</option>
+              </select>
+            </label>
+
+            {apiError ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {apiError}
+              </div>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={fetchApiData}
+              disabled={isFetchingApi}
+              className="mt-2 w-full rounded-lg border border-primary/30 bg-primary-soft px-4 py-2 text-sm font-medium text-foreground hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isFetchingApi ? "Fetching…" : "Fetch Data"}
+            </button>
+          </div>
         </div>
       ) : dataSourceType === "cloud" ? (
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">

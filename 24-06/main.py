@@ -12,6 +12,9 @@ import importlib.util
 import os
 import random
 import sys
+import urllib.request
+import urllib.error
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Union
 
@@ -699,6 +702,12 @@ def _build_data_profile(
     col_types = detect_column_types(df)
     target_candidates = detect_target_candidates(df)
     resolved_target_col = _infer_target_column(df, target_col)
+    if resolved_target_col is not None and not target_candidates:
+        # Ensure the chosen target is also available as a candidate so the
+        # frontend can reliably select it for downstream pages like feature
+        # engineering when the heuristic finds it by name rather than by binary
+        # target scoring.
+        target_candidates = [resolved_target_col]
     task_type = None
     if resolved_target_col is not None:
         task_type = detect_task_type(df[resolved_target_col])
@@ -972,6 +981,50 @@ async def upload_data(
         profile["synthetic_samples"] = int(synthetic_samples)
     else:
         profile["source_type"] = "file"
+    return profile
+
+
+def _fetch_remote_csv(api_url: str, http_method: str = "GET") -> str:
+    method = http_method.upper().strip()
+    if method != "GET":
+        raise HTTPException(status_code=400, detail="Only GET is supported for API data sources.")
+    try:
+        parsed = urllib.parse.urlparse(api_url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("API URL must use http or https")
+        request = urllib.request.Request(api_url, method="GET", headers={"User-Agent": "AegisCreditDataUploader/1.0"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8", errors="replace")
+            content_type = response.headers.get("Content-Type", "")
+            if "csv" not in content_type.lower() and "text" not in content_type.lower():
+                raise HTTPException(status_code=400, detail="Only CSV API responses are currently supported.")
+            return text
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=exc.code, detail=f"API request failed: {exc.reason}")
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=400, detail=f"API request failed: {exc.reason}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/data/api")
+async def fetch_api_data(
+    api_url: str = Form(...),
+    http_method: str = Form("GET"),
+) -> Dict[str, Any]:
+    csv_text = _fetch_remote_csv(api_url, http_method)
+    df = await _read_dataframe(csv_text=csv_text)
+    parsed_url = urllib.parse.urlparse(api_url)
+    filename = Path(parsed_url.path).name
+    dataset_name = filename if filename else "API dataset"
+    profile = _build_data_profile(df, dataset_name=dataset_name)
+    profile["csv_text"] = df.to_csv(index=False)
+    profile["source_type"] = "api"
+    profile["api_url"] = api_url
     return profile
 
 
