@@ -3,7 +3,7 @@ import { useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
-import { ArrowRight, FileCheck, FileText, Upload } from "lucide-react";
+import { ArrowRight, FileCheck, FileText, Upload, CheckCircle2, Circle } from "lucide-react";
 
 export const Route = createFileRoute("/validation/intake")({
   head: () => ({ meta: [{ title: "Model Intake — Aegis Credit" }] }),
@@ -511,20 +511,35 @@ function Intake() {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {[
-            ["Submitted Dataset", datasetUploaded, "REQUIRED", "Needed for Stage 2 data checks"],
-            ["Model Dev Document", mddUploaded, "REQUIRED", "Governance evidence for Stage 1"],
-            ["Training Code", trainingCodeUploaded, "REQUIRED", "Required for replication and review"],
-            ["Data Profile", profileUploaded, "OPTIONAL", "Helps check feature coverage"],
-            ["Assumptions", assumptionsUploaded, "OPTIONAL", "Model limitations and assumptions"],
-            ["Performance Report", perfUploaded, "OPTIONAL", "Model accuracy and stability"],
-            ["Hyperparameters", hyperparamsUploaded, "OPTIONAL", "Training configuration details"],
-          ].map(([label, ok, badge, detail]) => (
-            <div key={label as string} className={`rounded-lg border ${ok ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-700 bg-slate-950/80"} p-4`}>
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
-              <div className="mt-3 text-sm font-semibold text-foreground">{ok ? "Uploaded" : "Pending"}</div>
-              <div className="mt-2 text-[11px] text-muted-foreground">{badge} · {detail}</div>
-            </div>
-          ))}
+            { label: "Submitted Dataset", uploaded: datasetUploaded, required: true, detail: "Needed for Stage 2 data checks" },
+            { label: "Model Dev Document", uploaded: mddUploaded, required: true, detail: "Governance evidence for Stage 1" },
+            { label: "Training Code", uploaded: trainingCodeUploaded, required: true, detail: "Required for replication and review" },
+            { label: "Data Profile", uploaded: profileUploaded, required: false, detail: "Helps check feature coverage" },
+            { label: "Assumptions", uploaded: assumptionsUploaded, required: false, detail: "Model limitations and assumptions" },
+            { label: "Performance Report", uploaded: perfUploaded, required: false, detail: "Model accuracy and stability" },
+            { label: "Hyperparameters", uploaded: hyperparamsUploaded, required: false, detail: "Training configuration details" },
+          ].map((item) => {
+            // Uploaded = same "good/complete" treatment used for PASS states
+            // elsewhere in the app (bg-primary-soft/border-primary). Pending
+            // is deliberately NOT urgency-coded by Required/Optional — both
+            // look identical; only the caption text ("REQUIRED"/"OPTIONAL")
+            // differentiates them, same as before this pass.
+            const tone = item.uploaded
+              ? { border: "border-primary/30", bg: "bg-primary-soft", status: "text-primary", Icon: CheckCircle2 }
+              : { border: "border-border", bg: "bg-background", status: "text-muted-foreground", Icon: Circle };
+            return (
+              <div key={item.label} className={`rounded-lg border ${tone.border} ${tone.bg} p-4`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{item.label}</div>
+                  <tone.Icon className={`h-3.5 w-3.5 shrink-0 ${tone.status}`} />
+                </div>
+                <div className={`mt-2 text-base font-medium ${tone.status}`}>{item.uploaded ? "Uploaded" : "Pending"}</div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {item.required ? "REQUIRED" : "OPTIONAL"} · {item.detail}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
