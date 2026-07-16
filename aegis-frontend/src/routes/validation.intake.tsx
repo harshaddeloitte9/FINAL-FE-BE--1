@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -166,6 +166,7 @@ function Intake() {
   const [demoError, setDemoError] = useState<string | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
 
   // Artifacts state
   const [datasetFile, setDatasetFile] = useState<File | null>(null);
@@ -196,6 +197,59 @@ function Intake() {
   const perfUploaded = Boolean(perfFileName);
   const hyperparamsUploaded = Boolean(hyperparamsFileName);
   const readyCount = [datasetUploaded, mddUploaded, trainingCodeUploaded, profileUploaded, assumptionsUploaded, perfUploaded, hyperparamsUploaded].filter(Boolean).length;
+
+  // Restore a locally-saved draft on first load, unless a demo has already
+  // populated the form (demo load always wins — it's an explicit action).
+  useEffect(() => {
+    if (intakeLoaded) return;
+    try {
+      const raw = window.localStorage.getItem("aegis_intake_draft");
+      if (!raw) return;
+      const draft = JSON.parse(raw);
+      if (draft.modelName) setModelName(draft.modelName);
+      if (draft.owningTeam) setOwningTeam(draft.owningTeam);
+      if (draft.modelOwner) setModelOwner(draft.modelOwner);
+      if (draft.leadValidator) setLeadValidator(draft.leadValidator);
+      if (draft.modelType) setModelType(draft.modelType);
+      if (draft.tier) setTier(draft.tier);
+      if (draft.version) setVersion(draft.version);
+      if (draft.purpose) setPurpose(draft.purpose);
+      if (draft.mddFileName) setMddFileName(draft.mddFileName);
+      if (draft.trainingCodeFileName) setTrainingCodeFileName(draft.trainingCodeFileName);
+      if (draft.profileFileName) setProfileFileName(draft.profileFileName);
+      if (draft.assumptionsFileName) setAssumptionsFileName(draft.assumptionsFileName);
+      if (draft.perfFileName) setPerfFileName(draft.perfFileName);
+      if (draft.hyperparamsFileName) setHyperparamsFileName(draft.hyperparamsFileName);
+      setChkInventory(Boolean(draft.chkInventory));
+      setChkTier(Boolean(draft.chkTier));
+      setChkArtifacts(Boolean(draft.chkArtifacts));
+      setChkPrevFindings(Boolean(draft.chkPrevFindings));
+      setChkRegScope(Boolean(draft.chkRegScope));
+      setChkIndependence(Boolean(draft.chkIndependence));
+      setChkPlanApproved(Boolean(draft.chkPlanApproved));
+      setChkAttestation(Boolean(draft.chkAttestation));
+      if (draft.savedAt) setDraftSavedAt(draft.savedAt);
+    } catch {
+      // Ignore a corrupt/unreadable draft — form just starts empty.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const saveDraft = () => {
+    const savedAt = new Date().toLocaleString();
+    const draft = {
+      modelName, owningTeam, modelOwner, leadValidator, modelType, tier, version, purpose,
+      mddFileName, trainingCodeFileName, profileFileName, assumptionsFileName, perfFileName, hyperparamsFileName,
+      chkInventory, chkTier, chkArtifacts, chkPrevFindings, chkRegScope, chkIndependence, chkPlanApproved, chkAttestation,
+      savedAt,
+    };
+    try {
+      window.localStorage.setItem("aegis_intake_draft", JSON.stringify(draft));
+      setDraftSavedAt(savedAt);
+    } catch (err) {
+      console.error("Failed to save intake draft:", err);
+    }
+  };
 
   const demoOptions = [
     { key: "Demo A — Gold Standard", mode: "clean" },
@@ -495,6 +549,58 @@ function Intake() {
               </label>
             </div>
           </div>
+
+          {/* Data profile (optional) */}
+          <div className="rounded-lg border border-border bg-background p-4">
+            <div className="text-sm font-semibold text-foreground">Data profile (CSV / XLSX / PDF)</div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{profileFileName ?? "No file uploaded"}</div>
+              <label className="inline-flex items-center gap-2 cursor-pointer rounded bg-card px-2 py-1">
+                <Upload className="h-4 w-4" />
+                <input type="file" accept=".csv,.xlsx,.pdf" className="hidden" onChange={(e) => { const f = e.target.files?.[0] ?? null; if (f) setProfileFileName(f.name); }} />
+                <span className="text-xs text-primary">Attach</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Assumptions & limitations (optional) */}
+          <div className="rounded-lg border border-border bg-background p-4">
+            <div className="text-sm font-semibold text-foreground">Assumptions &amp; limitations (PDF / DOCX / TXT)</div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{assumptionsFileName ?? "No file uploaded"}</div>
+              <label className="inline-flex items-center gap-2 cursor-pointer rounded bg-card px-2 py-1">
+                <Upload className="h-4 w-4" />
+                <input type="file" accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => { const f = e.target.files?.[0] ?? null; if (f) setAssumptionsFileName(f.name); }} />
+                <span className="text-xs text-primary">Attach</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Performance report (optional) */}
+          <div className="rounded-lg border border-border bg-background p-4">
+            <div className="text-sm font-semibold text-foreground">Performance report (PDF / DOCX / XLSX)</div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{perfFileName ?? "No file uploaded"}</div>
+              <label className="inline-flex items-center gap-2 cursor-pointer rounded bg-card px-2 py-1">
+                <Upload className="h-4 w-4" />
+                <input type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => { const f = e.target.files?.[0] ?? null; if (f) setPerfFileName(f.name); }} />
+                <span className="text-xs text-primary">Attach</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Hyperparameters (optional) */}
+          <div className="rounded-lg border border-border bg-background p-4">
+            <div className="text-sm font-semibold text-foreground">Hyperparameters (JSON)</div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{hyperparamsFileName ?? "No file uploaded"}</div>
+              <label className="inline-flex items-center gap-2 cursor-pointer rounded bg-card px-2 py-1">
+                <Upload className="h-4 w-4" />
+                <input type="file" accept=".json" className="hidden" onChange={(e) => { const f = e.target.files?.[0] ?? null; if (f) setHyperparamsFileName(f.name); }} />
+                <span className="text-xs text-primary">Attach</span>
+              </label>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -544,14 +650,9 @@ function Intake() {
       </section>
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h3 className="text-sm font-semibold text-foreground">{intake.governance.title}</h3>
-            <p className="mt-1 text-xs text-muted-foreground">{intake.governance.description}</p>
-          </div>
-          <div className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
-            {intake.governance.status}
-          </div>
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">{intake.governance.title}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{intake.governance.description}</p>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-2">
@@ -594,10 +695,13 @@ function Intake() {
           <span className="text-sm">I confirm the above information is accurate and complete</span>
         </label>
         {submitError ? <div className="mb-4 text-sm text-red-500">{submitError}</div> : null}
-        <div className="flex gap-3 flex-wrap">
-          <button className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold" onClick={() => { /* No-op for now: allow edits */ }}>
+        <div className="flex flex-wrap items-center gap-3">
+          <button className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold" onClick={saveDraft}>
             Save draft
           </button>
+          {draftSavedAt ? (
+            <span className="text-xs text-muted-foreground">Draft saved {draftSavedAt} (stored in this browser)</span>
+          ) : null}
         </div>
       </section>
 

@@ -3389,6 +3389,24 @@ async def validation_stage7_run(
     return {"checks": checks, "summary": summary}
 
 
+@app.post("/validation/parse-mdd")
+async def validation_parse_mdd(
+    mdd_file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    """Parse an uploaded Model Development Document (PDF/DOCX/TXT) and extract
+    any reported metrics it contains. Backs the "Upload & Parse" control on
+    the Model Intake screen — was previously called by the frontend with no
+    matching route registered here, which is what produced the 404.
+    """
+    try:
+        mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse MDD: {exc}")
+
+    metrics = extract_metrics_from_mdd(mdd_text)
+    return {"mdd_text": mdd_text, "metrics": metrics}
+
+
 @app.post("/validation/stage8/findings")
 async def validation_stage8_findings(
     intake_json: Optional[str] = Form(None),
