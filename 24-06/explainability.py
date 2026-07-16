@@ -22,7 +22,13 @@ matplotlib.use("Agg")
 try:
     import shap
     SHAP_AVAILABLE = True
-except ImportError:
+except Exception:
+    # Broad on purpose: shap pulls in numba/llvmlite, which can fail with an
+    # OSError (not ImportError) if a native DLL is blocked by an OS-level
+    # policy (e.g. Windows Application Control / WDAC) rather than simply
+    # missing. Either way, SHAP is an optional feature — the rest of the
+    # backend (feature importance, training, evaluation, etc.) must still
+    # start. Callers check SHAP_AVAILABLE and degrade gracefully.
     SHAP_AVAILABLE = False
 
 from preprocessing_new import get_feature_names_from_fitted_preprocessor
