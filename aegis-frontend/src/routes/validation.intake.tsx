@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { api, formUpload } from "@/lib/api";
@@ -167,6 +167,7 @@ function Intake() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
+  const [proceedErrors, setProceedErrors] = useState<string[] | null>(null);
 
   // Artifacts state
   const [datasetFile, setDatasetFile] = useState<File | null>(null);
@@ -197,6 +198,32 @@ function Intake() {
   const perfUploaded = Boolean(perfFileName);
   const hyperparamsUploaded = Boolean(hyperparamsFileName);
   const readyCount = [datasetUploaded, mddUploaded, trainingCodeUploaded, profileUploaded, assumptionsUploaded, perfUploaded, hyperparamsUploaded].filter(Boolean).length;
+
+  // Pairs each governance checklist label (rendered from intake.governance.checklist,
+  // which comes from the backend/demo snapshot) with its checkbox state, in the
+  // same order they're declared/rendered below — every item is mandatory since
+  // this is literally an attestation, not an optional checklist.
+  const governanceItems: Array<{ label: string; checked: boolean }> = [
+    { label: intake.governance.checklist[0], checked: chkInventory },
+    { label: intake.governance.checklist[1], checked: chkTier },
+    { label: intake.governance.checklist[2], checked: chkArtifacts },
+    { label: intake.governance.checklist[3], checked: chkPrevFindings },
+    { label: intake.governance.checklist[4], checked: chkRegScope },
+    { label: intake.governance.checklist[5], checked: chkIndependence },
+    { label: intake.governance.checklist[6], checked: chkPlanApproved },
+  ];
+
+  const handleProceed = () => {
+    const missing = governanceItems.filter((item) => !item.checked).map((item) => item.label);
+    if (!chkAttestation) missing.push("I confirm the above information is accurate and complete");
+
+    if (missing.length > 0) {
+      setProceedErrors(missing);
+      return;
+    }
+    setProceedErrors(null);
+    navigate({ to: intake.nextStep.path });
+  };
 
   // Backend-persisted draft (keyed by model_name — no real user/session
   // system exists yet, so this is the closest thing to "this submission").
@@ -776,15 +803,28 @@ function Intake() {
         </div>
       </section>
 
-      <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-6 shadow-elegant md:flex-row md:items-center md:justify-between">
-        <div className="text-sm text-muted-foreground">{intake.nextStep.description}</div>
-        <Link
-          to={intake.nextStep.path}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
-        >
-          <span>{intake.nextStep.label}</span>
-          <ArrowRight className="h-4 w-4" />
-        </Link>
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="text-sm text-muted-foreground">{intake.nextStep.description}</div>
+          <button
+            type="button"
+            onClick={handleProceed}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
+          >
+            <span>{intake.nextStep.label}</span>
+            <ArrowRight className="h-4 w-4" />
+          </button>
+        </div>
+        {proceedErrors ? (
+          <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+            <div className="font-semibold">Please complete all governance checklist items and confirm before proceeding.</div>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {proceedErrors.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
     </div>
   );
