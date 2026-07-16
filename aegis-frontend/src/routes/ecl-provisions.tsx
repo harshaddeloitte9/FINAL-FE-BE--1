@@ -469,6 +469,7 @@ function EclProvisions() {
                 <table className="min-w-full text-left text-xs">
                   <thead className="bg-muted/40 text-muted-foreground">
                     <tr>
+                      <th className="px-2 py-2 font-medium">#</th>
                       {(columns.length ? columns : Object.keys(sampleRows[0] ?? {})).slice(0, 8).map((column) => (
                         <th key={column} className="px-2 py-2 font-medium">
                           {column}
@@ -479,6 +480,7 @@ function EclProvisions() {
                   <tbody>
                     {sampleRows.slice(0, 8).map((row, index) => (
                       <tr key={`${row?.id ?? index}`} className="border-b border-border/60 last:border-b-0">
+                        <td className="whitespace-nowrap px-2 py-2 text-foreground/90">{index + 1}</td>
                         {(columns.length ? columns : Object.keys(sampleRows[0] ?? {})).slice(0, 8).map((column) => (
                           <td key={`${column}-${index}`} className="whitespace-nowrap px-2 py-2 text-foreground/90">
                             {row?.[column] === null || row?.[column] === undefined ? "—" : String(row[column])}

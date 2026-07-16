@@ -390,6 +390,7 @@ function Regulatory() {
                         <table className="w-full text-sm">
                           <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
                             <tr>
+                              <th className="px-3 py-2 text-left">#</th>
                               <th className="px-3 py-2 text-left">Group</th>
                               <th className="px-3 py-2 text-right">Count</th>
                               <th className="px-3 py-2 text-right">Default Rate</th>
@@ -398,8 +399,9 @@ function Regulatory() {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-border">
-                            {biasData.rows.map((r) => (
+                            {biasData.rows.map((r, rowIndex) => (
                               <tr key={r.Group}>
+                                <td className="px-3 py-2 text-muted-foreground">{rowIndex + 1}</td>
                                 <td className="px-3 py-2 font-medium">{r.Group}</td>
                                 <td className="px-3 py-2 text-right tabular-nums">{r.Count.toLocaleString()}</td>
                                 <td className="px-3 py-2 text-right tabular-nums">{(r["Default Rate"] * 100).toFixed(2)}%</td>

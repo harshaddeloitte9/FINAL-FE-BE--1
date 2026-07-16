@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Sparkles, Table2, Upload } from "lucide-react";
+import { ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Sparkles, Table2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -315,37 +315,6 @@ function DataUpload() {
 
       {profile ? (
         <>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <Table2 className="h-4 w-4" />
-                <span>Rows</span>
-              </div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.shape?.[0]?.toLocaleString() ?? "—"}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <Table2 className="h-4 w-4" />
-                <span>Columns</span>
-              </div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.shape?.[1]?.toLocaleString() ?? "—"}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <AlertCircle className="h-4 w-4" />
-                <span>Missing Values</span>
-              </div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.missing_cells?.toLocaleString() ?? "—"}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <Table2 className="h-4 w-4" />
-                <span>Duplicates</span>
-              </div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">{profile.duplicate_rows?.toLocaleString() ?? "—"}</div>
-            </div>
-          </div>
-
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center gap-2">
               <Table2 className="h-5 w-5 text-muted-foreground" />
@@ -355,6 +324,7 @@ function DataUpload() {
               <table className="min-w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-2 py-2">#</th>
                     {(profile.columns ?? []).map((column) => (
                       <th key={column} className="px-2 py-2">{column}</th>
                     ))}
@@ -363,6 +333,7 @@ function DataUpload() {
                 <tbody>
                   {(profile.data_preview ?? []).map((row: Record<string, any>, rowIndex: number) => (
                     <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : "bg-card"}>
+                      <td className="whitespace-nowrap px-2 py-2 text-xs text-muted-foreground">{rowIndex + 1}</td>
                       {(profile.columns ?? []).map((column) => (
                         <td key={`${rowIndex}-${column}`} className="whitespace-nowrap px-2 py-2 text-xs text-foreground/90">
                           {row[column] ?? ""}

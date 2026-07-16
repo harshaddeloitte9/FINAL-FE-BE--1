@@ -540,6 +540,7 @@ function ModelReplicationPanel() {
                 <table className="w-full text-sm">
                   <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
                     <tr>
+                      <th className="px-4 py-2 text-left">#</th>
                       <th className="px-4 py-2 text-left">ID</th>
                       <th className="px-4 py-2 text-left">Check</th>
                       <th className="px-4 py-2 text-left">Observed</th>
@@ -547,8 +548,9 @@ function ModelReplicationPanel() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {replication.checks.map((c) => (
+                    {replication.checks.map((c, rowIndex) => (
                       <tr key={c.id}>
+                        <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
                         <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{c.id}</td>
                         <td className="px-4 py-2 font-medium">{c.title}</td>
                         <td className="px-4 py-2 text-xs text-foreground/80">{c.observed ?? "—"}</td>

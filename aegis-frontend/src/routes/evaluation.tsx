@@ -413,6 +413,7 @@ function Evaluation() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                        <th className="py-2 pr-3">#</th>
                         <th className="py-2 pr-3">Class</th>
                         <th className="py-2 pr-3">Precision</th>
                         <th className="py-2 pr-3">Recall</th>
@@ -422,8 +423,9 @@ function Evaluation() {
                     </thead>
                     <tbody>
                       {classificationReportRows.length > 0 ? (
-                        classificationReportRows.map((row) => (
+                        classificationReportRows.map((row, rowIndex) => (
                           <tr key={row.label} className="border-b border-border/60 text-sm">
+                            <td className="py-2 pr-3 text-muted-foreground">{rowIndex + 1}</td>
                             <td className="py-2 pr-3 font-medium">{row.label}</td>
                             <td className="py-2 pr-3">{formatMetricValue(row.precision)}</td>
                             <td className="py-2 pr-3">{formatMetricValue(row.recall)}</td>
@@ -433,7 +435,7 @@ function Evaluation() {
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={5} className="py-3 text-sm text-muted-foreground">Classification report will appear after a completed binary classification run.</td>
+                          <td colSpan={6} className="py-3 text-sm text-muted-foreground">Classification report will appear after a completed binary classification run.</td>
                         </tr>
                       )}
                     </tbody>
@@ -568,6 +570,7 @@ function Evaluation() {
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
+                          <th className="py-2 pr-3">#</th>
                           <th className="py-2 pr-3">Bin</th>
                           <th className="py-2 pr-3">Count</th>
                           <th className="py-2">Variance</th>
@@ -576,6 +579,7 @@ function Evaluation() {
                       <tbody>
                         {heteroscedasticityCheck.bin_variance.map((row: Record<string, any>, index: number) => (
                           <tr key={`${row.score_bin ?? index}`} className="border-b border-border/60 text-sm">
+                            <td className="py-2 pr-3 text-muted-foreground">{index + 1}</td>
                             <td className="py-2 pr-3">{row.score_bin ?? `Bin ${index + 1}`}</td>
                             <td className="py-2 pr-3">{row.n ?? "—"}</td>
                             <td className="py-2">{formatMetricValue(row.residual_variance)}</td>

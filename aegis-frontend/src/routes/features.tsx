@@ -4,7 +4,7 @@ import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw } from "lucide-react";
+import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw, Table as TableIcon, Trash2, Hash, Tag } from "lucide-react";
 
 export const Route = createFileRoute("/features")({
   head: () => ({ meta: [{ title: "Feature Engineering — Aegis Credit" }] }),
@@ -57,7 +57,7 @@ interface MacroDateCandidate {
 
 function Features() {
   const navigate = useNavigate();
-  const { file, profile, setUploadResult, featureEngineeringResult, setFeatureEngineeringResult } = useDataset();
+  const { file, profile, setUploadResult, featureEngineeringResult, setFeatureEngineeringResult, preprocessingResult } = useDataset();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Seed from the shared context so returning to this page (e.g. via Back from
@@ -527,9 +527,45 @@ function Features() {
   const originalFeatures = Array.isArray(summary.original_shape) ? summary.original_shape[1] ?? null : null;
   const finalFeatures = Array.isArray(summary.final_shape) ? summary.final_shape[1] ?? null : null;
 
+  // Recap of what preprocessing produced — the starting point feature
+  // engineering builds on top of. Moved here from the Preprocessing screen,
+  // where it was rendering above the Missing Value Treatment section (i.e.
+  // showing the post-preprocessing result before preprocessing had actually
+  // been explained on that same page).
+  const preprocessSummary = {
+    feature_count: preprocessingResult?.feature_count ?? preprocessingResult?.summary_metrics?.features_basic,
+    duplicates_removed:
+      preprocessingResult?.duplicates_removed ?? preprocessingResult?.summary_metrics?.duplicates_removed ?? 0,
+    numeric_feature_count:
+      preprocessingResult?.numeric_feature_count ?? preprocessingResult?.summary_metrics?.numeric_columns,
+    categorical_feature_count:
+      preprocessingResult?.categorical_feature_count ?? preprocessingResult?.summary_metrics?.categorical_columns,
+  };
+
   return (
     <div className="space-y-8">
       <PageHeader title="Feature Engineering" description="Engineered features, multicollinearity diagnostics, and importance preview." />
+
+      {preprocessingResult && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center text-sm text-muted-foreground"><TableIcon className="h-4 w-4 mr-2" />Features After Prep</div>
+            <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.feature_count ?? "—"}</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center text-sm text-muted-foreground"><Trash2 className="h-4 w-4 mr-2" />Duplicates Removed</div>
+            <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.duplicates_removed ?? 0}</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center text-sm text-muted-foreground"><Hash className="h-4 w-4 mr-2" />Numeric Columns</div>
+            <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.numeric_feature_count ?? "—"}</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex items-center text-sm text-muted-foreground"><Tag className="h-4 w-4 mr-2" />Categorical Columns</div>
+            <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.categorical_feature_count ?? "—"}</div>
+          </div>
+        </div>
+      )}
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <div className="flex items-center gap-2">
@@ -666,6 +702,7 @@ function Features() {
               <table className="min-w-full border-collapse text-sm">
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="border-b border-border px-3 py-2">#</th>
                     <th className="border-b border-border px-3 py-2">Feature</th>
                     <th className="border-b border-border px-3 py-2">IV</th>
                     <th className="border-b border-border px-3 py-2">Reason</th>
@@ -673,8 +710,9 @@ function Features() {
                   </tr>
                 </thead>
                 <tbody>
-                  {removalProposal.rows.map((row) => (
+                  {removalProposal.rows.map((row, rowIndex) => (
                     <tr key={row.feature} className="odd:bg-background">
+                      <td className="border-b border-border px-3 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
                       <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
                       <td className="border-b border-border px-3 py-2 text-xs">{row.iv !== null ? row.iv.toFixed(4) : "—"}</td>
                       <td className="border-b border-border px-3 py-2 text-xs text-muted-foreground">{row.reason}</td>
@@ -736,6 +774,7 @@ function Features() {
               <table className="min-w-full border-collapse text-sm">
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="border-b border-border px-3 py-2">#</th>
                     <th className="border-b border-border px-3 py-2">Feature A</th>
                     <th className="border-b border-border px-3 py-2">Feature B</th>
                     <th className="border-b border-border px-3 py-2">Type</th>
@@ -749,6 +788,7 @@ function Features() {
                     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
                     .map((f, idx) => (
                       <tr key={f.name ?? idx} className="odd:bg-background">
+                        <td className="border-b border-border px-3 py-2 font-mono text-xs text-muted-foreground">{idx + 1}</td>
                         <td className="border-b border-border px-3 py-2 font-mono text-xs">{f.feature_a}</td>
                         <td className="border-b border-border px-3 py-2 font-mono text-xs">{f.feature_b}</td>
                         <td className="border-b border-border px-3 py-2 text-xs">{f.interaction_type ?? f.type ?? "—"}</td>
@@ -801,6 +841,7 @@ function Features() {
             <table className="min-w-full border-collapse text-sm">
               <thead>
                 <tr>
+                  <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">#</th>
                   {Object.keys((engineeringResult.final_engineered_dataset_preview && Array.isArray(engineeringResult.final_engineered_dataset_preview) && engineeringResult.final_engineered_dataset_preview.length > 0 ? engineeringResult.final_engineered_dataset_preview : engineeringResult.x_engineered_preview ?? [])[0] ?? {}).map((key: string) => (
                     <th key={key} className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">{key}</th>
                   ))}
@@ -809,6 +850,7 @@ function Features() {
               <tbody>
                 {(engineeringResult.final_engineered_dataset_preview && Array.isArray(engineeringResult.final_engineered_dataset_preview) && engineeringResult.final_engineered_dataset_preview.length > 0 ? engineeringResult.final_engineered_dataset_preview : engineeringResult.x_engineered_preview ?? []).map((row: any, rowIndex: number) => (
                   <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-background" : ""}>
+                    <td className="border-b border-border px-3 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
                     {Object.values(row).map((cell: any, cellIndex: number) => (
                       <td key={cellIndex} className="border-b border-border px-3 py-2 font-mono text-xs">{String(cell)}</td>
                     ))}

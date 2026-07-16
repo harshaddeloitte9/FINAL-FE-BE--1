@@ -2,7 +2,7 @@
 import { PageHeader } from "@/components/app-shell";
 import {
   ArrowLeft, ArrowRight, Download, Minus, Plus, BarChart as BarChartIcon,
-  Table as TableIcon, Brain, Trash2, Hash, Tag, Loader2, AlertTriangle,
+  Table as TableIcon, Brain, Loader2, AlertTriangle,
   CheckCircle2, Info,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -230,16 +230,6 @@ function Preprocessing() {
     );
   }
 
-  const summary = {
-    feature_count: preprocess?.feature_count ?? preprocess?.summary_metrics?.features_basic,
-    duplicates_removed:
-      preprocess?.duplicates_removed ?? preprocess?.summary_metrics?.duplicates_removed ?? 0,
-    numeric_feature_count:
-      preprocess?.numeric_feature_count ?? preprocess?.summary_metrics?.numeric_columns,
-    categorical_feature_count:
-      preprocess?.categorical_feature_count ?? preprocess?.summary_metrics?.categorical_columns,
-  };
-
   const strategySummary = Array.isArray(preprocess?.preprocessing_strategy_summary)
     ? preprocess.preprocessing_strategy_summary
     : [];
@@ -460,25 +450,6 @@ function Preprocessing() {
               </div>
             </div>
           )}
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="text-sm text-muted-foreground flex items-center"><TableIcon className="h-4 w-4 mr-2" />Features After Prep</div>
-              <div className="mt-3 text-3xl font-semibold tabular-nums">{summary.feature_count ?? "—"}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="text-sm text-muted-foreground flex items-center"><Trash2 className="h-4 w-4 mr-2" />Duplicates Removed</div>
-              <div className="mt-3 text-3xl font-semibold tabular-nums">{summary.duplicates_removed ?? 0}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="text-sm text-muted-foreground flex items-center"><Hash className="h-4 w-4 mr-2" />Numeric Columns</div>
-              <div className="mt-3 text-3xl font-semibold tabular-nums">{summary.numeric_feature_count ?? "—"}</div>
-            </div>
-            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="text-sm text-muted-foreground flex items-center"><Tag className="h-4 w-4 mr-2" />Categorical Columns</div>
-              <div className="mt-3 text-3xl font-semibold tabular-nums">{summary.categorical_feature_count ?? "—"}</div>
-            </div>
-          </div>
 
           {/* ── Missing Value Treatment ────────────────────────────────── */}
           <Card className="shadow-elegant">
@@ -742,6 +713,7 @@ function Preprocessing() {
                 <table className="min-w-full border-collapse text-sm">
                   <thead>
                     <tr>
+                      <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">#</th>
                       <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">Column</th>
                       <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">Type</th>
                       <th className="border-b border-border px-3 py-2 text-left font-medium text-muted-foreground">Scaler</th>
@@ -753,6 +725,7 @@ function Preprocessing() {
                   <tbody>
                     {strategySummary.map((row: any, index: number) => (
                       <tr key={index} className={index % 2 === 0 ? "bg-background" : "bg-background/50"}>
+                        <td className="border-b border-border px-3 py-2 font-mono text-xs">{index + 1}</td>
                         <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
                         <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.type}</td>
                         <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.scaler}</td>

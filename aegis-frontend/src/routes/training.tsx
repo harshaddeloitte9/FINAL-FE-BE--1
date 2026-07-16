@@ -735,6 +735,7 @@ function Training() {
               <table className="min-w-full divide-y divide-border text-sm">
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-3 py-2">#</th>
                     <th className="px-3 py-2">Model</th>
                     <th className="px-3 py-2">ROC-AUC</th>
                     <th className="px-3 py-2">Recall</th>
@@ -747,8 +748,9 @@ function Training() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {comparisonResults.map((row) => (
+                  {comparisonResults.map((row, rowIndex) => (
                     <tr key={row.model_name} className={row.model_name === selectedComparisonModel ? "bg-primary/5" : undefined}>
+                      <td className="px-3 py-3 text-muted-foreground">{rowIndex + 1}</td>
                       <td className="px-3 py-3 font-medium">{row.model_name}</td>
                       {row.error ? (
                         <td className="px-3 py-3 text-destructive text-xs" colSpan={6}>{row.error}</td>

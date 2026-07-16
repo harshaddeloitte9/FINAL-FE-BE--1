@@ -29,6 +29,8 @@ export const Route = createFileRoute("/profiling")({
   component: Profiling,
 });
 
+const CLASS_DISTRIBUTION_COLORS = ["#065f46", "#10b981", "#6ee7b7", "#a7f3d0"];
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -221,14 +223,14 @@ function Profiling() {
     return counts;
   }, [agent2Flags]);
 
-  const downloadDataDictionary = () => {
+  const downloadDataSummary = () => {
     const headers = dataDictionary.length > 0 ? Object.keys(dataDictionary[0]) : [];
     const csv = [headers.join(","), ...dataDictionary.map(formatCsvRow)].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "data_dictionary.csv";
+    link.download = "data_summary.csv";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -280,24 +282,30 @@ function Profiling() {
         </div>
       </section>
 
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+      <section className="grid grid-cols-1 gap-4">
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h2 className="text-base font-semibold">Target variable</h2>
               <p className="text-xs text-muted-foreground">Choose the target column to compute distribution, imbalance, and task diagnostics.</p>
             </div>
-            <div className="w-full lg:w-64">
-              <Select value={selectedTarget ?? ""} onValueChange={(value) => setSelectedTarget(value)}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select target" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableColumns.map((column) => (
-                    <SelectItem key={column} value={column}>{column}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="flex items-center gap-3">
+              <div className="w-full lg:w-64">
+                <Select value={selectedTarget ?? ""} onValueChange={(value) => setSelectedTarget(value)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select target" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableColumns.map((column) => (
+                      <SelectItem key={column} value={column}>{column}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button variant="outline" size="sm" onClick={downloadDataSummary} className="shrink-0 gap-2">
+                <Download className="h-4 w-4" />
+                Download data summary
+              </Button>
             </div>
           </div>
           {isLoadingTarget && (
@@ -411,49 +419,60 @@ function Profiling() {
               </div>
             </div>
           </div>
-        </div>
 
-        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <BarChart3 className="h-4 w-4 text-muted-foreground" />
-                <h2 className="text-base font-semibold">Class distribution</h2>
-              </div>
-              <p className="text-xs text-muted-foreground">Counts for the selected target value.</p>
+          <div className="mt-4 border-t border-border pt-4">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-muted-foreground" />
+              <h3 className="text-sm font-semibold">Class Distribution</h3>
             </div>
-            <Button variant="outline" size="sm" onClick={downloadDataDictionary} className="gap-2">
-              <Download className="h-4 w-4" />
-              Download data dictionary
-            </Button>
-          </div>
+            <p className="text-xs text-muted-foreground">
+              {selectedTarget ? (
+                <>How the selected target column (<code className="text-foreground">{selectedTarget}</code>) is split across the dataset</>
+              ) : (
+                "Select a target column above to see its value breakdown."
+              )}
+            </p>
 
-          {classDistribution ? (
-            <div className="mt-5 grid gap-3">
-              {classChartData.map((entry) => (
-                <div key={entry.name} className="rounded-lg border border-border bg-background p-3">
-                  <div className="flex items-center justify-between text-sm text-muted-foreground">
-                    <span>{entry.name}</span>
-                    <span className="font-semibold tabular-nums">{entry.value.toLocaleString()}</span>
-                  </div>
+            {classDistribution ? (
+              <div className="mt-4 grid items-center gap-6 lg:grid-cols-[1fr_1.2fr]">
+                <div className="grid gap-3">
+                  {classChartData.map((entry, index) => {
+                    const total = classChartData.reduce((sum, e) => sum + e.value, 0);
+                    const pct = total > 0 ? (entry.value / total) * 100 : 0;
+                    return (
+                      <div key={entry.name} className="rounded-lg border border-border bg-background p-4">
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: CLASS_DISTRIBUTION_COLORS[index % CLASS_DISTRIBUTION_COLORS.length] }}
+                            />
+                            {selectedTarget} = {entry.name}
+                          </span>
+                          <span className="text-xl font-semibold tabular-nums text-foreground">{entry.value.toLocaleString()}</span>
+                        </div>
+                        <div className="mt-1 pl-[18px] text-xs text-muted-foreground">{pct.toFixed(1)}% of records</div>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-              <div className="mt-3 h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={classChartData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={80} paddingAngle={2}>
-                      {classChartData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={["#065f46", "#10b981", "#6ee7b7", "#a7f3d0"][index % 4]} />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(value: number) => [value.toLocaleString(), "Count"]} />
-                  </PieChart>
-                </ResponsiveContainer>
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={classChartData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={110} paddingAngle={2}>
+                        {classChartData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={CLASS_DISTRIBUTION_COLORS[index % CLASS_DISTRIBUTION_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip formatter={(value: number) => [value.toLocaleString(), "Count"]} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="mt-4 rounded-xl border border-border bg-muted p-4 text-sm text-muted-foreground">Class distribution is not available until a valid target is selected.</div>
-          )}
+            ) : (
+              <div className="mt-4 rounded-xl border border-border bg-muted p-4 text-sm text-muted-foreground">Class distribution is not available until a valid target is selected.</div>
+            )}
+          </div>
         </div>
       </section>
 

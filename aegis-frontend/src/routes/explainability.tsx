@@ -300,13 +300,15 @@ function Explainability() {
                   <table className="min-w-full border-collapse text-sm">
                     <thead>
                       <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                        <th className="border-b border-border px-3 py-2">#</th>
                         <th className="border-b border-border px-3 py-2">Feature</th>
                         <th className="border-b border-border px-3 py-2">Importance</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {importanceRows.slice(0, topN + 5).map((row) => (
+                      {importanceRows.slice(0, topN + 5).map((row, rowIndex) => (
                         <tr key={row.Feature} className="odd:bg-background">
+                          <td className="border-b border-border px-3 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
                           <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.Feature}</td>
                           <td className="border-b border-border px-3 py-2 text-xs">{row.Importance.toFixed(4)}</td>
                         </tr>
@@ -442,13 +444,15 @@ function Explainability() {
                       <table className="min-w-full border-collapse text-sm">
                         <thead>
                           <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                            <th className="border-b border-border px-3 py-2">#</th>
                             <th className="border-b border-border px-3 py-2">Feature</th>
                             <th className="border-b border-border px-3 py-2">Value</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {Object.entries(data?.shap.sample_features ?? {}).map(([feat, val]) => (
+                          {Object.entries(data?.shap.sample_features ?? {}).map(([feat, val], rowIndex) => (
                             <tr key={feat} className="odd:bg-background">
+                              <td className="border-b border-border px-3 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
                               <td className="border-b border-border px-3 py-2 font-mono text-xs">{feat}</td>
                               <td className="border-b border-border px-3 py-2 text-xs">{formatValue(val)}</td>
                             </tr>
