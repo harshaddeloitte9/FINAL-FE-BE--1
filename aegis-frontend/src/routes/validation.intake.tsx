@@ -436,7 +436,13 @@ function Intake() {
               <h3 className="text-sm font-semibold text-foreground">{intake.modelMetadata.title}</h3>
               <p className="mt-1 text-xs text-muted-foreground">{intake.modelMetadata.description}</p>
             </div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary-soft px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">
+            <div
+              className={
+                intake.modelMetadata.registeredLabel === "Registered"
+                  ? "inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary-soft px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary"
+                  : "inline-flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground"
+              }
+            >
               <FileText className="h-3.5 w-3.5" /> {intake.modelMetadata.registeredLabel}
             </div>
           </div>
@@ -713,7 +719,7 @@ function Intake() {
             <div className="text-sm font-semibold text-foreground">Artifact completeness</div>
             <p className="mt-2 text-xs text-muted-foreground">Required items must be present before intake submission. Optional artifacts provide better detail for later validation stages.</p>
           </div>
-          <div className="rounded-full border border-slate-700 bg-slate-950/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-foreground">
+          <div className="rounded-full border border-border bg-muted px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
             {readyCount}/7 uploaded
           </div>
         </div>

@@ -262,8 +262,13 @@ function DataQuality() {
             </div>
           </section>
 
-          <section className="rounded-xl border border-primary/30 bg-primary-soft p-6">
-            <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
+          <section className={`rounded-xl border p-6 ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).border} ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).bg}`}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
+              <span className={`text-xs font-bold uppercase tracking-wide ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).text}`}>
+                {regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).icon} {data?.regulatoryAlignment?.verdict ?? "—"}
+              </span>
+            </div>
             <p className="mt-2 text-sm">
               Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/
               {data?.regulatoryAlignment?.counts?.fail ?? 0}
@@ -324,6 +329,19 @@ const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string;
   FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950", icon: "🔴" },
   PENDING: { border: "border-slate-400/40", bg: "bg-slate-400/10", badge: "bg-slate-400 text-slate-950", icon: "⏱️" },
 };
+
+// Mirrors Stage 8's VERDICT_STYLES convention — the regulatory alignment
+// card should reflect the actual verdict, not always render as a green
+// "all good" card regardless of whether it's PASS/CONDITIONAL/FAIL.
+const REGULATORY_VERDICT_STYLES: Record<string, { border: string; bg: string; text: string; icon: string }> = {
+  PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", text: "text-emerald-700 dark:text-emerald-300", icon: "✅" },
+  CONDITIONAL: { border: "border-amber-500/40", bg: "bg-amber-500/10", text: "text-amber-700 dark:text-amber-300", icon: "⚠️" },
+  FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", text: "text-red-700 dark:text-red-300", icon: "❌" },
+};
+
+function regulatoryVerdictStyle(verdict: string | undefined) {
+  return REGULATORY_VERDICT_STYLES[verdict ?? ""] ?? { border: "border-border", bg: "bg-card", text: "text-foreground", icon: "⚪" };
+}
 
 const SEVERITY_STYLES: Record<string, string> = {
   HIGH: "bg-red-500 text-red-950",
