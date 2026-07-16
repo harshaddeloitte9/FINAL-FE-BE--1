@@ -2905,6 +2905,88 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
     }
 
 
+def _group_stage2(report: dict, rag_results: Optional[List[dict]] = None) -> dict:
+    """Map ValidationAgent2 + Agent2 RAG results into the Stage 2 UI payload.
+
+    Mirrors _group_stage3 exactly, but for "Stage 2: Data Validation":
+    `thresholdChecks` are the quantitative ValidationAgent2 findings tagged
+    for that stage; `ragRules` are the qualitative MDD rules retrieved from
+    the regulatory knowledge store (rag_store/val_mdd_rules.json, stage ==
+    "data_validation") and cross-checked against the MDD text via
+    check_mdd_keywords / check_for_validation — same RAG pipeline Stage 3
+    uses, just a different stage key. No featureRelevance section here;
+    that's conceptual-soundness-specific (feature importance charts).
+    """
+    findings = []
+    try:
+        findings = report.get("findings_by_stage", {}).get("Stage 2: Data Validation", [])
+    except Exception:
+        findings = []
+
+    raw_findings = [f for f in findings]
+    rag_results = rag_results or []
+
+    threshold_checks = [_normalize_threshold_check(f) for f in raw_findings]
+    rag_rules = [_normalize_rag_rule(r) for r in rag_results]
+
+    combined = raw_findings + rag_results
+    stage2_counts = {
+        "pass": sum(1 for f in combined if f.get("status") == "PASS"),
+        "warn": sum(1 for f in combined if f.get("status") == "WARN"),
+        "fail": sum(1 for f in combined if f.get("status") == "FAIL"),
+        "pending": sum(1 for f in combined if f.get("status") == "PENDING"),
+    }
+    stage2_high_fails = [f for f in combined if f.get("status") == "FAIL" and str(f.get("severity", "")).upper() == "HIGH"]
+    if len(stage2_high_fails) == 0 and stage2_counts["fail"] == 0 and stage2_counts["pending"] == 0:
+        stage2_verdict = "PASS"
+    elif len(stage2_high_fails) == 0 and stage2_counts["fail"] == 0:
+        stage2_verdict = "CONDITIONAL"
+    elif len(stage2_high_fails) <= 2:
+        stage2_verdict = "CONDITIONAL"
+    else:
+        stage2_verdict = "FAIL"
+
+    remediation_items = []
+    if stage2_high_fails:
+        remediation_items.append(f"Address {len(stage2_high_fails)} high-severity finding(s) before approval.")
+    if stage2_counts["warn"]:
+        remediation_items.append(f"Document and remediate {stage2_counts['warn']} warning(s) in the MDD or model controls.")
+    if not remediation_items:
+        remediation_items.append("No material remediation required at this stage.")
+
+    regulatory_references = sorted({f.get("source") for f in combined if f.get("source")})
+    if not regulatory_references:
+        regulatory_references = ["IFRS 9", "SS11/13", "SS1/23"]
+
+    regulatory = {
+        "verdict": stage2_verdict,
+        "counts": stage2_counts,
+        "remediation_summary": " ".join(remediation_items),
+        "regulatory_references": regulatory_references,
+        "high_severity_fails": [_normalize_finding(f) for f in stage2_high_fails],
+    }
+
+    pending_llm_ids = [
+        r.get("check_id", r.get("rule_id"))
+        for r in rag_results
+        if r.get("check_source") == "keyword_search" and r.get("status") != "PASS"
+    ]
+
+    return {
+        "thresholdChecks": threshold_checks,
+        "ragRules": rag_rules,
+        "summary": {
+            "total": len(combined),
+            "pass": stage2_counts["pass"],
+            "warn": stage2_counts["warn"],
+            "fail": stage2_counts["fail"],
+        },
+        "regulatoryAlignment": regulatory,
+        "raw_findings": raw_findings,
+        "pending_llm_ids": list(dict.fromkeys(pending_llm_ids)),
+    }
+
+
 def _normalize_threshold_check(f: dict) -> dict:
     """Normalize a check_conceptual_soundness() finding into the
     'Recommended Threshold Checks' card schema (mirrors app.py's left column)."""
@@ -3020,6 +3102,72 @@ def _group_stage3(report: dict, rag_results: Optional[List[dict]] = None, df=Non
         "replicated_importances": replicated,
         "pending_llm_ids": list(dict.fromkeys(pending_llm_ids)),
     }
+
+
+@app.post("/validation/stage2/run")
+async def validation_stage2_run(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+) -> Dict[str, Any]:
+    """Run Stage 2 Data Validation checks and return mapped JSON.
+
+    Mirrors /validation/stage3/run exactly, one stage over: quantitative
+    ValidationAgent2 findings tagged "Stage 2: Data Validation", plus the
+    RAG rule-matching pipeline (rag_store/val_mdd_rules.json, stage ==
+    "data_validation") — quantitative dataset-metric rules via
+    check_for_validation, and a keyword-search cross-check of the MDD text
+    via check_mdd_keywords. Same SourceAgent2 instance and same call
+    pattern Stage 3 already uses successfully, just a different stage key.
+    """
+    df = None
+    try:
+        df = await _read_dataframe(file=file, csv_text=csv_text)
+    except HTTPException:
+        df = None
+
+    intake = {}
+    if intake_json:
+        try:
+            intake = json.loads(intake_json)
+        except Exception:
+            intake = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            # See /validation/stage3/run — parse_mdd_file needs the sync
+            # file-like wrapper or every keyword-search RAG rule silently
+            # sees empty MDD content and reports 0 keyword hits.
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
+        except Exception:
+            mdd_text = ""
+
+    report = run_validation_agent2(df, intake, mdd_text)
+
+    rag_results: List[dict] = []
+    source_agent = _load_source_agent2()
+    if source_agent is not None:
+        try:
+            rag_results.extend(source_agent.check_for_validation("data_validation", {}))
+        except Exception:
+            pass
+
+        # Always call check_mdd_keywords, even with empty MDD text — the
+        # function itself returns every keyword rule as status PENDING when
+        # there's no text yet, so gating this call on mdd_text would mean
+        # the RAG Agent Rules column stays empty until an MDD is uploaded.
+        try:
+            rag_results.extend(source_agent.check_mdd_keywords(mdd_text, stage="data_validation"))
+        except Exception:
+            pass
+
+    mapped = _group_stage2(report, rag_results=rag_results)
+    mapped["llm_ran"] = False
+    mapped["timestamp"] = pd.Timestamp.now().isoformat()
+
+    return mapped
 
 
 @app.post("/validation/stage3/run")
