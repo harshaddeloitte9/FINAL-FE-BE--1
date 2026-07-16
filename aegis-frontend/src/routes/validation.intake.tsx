@@ -81,6 +81,19 @@ type IntakeResponse = {
   chk_attestation?: boolean;
 };
 
+// Risk tier is a classification (how much oversight this model needs), not
+// a pass/fail judgment — deliberately NOT the red/amber/green severity scale
+// used elsewhere for HIGH/MEDIUM/LOW findings, since that would wrongly
+// imply a tier itself is "bad." Single blue hue at three intensities instead:
+// darker/bolder = more oversight, lighter = routine, same hue throughout
+// signals "different degree of the same thing," not "different verdict."
+function riskTierTone(value: string): { border: string; bg: string; text: string } {
+  if (value.includes("1")) return { border: "border-blue-700/40", bg: "bg-blue-700/10", text: "text-blue-800" };
+  if (value.includes("2")) return { border: "border-blue-400/40", bg: "bg-blue-400/10", text: "text-blue-600" };
+  if (value.includes("3")) return { border: "border-blue-200/60", bg: "bg-blue-100/40", text: "text-blue-500" };
+  return { border: "border-border", bg: "bg-muted", text: "text-foreground" };
+}
+
 // Neutral placeholder shown until the reviewer actually loads a demo (or
 // completes a real intake) — deliberately has no plausible-looking values,
 // since a prior version of this screen fetched a canned "clean" demo
@@ -502,11 +515,16 @@ function Intake() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-[#0f172a] p-5 text-white shadow-elegant">
-            <div className="text-sm font-semibold">{intake.riskTier.title}</div>
-            <div className="mt-2 text-3xl font-semibold">{intake.riskTier.value}</div>
-            <div className="mt-1 text-xs text-slate-400">{intake.riskTier.description}</div>
-          </div>
+          {(() => {
+            const tone = riskTierTone(intake.riskTier.value);
+            return (
+              <div className={`rounded-xl border ${tone.border} ${tone.bg} p-5 shadow-elegant`}>
+                <div className={`text-sm font-semibold ${tone.text}`}>{intake.riskTier.title}</div>
+                <div className={`mt-2 text-3xl font-semibold ${tone.text}`}>{intake.riskTier.value}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{intake.riskTier.description}</div>
+              </div>
+            );
+          })()}
         </div>
       </section>
 
@@ -516,7 +534,13 @@ function Intake() {
             <h3 className="text-sm font-semibold text-foreground">{intake.artifactTitle}</h3>
             <p className="mt-1 text-xs text-muted-foreground">{intake.artifactDescription}</p>
           </div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary-soft px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">
+          <div
+            className={
+              intake.artifacts.length > 0
+                ? "inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary-soft px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary"
+                : "inline-flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground"
+            }
+          >
             <FileCheck className="h-3.5 w-3.5" /> {intake.artifactSummary}
           </div>
         </div>
