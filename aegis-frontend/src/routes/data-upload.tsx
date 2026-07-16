@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Sparkles, Table2, Upload } from "lucide-react";
+import { ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Table2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -12,13 +12,11 @@ export const Route = createFileRoute("/data-upload")({
 
 function DataUpload() {
   const [dataSourceType, setDataSourceType] = useState("upload");
-  const [syntheticSamples, setSyntheticSamples] = useState(2000);
   const [apiUrl, setApiUrl] = useState("");
   const [apiMethod, setApiMethod] = useState("GET");
   const [isFetchingApi, setIsFetchingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<{
-    kind: "file" | "synthetic";
     name: string;
     rows: number;
     cols: number;
@@ -35,7 +33,7 @@ function DataUpload() {
   ];
 
   const applyUploadResult = (uploadedFile: File | null, response: any) => {
-    const datasetName = response?.dataset_name ?? uploadedFile?.name ?? "Synthetic Credit Dataset.csv";
+    const datasetName = response?.dataset_name ?? uploadedFile?.name ?? "dataset.csv";
     const resolvedFile = uploadedFile
       ?? (typeof response?.csv_text === "string"
         ? new File([response.csv_text], datasetName.endsWith(".csv") ? datasetName : `${datasetName}.csv`, { type: "text/csv" })
@@ -46,7 +44,6 @@ function DataUpload() {
     const rows = Array.isArray(response?.shape) ? Number(response.shape[0] ?? 0) : 0;
     const cols = Array.isArray(response?.shape) ? Number(response.shape[1] ?? 0) : 0;
     setUploadSummary({
-      kind: response?.source_type === "synthetic" ? "synthetic" : "file",
       name: datasetName,
       rows,
       cols,
@@ -101,7 +98,7 @@ function DataUpload() {
           <div>
             <h3 className="text-lg font-semibold tracking-tight">Step 1 — Data Upload</h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              Upload a CSV or Excel file, or use the built-in synthetic credit dataset
+              Upload a CSV or Excel file to begin
             </p>
           </div>
         </div>
@@ -136,72 +133,28 @@ function DataUpload() {
       </div>
 
       {dataSourceType === "upload" ? (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <input ref={inputRef} type="file" accept=".csv,.xlsx" className="hidden" onChange={(e) => uploadFile(e.target.files?.[0] ?? null)} />
-            <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
-                <FileSpreadsheet className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-foreground">Upload your dataset (CSV / XLSX)</label>
-                <p className="text-xs text-muted-foreground">The system adapts automatically to any structured dataset schema.</p>
-              </div>
+        <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+          <input ref={inputRef} type="file" accept=".csv,.xlsx" className="hidden" onChange={(e) => uploadFile(e.target.files?.[0] ?? null)} />
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
+              <FileSpreadsheet className="h-5 w-5 text-muted-foreground" />
             </div>
-            <div className="mt-4 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="inline-flex items-center justify-center rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:border-primary/40 hover:bg-primary-soft"
-              >
-                Browse files
-              </button>
-              <span className="inline-flex items-center rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                CSV / XLSX
-              </span>
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-foreground">Upload your dataset (CSV / XLSX)</label>
+              <p className="text-xs text-muted-foreground">The system adapts automatically to any structured dataset schema.</p>
             </div>
           </div>
-
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-background/80">
-                <Sparkles className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">Synthetic dataset</h3>
-                <p className="text-xs text-muted-foreground">No data? Generate a realistic loan tape.</p>
-              </div>
-            </div>
+          <div className="mt-4 flex flex-wrap gap-3">
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  const form = new FormData();
-                  form.append("synthetic_samples", String(syntheticSamples));
-                  console.log("DataUpload: requesting synthetic dataset generation POST /data/upload", { synthetic_samples: syntheticSamples });
-                  const result = await formUpload("/data/upload", form);
-                  console.log("DataUpload: synthetic profile received", result);
-                  applyUploadResult(null, result);
-                } catch (err) {
-                  console.error("DataUpload: synthetic generation failed", err);
-                }
-              }}
-              className="mt-5 w-full rounded-lg border border-primary/30 bg-primary-soft px-3 py-2 text-sm font-medium text-foreground hover:bg-primary/20"
+              onClick={() => inputRef.current?.click()}
+              className="inline-flex items-center justify-center rounded-lg border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:border-primary/40 hover:bg-primary-soft"
             >
-              Use Synthetic Dataset
+              Browse files
             </button>
-            <label className="mt-4 block text-xs text-muted-foreground">
-              Synthetic samples
-              <input
-                type="number"
-                min={500}
-                max={50000}
-                step={500}
-                value={syntheticSamples}
-                onChange={(e) => setSyntheticSamples(Number(e.target.value) || 2000)}
-                className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
-              />
-            </label>
+            <span className="inline-flex items-center rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+              CSV / XLSX
+            </span>
           </div>
         </div>
       ) : dataSourceType === "database" ? (
@@ -305,7 +258,7 @@ function DataUpload() {
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
           <span className="inline-flex items-center gap-2 font-semibold">
             <CheckCircle2 className="h-5 w-5" />
-            {uploadSummary.kind === "synthetic" ? "Generated synthetic dataset" : `Loaded ${uploadSummary.name}`}
+            {`Loaded ${uploadSummary.name}`}
           </span>
           <span className="ml-2">
             — {uploadSummary.rows.toLocaleString()} rows × {uploadSummary.cols.toLocaleString()} columns
@@ -363,8 +316,7 @@ function DataUpload() {
             This platform intelligently adapts to <strong>any structured dataset</strong> — no hardcoded columns required.
           </p>
           <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-            <li>Upload your own CSV/XLSX file, or</li>
-            <li>Click <strong>Use Synthetic Dataset</strong> to explore with demo data</li>
+            <li>Upload your own CSV/XLSX file to get started</li>
           </ul>
         </div>
       )}

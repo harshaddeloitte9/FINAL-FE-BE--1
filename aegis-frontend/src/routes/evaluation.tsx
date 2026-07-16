@@ -553,16 +553,19 @@ function Evaluation() {
               <Card title="Residual diagnostics" sub="Heteroscedasticity-style residual checks">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="rounded-lg border border-border bg-background/70 p-3">
-                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Signal</div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Risk Signal</div>
                     <div className="mt-1 text-base font-semibold">{heteroscedasticityCheck?.risk_flag ?? "N/A"}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Overall heteroscedasticity risk flag for this model</div>
                   </div>
                   <div className="rounded-lg border border-border bg-background/70 p-3">
-                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Abs residual corr</div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Residual Correlation</div>
                     <div className="mt-1 text-base font-semibold">{formatMetricValue(heteroscedasticityCheck?.spearman_abs_resid_vs_score)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Correlation between prediction error size and predicted score</div>
                   </div>
                   <div className="rounded-lg border border-border bg-background/70 p-3 sm:col-span-2">
-                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Variance ratio</div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Variance Ratio</div>
                     <div className="mt-1 text-base font-semibold">{formatMetricValue(heteroscedasticityCheck?.variance_ratio)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Spread of residual variance across score bins</div>
                   </div>
                 </div>
                 {Array.isArray(heteroscedasticityCheck?.bin_variance) && heteroscedasticityCheck.bin_variance.length > 0 && (

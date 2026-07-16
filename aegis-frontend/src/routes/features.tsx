@@ -549,20 +549,24 @@ function Features() {
       {preprocessingResult && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center text-sm text-muted-foreground"><TableIcon className="h-4 w-4 mr-2" />Features After Prep</div>
+            <div className="flex items-center text-sm text-muted-foreground"><TableIcon className="h-4 w-4 mr-2" />Feature Count After Cleanup</div>
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.feature_count ?? "—"}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Columns remaining after removing sparse/ID columns</div>
           </div>
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex items-center text-sm text-muted-foreground"><Trash2 className="h-4 w-4 mr-2" />Duplicates Removed</div>
+            <div className="flex items-center text-sm text-muted-foreground"><Trash2 className="h-4 w-4 mr-2" />Duplicate Rows Removed</div>
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.duplicates_removed ?? 0}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Exact-copy rows dropped before splitting</div>
           </div>
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center text-sm text-muted-foreground"><Hash className="h-4 w-4 mr-2" />Numeric Columns</div>
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.numeric_feature_count ?? "—"}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Continuous fields available for modeling</div>
           </div>
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center text-sm text-muted-foreground"><Tag className="h-4 w-4 mr-2" />Categorical Columns</div>
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.categorical_feature_count ?? "—"}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Non-numeric fields requiring encoding</div>
           </div>
         </div>
       )}
@@ -641,24 +645,28 @@ function Features() {
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="text-xs uppercase tracking-wider text-muted-foreground">Original features</div>
             <div className="mt-2 text-2xl font-semibold tabular-nums">{originalFeatures}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Columns before feature engineering</div>
           </div>
         )}
         {finalFeatures !== null && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="text-xs uppercase tracking-wider text-muted-foreground">Final features</div>
             <div className="mt-2 text-2xl font-semibold tabular-nums">{finalFeatures}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Columns after feature engineering</div>
           </div>
         )}
         {addedFeatures.length > 0 && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="text-xs uppercase tracking-wider text-muted-foreground">Features added</div>
             <div className="mt-2 text-2xl font-semibold tabular-nums">{addedFeatures.length}</div>
+            <div className="mt-1 text-xs text-muted-foreground">New engineered columns created</div>
           </div>
         )}
         {removedFeatures.length > 0 && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="text-xs uppercase tracking-wider text-muted-foreground">Features removed</div>
             <div className="mt-2 text-2xl font-semibold tabular-nums">{removedFeatures.length}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Columns dropped during feature engineering</div>
           </div>
         )}
       </section>

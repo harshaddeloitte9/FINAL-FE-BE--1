@@ -253,18 +253,26 @@ function Profiling() {
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Stat label="Rows" value={rows !== null ? rows.toLocaleString() : "—"} sub={active.dataset_name ?? undefined} />
           <Stat
-            label="Columns"
+            label="Total Rows"
+            value={rows !== null ? rows.toLocaleString() : "—"}
+            sub={active.dataset_name ?? "Number of records in the dataset"}
+          />
+          <Stat
+            label="Total Columns"
             value={cols !== null ? String(cols) : "—"}
-            sub={numericCount !== null && categoricalCount !== null ? `${numericCount} numeric · ${categoricalCount} categorical` : undefined}
+            sub={numericCount !== null && categoricalCount !== null ? `${numericCount} numeric · ${categoricalCount} categorical` : "Number of fields in the dataset"}
           />
           <Stat
-            label="Missing cells"
+            label="Missing Values"
             value={missingCells !== null ? missingCells.toLocaleString() : missingPct !== null ? `${missingPct}%` : "—"}
-            sub={missingPct !== null ? `${missingPct}% of total` : undefined}
+            sub={missingPct !== null ? `${missingPct}% of all data cells are empty` : undefined}
           />
-          <Stat label="Duplicates" value={duplicateRows !== null ? String(duplicateRows) : "—"} sub={duplicateRate !== null ? `${duplicateRate}% of rows` : undefined} />
+          <Stat
+            label="Duplicate Rows"
+            value={duplicateRows !== null ? String(duplicateRows) : "—"}
+            sub={duplicateRate !== null ? `${duplicateRate}% of rows are exact copies of another row` : "Rows that are exact copies of another row"}
+          />
         </div>
 
         <div className="rounded-xl border border-border bg-card p-4">
