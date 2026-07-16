@@ -425,6 +425,46 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
 async def validation_intake(mode: str = "clean") -> Dict[str, Any]:
     return _build_validation_intake_snapshot(mode)
 
+
+# Intake draft persistence — file-based, keyed by model_name since there's no
+# real user/session/auth system in this app yet. Deliberately simple: no
+# uniqueness enforcement (two submissions named identically will overwrite
+# each other's draft) — an accepted known limitation, not solved here.
+INTAKE_DRAFTS_DIR = BACKEND_DIR / "intake_drafts"
+
+
+def _intake_draft_slug(model_name: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", model_name.strip()).strip("_")
+    if not slug:
+        raise HTTPException(status_code=400, detail="model_name is required to save/load a draft.")
+    return slug
+
+
+class IntakeDraftRequest(BaseModel):
+    model_name: str
+    data: Dict[str, Any]
+
+
+@app.post("/validation/intake/draft")
+async def save_intake_draft(payload: IntakeDraftRequest) -> Dict[str, Any]:
+    slug = _intake_draft_slug(payload.model_name)
+    INTAKE_DRAFTS_DIR.mkdir(exist_ok=True)
+    saved_at = pd.Timestamp.now().isoformat()
+    record = {"model_name": payload.model_name, "data": payload.data, "saved_at": saved_at}
+    (INTAKE_DRAFTS_DIR / f"{slug}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return {"saved": True, "model_name": payload.model_name, "saved_at": saved_at}
+
+
+@app.get("/validation/intake/draft")
+async def get_intake_draft(model_name: str) -> Dict[str, Any]:
+    slug = _intake_draft_slug(model_name)
+    path = INTAKE_DRAFTS_DIR / f"{slug}.json"
+    if not path.exists():
+        return {"found": False}
+    record = json.loads(path.read_text(encoding="utf-8"))
+    return {"found": True, **record}
+
+
 @app.post("/data/feature-decision-log")
 async def feature_decision_log(
     file: Optional[UploadFile] = File(None),

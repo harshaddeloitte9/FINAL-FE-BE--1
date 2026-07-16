@@ -198,56 +198,102 @@ function Intake() {
   const hyperparamsUploaded = Boolean(hyperparamsFileName);
   const readyCount = [datasetUploaded, mddUploaded, trainingCodeUploaded, profileUploaded, assumptionsUploaded, perfUploaded, hyperparamsUploaded].filter(Boolean).length;
 
-  // Restore a locally-saved draft on first load, unless a demo has already
-  // populated the form (demo load always wins — it's an explicit action).
-  useEffect(() => {
-    if (intakeLoaded) return;
-    try {
-      const raw = window.localStorage.getItem("aegis_intake_draft");
-      if (!raw) return;
-      const draft = JSON.parse(raw);
-      if (draft.modelName) setModelName(draft.modelName);
-      if (draft.owningTeam) setOwningTeam(draft.owningTeam);
-      if (draft.modelOwner) setModelOwner(draft.modelOwner);
-      if (draft.leadValidator) setLeadValidator(draft.leadValidator);
-      if (draft.modelType) setModelType(draft.modelType);
-      if (draft.tier) setTier(draft.tier);
-      if (draft.version) setVersion(draft.version);
-      if (draft.purpose) setPurpose(draft.purpose);
-      if (draft.mddFileName) setMddFileName(draft.mddFileName);
-      if (draft.trainingCodeFileName) setTrainingCodeFileName(draft.trainingCodeFileName);
-      if (draft.profileFileName) setProfileFileName(draft.profileFileName);
-      if (draft.assumptionsFileName) setAssumptionsFileName(draft.assumptionsFileName);
-      if (draft.perfFileName) setPerfFileName(draft.perfFileName);
-      if (draft.hyperparamsFileName) setHyperparamsFileName(draft.hyperparamsFileName);
-      setChkInventory(Boolean(draft.chkInventory));
-      setChkTier(Boolean(draft.chkTier));
-      setChkArtifacts(Boolean(draft.chkArtifacts));
-      setChkPrevFindings(Boolean(draft.chkPrevFindings));
-      setChkRegScope(Boolean(draft.chkRegScope));
-      setChkIndependence(Boolean(draft.chkIndependence));
-      setChkPlanApproved(Boolean(draft.chkPlanApproved));
-      setChkAttestation(Boolean(draft.chkAttestation));
-      if (draft.savedAt) setDraftSavedAt(draft.savedAt);
-    } catch {
-      // Ignore a corrupt/unreadable draft — form just starts empty.
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Backend-persisted draft (keyed by model_name — no real user/session
+  // system exists yet, so this is the closest thing to "this submission").
+  // Deliberately opt-in rather than auto-restoring: silently overwriting
+  // fields the user is mid-typing (or that a demo just populated) as soon as
+  // a matching model_name is typed would be a worse surprise than just
+  // asking first.
+  const [draftAvailable, setDraftAvailable] = useState<{ savedAt: string; data: Record<string, any> } | null>(null);
+  const [draftDismissedFor, setDraftDismissedFor] = useState<string | null>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftLoadError, setDraftLoadError] = useState<string | null>(null);
 
-  const saveDraft = () => {
-    const savedAt = new Date().toLocaleString();
-    const draft = {
-      modelName, owningTeam, modelOwner, leadValidator, modelType, tier, version, purpose,
-      mddFileName, trainingCodeFileName, profileFileName, assumptionsFileName, perfFileName, hyperparamsFileName,
-      chkInventory, chkTier, chkArtifacts, chkPrevFindings, chkRegScope, chkIndependence, chkPlanApproved, chkAttestation,
-      savedAt,
+  useEffect(() => {
+    const trimmed = modelName.trim();
+    if (!trimmed || intakeLoaded || draftDismissedFor === trimmed) {
+      setDraftAvailable(null);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      void api<{ found: boolean; saved_at?: string; data?: Record<string, any> }>(
+        `/validation/intake/draft?model_name=${encodeURIComponent(trimmed)}`,
+      )
+        .then((resp) => {
+          if (!active) return;
+          if (resp.found && resp.data) {
+            setDraftAvailable({ savedAt: resp.saved_at ?? "", data: resp.data });
+          } else {
+            setDraftAvailable(null);
+          }
+        })
+        .catch(() => {
+          if (active) setDraftAvailable(null);
+        });
+    }, 600);
+    return () => {
+      active = false;
+      clearTimeout(timer);
     };
+  }, [modelName, intakeLoaded, draftDismissedFor]);
+
+  const applyDraft = (draft: Record<string, any>) => {
+    if (draft.owningTeam) setOwningTeam(draft.owningTeam);
+    if (draft.modelOwner) setModelOwner(draft.modelOwner);
+    if (draft.leadValidator) setLeadValidator(draft.leadValidator);
+    if (draft.modelType) setModelType(draft.modelType);
+    if (draft.tier) setTier(draft.tier);
+    if (draft.version) setVersion(draft.version);
+    if (draft.purpose) setPurpose(draft.purpose);
+    if (draft.mddFileName) setMddFileName(draft.mddFileName);
+    if (draft.trainingCodeFileName) setTrainingCodeFileName(draft.trainingCodeFileName);
+    if (draft.profileFileName) setProfileFileName(draft.profileFileName);
+    if (draft.assumptionsFileName) setAssumptionsFileName(draft.assumptionsFileName);
+    if (draft.perfFileName) setPerfFileName(draft.perfFileName);
+    if (draft.hyperparamsFileName) setHyperparamsFileName(draft.hyperparamsFileName);
+    setChkInventory(Boolean(draft.chkInventory));
+    setChkTier(Boolean(draft.chkTier));
+    setChkArtifacts(Boolean(draft.chkArtifacts));
+    setChkPrevFindings(Boolean(draft.chkPrevFindings));
+    setChkRegScope(Boolean(draft.chkRegScope));
+    setChkIndependence(Boolean(draft.chkIndependence));
+    setChkPlanApproved(Boolean(draft.chkPlanApproved));
+    setChkAttestation(Boolean(draft.chkAttestation));
+  };
+
+  const loadAvailableDraft = () => {
+    if (!draftAvailable) return;
+    applyDraft(draftAvailable.data);
+    setDraftSavedAt(draftAvailable.savedAt);
+    setDraftAvailable(null);
+  };
+
+  const dismissAvailableDraft = () => {
+    setDraftDismissedFor(modelName.trim());
+    setDraftAvailable(null);
+  };
+
+  const saveDraft = async () => {
+    const trimmed = modelName.trim();
+    if (!trimmed) return;
+    setDraftSaving(true);
+    setDraftLoadError(null);
     try {
-      window.localStorage.setItem("aegis_intake_draft", JSON.stringify(draft));
-      setDraftSavedAt(savedAt);
+      const data = {
+        owningTeam, modelOwner, leadValidator, modelType, tier, version, purpose,
+        mddFileName, trainingCodeFileName, profileFileName, assumptionsFileName, perfFileName, hyperparamsFileName,
+        chkInventory, chkTier, chkArtifacts, chkPrevFindings, chkRegScope, chkIndependence, chkPlanApproved, chkAttestation,
+      };
+      const resp = await api<{ saved: boolean; saved_at: string }>("/validation/intake/draft", {
+        method: "POST",
+        body: JSON.stringify({ model_name: trimmed, data }),
+      });
+      setDraftSavedAt(new Date(resp.saved_at).toLocaleString());
     } catch (err) {
-      console.error("Failed to save intake draft:", err);
+      setDraftLoadError(err instanceof Error ? err.message : "Failed to save draft.");
+    } finally {
+      setDraftSaving(false);
     }
   };
 
@@ -409,6 +455,23 @@ function Intake() {
               <textarea value={purpose} onChange={(e) => setPurpose(e.target.value)} rows={3} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
           </div>
+
+          {draftAvailable ? (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary-soft px-4 py-3 text-sm">
+              <span>
+                A saved draft exists for <strong>{modelName.trim()}</strong>
+                {draftAvailable.savedAt ? ` (saved ${new Date(draftAvailable.savedAt).toLocaleString()})` : ""}.
+              </span>
+              <span className="flex gap-2">
+                <button type="button" onClick={loadAvailableDraft} className="rounded-lg border border-primary bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground">
+                  Load draft
+                </button>
+                <button type="button" onClick={dismissAvailableDraft} className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground">
+                  Dismiss
+                </button>
+              </span>
+            </div>
+          ) : null}
         </div>
 
         <div className="space-y-4">
@@ -696,12 +759,20 @@ function Intake() {
         </label>
         {submitError ? <div className="mb-4 text-sm text-red-500">{submitError}</div> : null}
         <div className="flex flex-wrap items-center gap-3">
-          <button className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold" onClick={saveDraft}>
-            Save draft
+          <button
+            className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => void saveDraft()}
+            disabled={!modelName.trim() || draftSaving}
+            title={!modelName.trim() ? "Enter a model name to save a draft." : undefined}
+          >
+            {draftSaving ? "Saving…" : "Save draft"}
           </button>
-          {draftSavedAt ? (
-            <span className="text-xs text-muted-foreground">Draft saved {draftSavedAt} (stored in this browser)</span>
+          {!modelName.trim() ? (
+            <span className="text-xs text-muted-foreground">Enter a model name to save a draft.</span>
+          ) : draftSavedAt ? (
+            <span className="text-xs text-muted-foreground">Draft saved {draftSavedAt} — keyed to model name "{modelName.trim()}"</span>
           ) : null}
+          {draftLoadError ? <span className="text-xs text-destructive">{draftLoadError}</span> : null}
         </div>
       </section>
 

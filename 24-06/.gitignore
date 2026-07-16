@@ -10,3 +10,4 @@ Rag/chroma_db/
 .claude/
 .streamlit/
 *.zip
+intake_drafts/
