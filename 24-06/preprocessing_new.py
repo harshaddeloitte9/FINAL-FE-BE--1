@@ -966,15 +966,15 @@ def build_preprocessing_report(
     for col in col_types.get("boolean", []):
         if col == target_col or col not in feature_cols:
             continue
+        report["boolean"][col] = {"actions": ["Cast to int (0/1)"]}
         report["decisions"].append({"column": col, "type": "boolean", "actions": ["Cast to int (0/1)"]})
 
     for col in col_types.get("datetime", []):
         if col not in feature_cols:
             continue
-        report["decisions"].append({
-            "column": col, "type": "datetime",
-            "actions": ["Extract year, month, day, dayofweek, is_weekend, quarter"]
-        })
+        actions = ["Extract year, month, day, dayofweek, is_weekend, quarter"]
+        report["datetime"][col] = {"actions": actions}
+        report["decisions"].append({"column": col, "type": "datetime", "actions": actions})
 
     return report
 

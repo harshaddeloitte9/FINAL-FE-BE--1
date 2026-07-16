@@ -1499,6 +1499,8 @@ async def preprocess_data(
         "features_basic": X_train.shape[1],
         "numeric_columns": len(prep_report.get("numeric", {})),
         "categorical_columns": len(prep_report.get("categorical", {})),
+        "boolean_columns": len(prep_report.get("boolean", {})),
+        "datetime_columns": len(prep_report.get("datetime", {})),
         "duplicates_removed": clean_info.get("duplicates_removed", 0),
         "ecl_only_cols_dropped": clean_info.get("ecl_only_cols_dropped", []),
     }
@@ -1513,6 +1515,8 @@ async def preprocess_data(
         "feature_count": X_train.shape[1],
         "numeric_feature_count": len(prep_report.get("numeric", {})),
         "categorical_feature_count": len(prep_report.get("categorical", {})),
+        "boolean_feature_count": len(prep_report.get("boolean", {})),
+        "datetime_feature_count": len(prep_report.get("datetime", {})),
         "duplicates_removed": clean_info.get("duplicates_removed", 0),
         "ecl_only_cols_dropped": clean_info.get("ecl_only_cols_dropped", []),
         "split_config": {"test_size": test_size, "val_size": val_size, "random_seed": int(random_seed)},

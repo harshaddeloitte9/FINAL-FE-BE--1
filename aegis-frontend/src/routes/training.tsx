@@ -623,12 +623,12 @@ function Training() {
           </section>
 
           {recommendationTaskType === "binary" && (
-            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h2 className="text-base font-semibold">Credit Risk Evaluation Strategy</h2>
-              <p className="mt-3 text-sm text-muted-foreground">
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant border-l-4 border-blue-500/80 bg-blue-500/10">
+              <h2 className="text-base font-semibold text-blue-900">Credit Risk Evaluation Strategy</h2>
+              <p className="mt-3 text-sm text-blue-900/90">
                 In credit risk, <strong>Recall</strong> is the most critical metric because failing to identify a truly risky customer (false negative) is far more costly than incorrectly flagging a safe one.
               </p>
-              <p className="mt-2 text-sm text-muted-foreground">
+              <p className="mt-2 text-sm text-blue-900/90">
                 We optimize for: <strong>ROC-AUC → Recall → PR-AUC → F1</strong>
               </p>
             </section>

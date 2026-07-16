@@ -540,6 +540,12 @@ function Features() {
       preprocessingResult?.numeric_feature_count ?? preprocessingResult?.summary_metrics?.numeric_columns,
     categorical_feature_count:
       preprocessingResult?.categorical_feature_count ?? preprocessingResult?.summary_metrics?.categorical_columns,
+    // Boolean/datetime columns are real modeled features (present in
+    // feature_count) but aren't numeric or categorical — surfaced separately
+    // so the four counts always reconcile instead of silently undercounting.
+    other_feature_count:
+      (preprocessingResult?.boolean_feature_count ?? preprocessingResult?.summary_metrics?.boolean_columns ?? 0) +
+      (preprocessingResult?.datetime_feature_count ?? preprocessingResult?.summary_metrics?.datetime_columns ?? 0),
   };
 
   return (
@@ -547,7 +553,7 @@ function Features() {
       <PageHeader title="Feature Engineering" description="Engineered features, multicollinearity diagnostics, and importance preview." />
 
       {preprocessingResult && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+        <div className={`grid grid-cols-1 gap-4 md:grid-cols-4${preprocessSummary.other_feature_count > 0 ? " xl:grid-cols-5" : ""}`}>
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <div className="flex items-center text-sm text-muted-foreground"><TableIcon className="h-4 w-4 mr-2" />Feature Count After Cleanup</div>
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.feature_count ?? "—"}</div>
@@ -568,6 +574,13 @@ function Features() {
             <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.categorical_feature_count ?? "—"}</div>
             <div className="mt-1 text-xs text-muted-foreground">Non-numeric fields requiring encoding</div>
           </div>
+          {preprocessSummary.other_feature_count > 0 && (
+            <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <div className="flex items-center text-sm text-muted-foreground"><TableIcon className="h-4 w-4 mr-2" />Other Columns</div>
+              <div className="mt-3 text-3xl font-semibold tabular-nums">{preprocessSummary.other_feature_count}</div>
+              <div className="mt-1 text-xs text-muted-foreground">Boolean/datetime fields, engineered separately</div>
+            </div>
+          )}
         </div>
       )}
 
