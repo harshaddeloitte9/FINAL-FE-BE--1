@@ -167,7 +167,7 @@ function Intake() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
-  const [proceedErrors, setProceedErrors] = useState<string[] | null>(null);
+  const [proceedError, setProceedError] = useState<string | null>(null);
 
   // Artifacts state
   const [datasetFile, setDatasetFile] = useState<File | null>(null);
@@ -199,29 +199,18 @@ function Intake() {
   const hyperparamsUploaded = Boolean(hyperparamsFileName);
   const readyCount = [datasetUploaded, mddUploaded, trainingCodeUploaded, profileUploaded, assumptionsUploaded, perfUploaded, hyperparamsUploaded].filter(Boolean).length;
 
-  // Pairs each governance checklist label (rendered from intake.governance.checklist,
-  // which comes from the backend/demo snapshot) with its checkbox state, in the
-  // same order they're declared/rendered below — every item is mandatory since
-  // this is literally an attestation, not an optional checklist.
-  const governanceItems: Array<{ label: string; checked: boolean }> = [
-    { label: intake.governance.checklist[0], checked: chkInventory },
-    { label: intake.governance.checklist[1], checked: chkTier },
-    { label: intake.governance.checklist[2], checked: chkArtifacts },
-    { label: intake.governance.checklist[3], checked: chkPrevFindings },
-    { label: intake.governance.checklist[4], checked: chkRegScope },
-    { label: intake.governance.checklist[5], checked: chkIndependence },
-    { label: intake.governance.checklist[6], checked: chkPlanApproved },
-  ];
-
+  // Governance checklist items are intentionally NOT gated — they're an
+  // honest record of what's actually true at this point in the process
+  // (e.g. "no conflict of interest" may genuinely be unresolved yet), not a
+  // set of boxes to force-tick. Only the attestation checkbox below — the
+  // user's own confirmation that whatever state the checklist is actually
+  // in is honestly represented — gates moving to the next stage.
   const handleProceed = () => {
-    const missing = governanceItems.filter((item) => !item.checked).map((item) => item.label);
-    if (!chkAttestation) missing.push("I confirm the above information is accurate and complete");
-
-    if (missing.length > 0) {
-      setProceedErrors(missing);
+    if (!chkAttestation) {
+      setProceedError("Please confirm the information above is accurate before proceeding.");
       return;
     }
-    setProceedErrors(null);
+    setProceedError(null);
     navigate({ to: intake.nextStep.path });
   };
 
@@ -815,14 +804,9 @@ function Intake() {
             <ArrowRight className="h-4 w-4" />
           </button>
         </div>
-        {proceedErrors ? (
+        {proceedError ? (
           <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
-            <div className="font-semibold">Please complete all governance checklist items and confirm before proceeding.</div>
-            <ul className="mt-2 list-disc space-y-1 pl-5">
-              {proceedErrors.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            {proceedError}
           </div>
         ) : null}
       </section>
