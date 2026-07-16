@@ -10,6 +10,7 @@ import io
 import json
 import importlib.util
 import os
+import tempfile
 import random
 import re
 import sys
@@ -81,6 +82,7 @@ from train_new import split_data, compute_split_stats, train_model
 import ecl_engine as ecl
 import evaluate_new as eval_engine
 import fred_client
+import data_integration as di
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -1113,7 +1115,157 @@ async def fetch_api_data(
     return profile
 
 
-@app.post("/data/profile")
+def _save_upload_to_temp(file: UploadFile, suffix: str = ".db") -> str:
+    """SQLite needs a real file path, not an in-memory stream — write the
+    upload to a temp file. Caller is responsible for deleting it (see
+    try/finally at each call site below)."""
+    file.file.seek(0)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file.file.read())
+        return tmp.name
+
+
+@app.post("/data/integration/sqlite/inspect")
+async def integration_sqlite_inspect(db_file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Part B — upload a SQLite database and discover every table plus its
+    schema, so the frontend can populate the Loan / Collateral table
+    dropdowns. Nothing here assumes specific table names."""
+    tmp_path = _save_upload_to_temp(db_file)
+    try:
+        tables = di.list_tables(tmp_path)
+        if not tables:
+            raise HTTPException(status_code=400, detail="No tables found in the uploaded database.")
+        return {"tables": [di.inspect_table(tmp_path, t) for t in tables]}
+    except di.DataIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.post("/data/integration/relationships")
+async def integration_relationships(
+    db_file: Optional[UploadFile] = File(None),
+    customer_file: Optional[UploadFile] = File(None),
+    customer_csv_text: Optional[str] = Form(None),
+    selected_tables: str = Form(...),  # comma-separated table names from the db
+) -> Dict[str, Any]:
+    """Part C — automatic relationship discovery across the customer dataset
+    and whichever SQLite tables the user selected. Returns ranked join
+    candidates with confidence + human-readable reasons; the frontend
+    pre-fills the suggested (highest-confidence) join per table pair but
+    always lets the user override it before running the integration."""
+    table_names = [t.strip() for t in selected_tables.split(",") if t.strip()]
+    if not table_names:
+        raise HTTPException(status_code=400, detail="No tables selected.")
+
+    tables: Dict[str, pd.DataFrame] = {}
+    tmp_path = None
+    try:
+        if db_file is not None:
+            tmp_path = _save_upload_to_temp(db_file)
+            available = set(di.list_tables(tmp_path))
+            for t in table_names:
+                if t not in available:
+                    raise HTTPException(status_code=400, detail=f"Table '{t}' not found in the uploaded database.")
+                tables[t] = di.SQLiteDataSource(t, tmp_path, t).load()
+
+        if customer_file is not None or customer_csv_text:
+            customer_df = await _read_dataframe(file=customer_file, csv_text=customer_csv_text)
+            tables["customer"] = customer_df
+
+        if len(tables) < 2:
+            raise HTTPException(status_code=400, detail="At least two sources are required to discover relationships.")
+
+        candidates = di.discover_relationships(tables)
+        return {"candidates": [c.as_dict() for c in candidates]}
+    except di.DataIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if tmp_path:
+            os.unlink(tmp_path)
+
+
+@app.post("/data/integration/run")
+async def integration_run(
+    customer_file: Optional[UploadFile] = File(None),
+    customer_csv_text: Optional[str] = Form(None),
+    db_file: Optional[UploadFile] = File(None),
+    loan_table: Optional[str] = Form(None),
+    collateral_table: Optional[str] = Form(None),
+    join_specs_json: Optional[str] = Form(None),
+    fetch_macro: bool = Form(False),
+    macro_date_col: Optional[str] = Form(None),
+    fred_api_key: Optional[str] = Form(None),
+    join_how: str = Form("left"),
+) -> Dict[str, Any]:
+    """Parts D/E/F/G/I — run the full integration: merge the customer CSV
+    with whichever SQLite tables were selected using the user-confirmed join
+    keys (join_specs_json — a JSON list of {right_table, left_key,
+    right_key} the frontend built from discover_relationships' suggestions,
+    possibly overridden), then optionally attach FRED macro series by date.
+
+    Returns the SAME shape /data/upload already returns (via
+    _build_data_profile + csv_text) so nothing downstream — preprocessing,
+    feature engineering, model training — needs to change. See Part I.
+    """
+    if customer_file is None and not customer_csv_text:
+        raise HTTPException(status_code=400, detail="Customer data (file or csv_text) is required as the base of the integration.")
+
+    customer_df = await _read_dataframe(file=customer_file, csv_text=customer_csv_text)
+    source_metadata: List[di.SourceMetadata] = [di.CSVDataSource("customer", customer_df).metadata(customer_df)]
+
+    tmp_path = None
+    try:
+        tables: Dict[str, pd.DataFrame] = {}
+        selected_sqlite_tables = [t for t in (loan_table, collateral_table) if t]
+        if selected_sqlite_tables:
+            if db_file is None:
+                raise HTTPException(status_code=400, detail="A SQLite database file is required when a loan/collateral table is selected.")
+            tmp_path = _save_upload_to_temp(db_file)
+            for t in selected_sqlite_tables:
+                source = di.SQLiteDataSource(t, tmp_path, t)
+                tdf = source.load()
+                tables[t] = tdf
+                source_metadata.append(source.metadata(tdf))
+
+        try:
+            join_specs_raw = json.loads(join_specs_json) if join_specs_json else []
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="join_specs_json must be valid JSON.")
+
+        join_specs = [
+            di.TableJoinSpec(
+                right_table=spec["right_table"], left_key=spec["left_key"], right_key=spec["right_key"],
+                how=di.JoinStrategy(spec.get("how", join_how)),
+            )
+            for spec in join_specs_raw
+        ]
+
+        integrator = di.DatasetIntegrator()
+        try:
+            integrated = integrator.integrate("customer", customer_df, tables, join_specs, source_metadata)
+        except di.DataIntegrationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        if fetch_macro:
+            api_key = (fred_api_key or "").strip() or os.environ.get("FRED_API_KEY")
+            if not api_key:
+                integrator.report.warnings.append("No FRED API key was provided — macro data was not fetched.")
+            else:
+                integrated = integrator.attach_macro(integrated, macro_date_col, fred_client, api_key)
+
+        dataset_name = "Integrated dataset"
+        profile = _build_data_profile(integrated, dataset_name=dataset_name)
+        profile["csv_text"] = integrated.to_csv(index=False)
+        profile["source_type"] = "integrated"
+        profile["integration_report"] = integrator.report.as_dict()
+        return profile
+    finally:
+        if tmp_path:
+            os.unlink(tmp_path)
+
+
+
 async def data_profile(
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
