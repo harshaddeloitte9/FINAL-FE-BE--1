@@ -23,7 +23,6 @@ import { Route as EclProvisionsRouteImport } from './routes/ecl-provisions'
 import { Route as EadRouteImport } from './routes/ead'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
-import { Route as AssistantRouteImport } from './routes/assistant'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ValidationIndexRouteImport } from './routes/validation.index'
 import { Route as ValidationStressRouteImport } from './routes/validation.stress'
@@ -105,11 +104,6 @@ const DataUploadRoute = DataUploadRouteImport.update({
   path: '/data-upload',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AssistantRoute = AssistantRouteImport.update({
-  id: '/assistant',
-  path: '/assistant',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -163,7 +157,6 @@ const ValidationChallengerRoute = ValidationChallengerRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/ead': typeof EadRoute
@@ -190,7 +183,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/ead': typeof EadRoute
@@ -217,7 +209,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/assistant': typeof AssistantRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/ead': typeof EadRoute
@@ -246,7 +237,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/assistant'
     | '/data-upload'
     | '/development'
     | '/ead'
@@ -273,7 +263,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/assistant'
     | '/data-upload'
     | '/development'
     | '/ead'
@@ -299,7 +288,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/assistant'
     | '/data-upload'
     | '/development'
     | '/ead'
@@ -327,7 +315,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AssistantRoute: typeof AssistantRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
   EadRoute: typeof EadRoute
@@ -444,13 +431,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DataUploadRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/assistant': {
-      id: '/assistant'
-      path: '/assistant'
-      fullPath: '/assistant'
-      preLoaderRoute: typeof AssistantRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -554,7 +534,6 @@ const ValidationRouteWithChildren = ValidationRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AssistantRoute: AssistantRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
   EadRoute: EadRoute,

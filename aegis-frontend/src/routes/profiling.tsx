@@ -534,17 +534,17 @@ function Profiling() {
             {correlationColumns.length > 0 && correlationValues.length > 0 ? (
               <>
                 <div className="flex justify-center overflow-x-auto">
-                  <table style={{ borderCollapse: "separate", borderSpacing: "6px", width: "100%", maxWidth: "720px" }}>
+                  <table style={{ borderCollapse: "separate", borderSpacing: "4px", width: "100%", maxWidth: "480px" }}>
                     <thead>
                       <tr>
-                        <th className="p-1" />
+                        <th className="p-0.5" />
                         {correlationColumns.map((column) => (
                           <th
                             key={column}
                             title={column}
-                            className="max-w-[72px] truncate p-1 text-xs font-medium text-muted-foreground"
+                            className="max-w-[56px] truncate p-0.5 text-[10px] font-medium text-muted-foreground"
                           >
-                            {column.length > 9 ? `${column.slice(0, 8)}…` : column}
+                            {column.length > 7 ? `${column.slice(0, 6)}…` : column}
                           </th>
                         ))}
                       </tr>
@@ -554,15 +554,15 @@ function Profiling() {
                         <tr key={rowColumn}>
                           <th
                             title={rowColumn}
-                            className="whitespace-nowrap p-1 pr-3 text-right text-xs font-medium text-muted-foreground"
+                            className="whitespace-nowrap p-0.5 pr-2 text-right text-[10px] font-medium text-muted-foreground"
                           >
-                            {rowColumn.length > 12 ? `${rowColumn.slice(0, 11)}…` : rowColumn}
+                            {rowColumn.length > 10 ? `${rowColumn.slice(0, 9)}…` : rowColumn}
                           </th>
                           {(correlationValues[rowIndex] ?? []).map((value, colIndex) => (
                             <td
                               key={`${rowColumn}-${correlationColumns[colIndex]}`}
                               title={`${rowColumn} × ${correlationColumns[colIndex]}: ${value.toFixed(2)}`}
-                              className="h-14 w-14 rounded-md text-center align-middle text-sm font-medium tabular-nums"
+                              className="h-9 w-9 rounded-md text-center align-middle text-xs font-medium tabular-nums"
                               style={correlationCellStyle(value)}
                             >
                               {value.toFixed(2)}
@@ -573,10 +573,10 @@ function Profiling() {
                     </tbody>
                   </table>
                 </div>
-                <div className="mx-auto mt-4 flex max-w-[720px] items-center gap-2 text-xs text-muted-foreground">
+                <div className="mx-auto mt-3 flex max-w-[480px] items-center gap-2 text-xs text-muted-foreground">
                   <span>-1</span>
                   <div
-                    className="h-2.5 flex-1 rounded-full"
+                    className="h-2 flex-1 rounded-full"
                     style={{ background: "linear-gradient(to right, rgba(13,148,136,0.9), rgba(148,163,184,0.15), rgba(5,150,105,0.9))" }}
                   />
                   <span>+1</span>

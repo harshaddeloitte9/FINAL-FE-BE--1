@@ -8,7 +8,6 @@ import {
   Cpu,
   LineChart,
   Sparkles,
-  MessageSquare,
   Settings,
   Bell,
   Search,
@@ -45,9 +44,9 @@ const developmentNav: NavItem[] = [
   { to: "/training", label: "Model Training", icon: Cpu },
   { to: "/evaluation", label: "Model Evaluation", icon: LineChart },
   { to: "/explainability", label: "Explainability", icon: Sparkles },
-  { to: "/assistant", label: "AI Assistant", icon: MessageSquare },
-  { to: "/settings", label: "Settings", icon: Settings },
 ];
+
+const settingsNavItem: NavItem = { to: "/settings", label: "Settings", icon: Settings };
 
 const validationNav: NavItem[] = [
   { to: "/validation/intake", label: "Intake & Governance", icon: FileText, exact: true },
@@ -85,13 +84,47 @@ function resolveActiveModelTab(pathname: string): ModelTab["key"] {
     "/training",
     "/evaluation",
     "/explainability",
-    "/assistant",
     "/settings",
     "/development",
   ].includes(pathname)) {
     return "pd";
   }
   return "pd";
+}
+
+function NavLinkItem({
+  item,
+  pathname,
+  collapsed,
+}: {
+  item: NavItem;
+  pathname: string;
+  collapsed: boolean;
+}) {
+  const Icon = item.icon;
+  const active = item.exact ? pathname === item.to : pathname === item.to || pathname.startsWith(item.to + "/");
+  return (
+    <li>
+      <Link
+        to={item.to}
+        className={cn(
+          "group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+          active
+            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+            : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+        )}
+      >
+        <Icon
+          className={cn(
+            "h-[18px] w-[18px] shrink-0",
+            active ? "text-primary" : "text-sidebar-foreground/60 group-hover:text-primary",
+          )}
+        />
+        {!collapsed && <span className="truncate">{item.label}</span>}
+        {!collapsed && active && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" />}
+      </Link>
+    </li>
+  );
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -167,36 +200,19 @@ export function AppShell({ children }: { children: ReactNode }) {
 
           <nav className="flex-1 overflow-y-auto px-3 py-4">
             <ul className="space-y-1">
-              {nav.map((item) => {
-                const Icon = item.icon;
-                const active = item.exact ? pathname === item.to : pathname === item.to || pathname.startsWith(item.to + "/");
-                return (
-                  <li key={item.to}>
-                    <Link
-                      to={item.to}
-                      className={cn(
-                        "group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                        active
-                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                          : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-                      )}
-                    >
-                      <Icon
-                        className={cn(
-                          "h-[18px] w-[18px] shrink-0",
-                          active ? "text-primary" : "text-sidebar-foreground/60 group-hover:text-primary",
-                        )}
-                      />
-                      {!collapsed && <span className="truncate">{item.label}</span>}
-                      {!collapsed && active && (
-                        <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" />
-                      )}
-                    </Link>
-                  </li>
-                );
-              })}
+              {nav.map((item) => (
+                <NavLinkItem key={item.to} item={item} pathname={pathname} collapsed={collapsed} />
+              ))}
             </ul>
           </nav>
+
+          {workspace === "development" && (
+            <div className="border-t border-sidebar-border px-3 pb-3 pt-3">
+              <ul>
+                <NavLinkItem item={settingsNavItem} pathname={pathname} collapsed={collapsed} />
+              </ul>
+            </div>
+          )}
 
           <div className="border-t border-sidebar-border p-3">
             <button

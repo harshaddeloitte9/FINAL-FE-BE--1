@@ -305,9 +305,9 @@ function Preprocessing() {
         </p>
       </div>
 
-      <div className="rounded-xl border border-border bg-card p-6 shadow-elegant border-l-4 border-emerald-500/80 bg-emerald-500/10">
-        <div className="text-sm font-semibold text-emerald-900">Leakage control</div>
-        <p className="mt-2 text-sm text-emerald-900/90">
+      <div className="rounded-xl border border-border bg-card p-6 shadow-elegant border-l-4 border-blue-500/80 bg-blue-500/10">
+        <div className="text-sm font-semibold text-blue-900">Leakage control</div>
+        <p className="mt-2 text-sm text-blue-900/90">
           The dataset is split before any feature engineering. Missing-value treatment, imputation strategy,
           skew/transform recommendations, IV/WOE, correlation/VIF, and feature-selection decisions are all
           learned on the training split only and applied unchanged to validation/test.
