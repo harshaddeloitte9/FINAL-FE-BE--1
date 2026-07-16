@@ -185,3 +185,26 @@
   background-size: 200% 100%;
   animation: shimmer 1.6s linear infinite;
 }
+
+/* Full Report printing (Explainability > Summary > Download Full Report).
+   Only the #full-report-content subtree is shown; the sidebar, tabs and rest
+   of the app are hidden so "Save as PDF" in the browser's print dialog
+   produces a clean document instead of a screenshot of the whole page. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #full-report-content,
+  #full-report-content * {
+    visibility: visible;
+  }
+  #full-report-content {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

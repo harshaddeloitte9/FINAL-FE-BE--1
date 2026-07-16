@@ -4,10 +4,20 @@ import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { useEffect, useMemo, useState } from "react";
 import { BarChart, Bar, Cell, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
-import { AlertCircle, ArrowLeft, ArrowRight, Loader, Download, BarChart3, Microscope, Search, ClipboardList } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Loader, Download, Printer, BarChart3, Microscope, Search, ClipboardList } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
+import {
+  missingTreatmentCounts,
+  preprocessingColumnRows,
+  computeGini,
+  hyperparameterSummary,
+  featureRemovalSummary,
+  topInteractionTerms,
+  woeFeatureSummary,
+  rowsToCsv,
+} from "@/lib/full-report";
 
 type FeatureImportanceRow = {
   Feature: string;
@@ -241,6 +251,101 @@ function Explainability() {
     );
   }
 
+  // ── Full report data — every field below is read from state already
+  // computed elsewhere in the pipeline; nothing here re-derives analysis. ──
+  const trainingConfig2 = trainingResult?.training_config ?? {};
+  const trainingInfo = trainingResult?.training_info ?? {};
+  const metrics = trainingResult?.evaluation_metrics ?? {};
+  const classificationReport = metrics.classification_report ?? {};
+  const feSummary = featureEngineeringResult?.feature_engineering_summary ?? {};
+  const feAdded = Array.isArray(feSummary.added) ? feSummary.added : [];
+  const feRemoved = Array.isArray(feSummary.removed) ? feSummary.removed : [];
+  const feOriginalFeatures = Array.isArray(feSummary.original_shape) ? feSummary.original_shape[1] ?? null : null;
+  const feFinalFeatures = Array.isArray(feSummary.final_shape) ? feSummary.final_shape[1] ?? null : null;
+  const removalProposal = featureRemovalSummary(featureEngineeringResult);
+  const rescuedFeatures = removalProposal.rows.filter((r) => r.rescued);
+  const interactionRows = topInteractionTerms(featureEngineeringResult);
+  const woeRows = woeFeatureSummary(featureEngineeringResult);
+  const treatmentCounts = missingTreatmentCounts(preprocessingResult?.applied_treatment_map);
+  const strategyRows = preprocessingColumnRows(preprocessingResult);
+  const splitStats = preprocessingResult?.split_stats ?? {};
+  const hyperparams = hyperparameterSummary(trainingResult);
+  const gini = computeGini(metrics.roc_auc);
+  const classDistribution: Record<string, number> = profile?.class_distribution ?? {};
+  const classDistributionChartData = Object.entries(classDistribution).map(([cls, count]) => ({ cls, count }));
+  const metricsChartData = [
+    { metric: "Accuracy", value: metrics.accuracy },
+    { metric: "Precision", value: metrics.precision },
+    { metric: "Recall", value: metrics.recall },
+    { metric: "F1", value: metrics.f1 },
+    { metric: "ROC-AUC", value: metrics.roc_auc },
+    { metric: "PR-AUC", value: metrics.pr_auc },
+  ].filter((row) => typeof row.value === "number");
+  const reportGeneratedAt = new Date().toLocaleString();
+
+  const downloadReport = () => window.print();
+
+  const downloadDataSummaryCsv = () => {
+    const dict = profile?.data_dictionary ?? [];
+    if (dict.length === 0) return;
+    const headers = Object.keys(dict[0]);
+    downloadBlob(
+      new Blob([rowsToCsv(headers, dict.map((row: Record<string, any>) => headers.map((h) => row[h])))], { type: "text/csv;charset=utf-8" }),
+      "data_summary.csv",
+    );
+  };
+
+  const downloadOriginalDatasetCsv = () => {
+    if (!preprocessingResult?.original_dataset_csv) return;
+    downloadBlob(new Blob([preprocessingResult.original_dataset_csv], { type: "text/csv;charset=utf-8" }), "original_dataset.csv");
+  };
+
+  const downloadTransformedDatasetCsv = () => {
+    if (!preprocessingResult?.processed_dataset_csv) return;
+    downloadBlob(new Blob([preprocessingResult.processed_dataset_csv], { type: "text/csv;charset=utf-8" }), "transformed_dataset.csv");
+  };
+
+  const downloadEngineeredDatasetCsv = () => {
+    if (!featureEngineeringResult?.x_engineered_csv) return;
+    downloadBlob(new Blob([featureEngineeringResult.x_engineered_csv], { type: "text/csv;charset=utf-8" }), "engineered_dataset.csv");
+  };
+
+  const downloadFeatureDecisionLog = async () => {
+    if (!file) return;
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("target_col", targetColumn);
+      const res = await formUpload<any>("/data/feature-decision-log", form);
+      if (res?.content_base64) {
+        downloadBlob(base64ToBlob(res.content_base64, "text/csv"), res.file_name || "feature_decision_log.csv");
+      }
+    } catch (err) {
+      console.error("Failed to download feature decision log:", err);
+    }
+  };
+
+  const downloadMetricsCsv = () => {
+    const rows = Object.entries(metrics).filter(([, v]) => typeof v === "number" && Number.isFinite(v));
+    if (rows.length === 0) return;
+    downloadBlob(
+      new Blob([rowsToCsv(["Metric", "Value"], rows.map(([k, v]) => [k, v]))], { type: "text/csv;charset=utf-8" }),
+      "metrics.csv",
+    );
+  };
+
+  const downloadArtifacts: Array<{ label: string; filename: string; available: boolean; onClick: () => void }> = [
+    { label: "Data summary (Data Profiling)", filename: "data_summary.csv", available: (profile?.data_dictionary ?? []).length > 0, onClick: downloadDataSummaryCsv },
+    { label: "Original dataset (Preprocessing)", filename: "original_dataset.csv", available: Boolean(preprocessingResult?.original_dataset_csv), onClick: downloadOriginalDatasetCsv },
+    { label: "Transformed dataset (Preprocessing)", filename: "transformed_dataset.csv", available: Boolean(preprocessingResult?.processed_dataset_csv), onClick: downloadTransformedDatasetCsv },
+    { label: "Engineered dataset (Feature Engineering)", filename: "engineered_dataset.csv", available: Boolean(featureEngineeringResult?.x_engineered_csv), onClick: downloadEngineeredDatasetCsv },
+    { label: "Feature decision log (Feature Engineering)", filename: "feature_decision_log.csv", available: Boolean(file), onClick: downloadFeatureDecisionLog },
+    { label: "Evaluation metrics (Model Evaluation)", filename: "metrics.csv", available: Object.keys(metrics).length > 0, onClick: downloadMetricsCsv },
+    { label: "Feature importance (Explainability)", filename: "feature_importance.csv", available: importanceRows.length > 0, onClick: downloadFeatureImportanceCsv },
+    { label: "Trained model artifact", filename: "final_credit_risk_model.pkl", available: Boolean(modelArtifact), onClick: downloadModel },
+    { label: "Full report (PDF via print)", filename: "full_report.pdf", available: true, onClick: downloadReport },
+  ];
+
   return (
     <div className="space-y-8">
       <PageHeader title="💡 Model Explainability" description="Feature importance, SHAP values, and individual prediction reasoning." />
@@ -469,39 +574,289 @@ function Explainability() {
 
         {/* ── Summary ── */}
         <TabsContent value="summary" className="space-y-4 pt-4">
-          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            {data?.summary ? (
-              <div className="whitespace-pre-line text-sm text-foreground">{plainMarkdown(data.summary)}</div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Model performance summary is not available yet.</p>
-            )}
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">Report generated {reportGeneratedAt}</p>
+            <Button onClick={downloadReport} className="no-print gap-2">
+              <Printer className="h-4 w-4" />
+              Download Full Report
+            </Button>
+          </div>
 
-            <div className="mt-8 border-t border-border pt-6">
-              <h3 className="text-sm font-semibold">💾 Final Exports</h3>
-              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <Button variant="outline" onClick={downloadModel} disabled={!modelArtifact} className="gap-2">
-                  <Download className="h-4 w-4" />
-                  Download Trained Model (.pkl)
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={downloadProcessedDataset}
-                  disabled={!preprocessingResult?.processed_dataset_csv && !featureEngineeringResult?.x_engineered_csv}
-                  className="gap-2"
-                >
-                  <Download className="h-4 w-4" />
-                  Download processed_dataset.csv
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={downloadFeatureImportanceCsv}
-                  disabled={importanceRows.length === 0}
-                  className="gap-2"
-                >
-                  <Download className="h-4 w-4" />
-                  Download feature_importance.csv
-                </Button>
+          <div id="full-report-content" className="space-y-6">
+            {/* 1. Model identity */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">1. Model Identity</h2>
+              <div className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                <div><strong>Model:</strong> {trainingResult?.model_name ?? "—"}</div>
+                <div><strong>Task type:</strong> {trainingResult?.task_type ?? "—"}</div>
+                <div><strong>Target column:</strong> {targetColumn}</div>
+                <div><strong>Report generated:</strong> {reportGeneratedAt}</div>
               </div>
+            </section>
+
+            {/* 2. Dataset summary */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">2. Dataset Summary</h2>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div><strong>Rows:</strong> {profile?.shape?.[0]?.toLocaleString() ?? "—"}</div>
+                <div><strong>Columns:</strong> {profile?.shape?.[1]?.toLocaleString() ?? "—"}</div>
+                <div><strong>Missing:</strong> {profile?.missing_percentage !== undefined ? `${profile.missing_percentage}%` : "—"}</div>
+                <div><strong>Duplicates:</strong> {profile?.duplicate_rows ?? "—"}</div>
+              </div>
+              {Object.keys(classDistribution).length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Class distribution</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {Object.entries(classDistribution).map(([cls, count]) => (
+                      <span key={cls} className="rounded-full border border-border bg-background px-3 py-1 text-xs">
+                        {cls}: {count.toLocaleString()}
+                      </span>
+                    ))}
+                  </div>
+                  {profile?.target_summary?.imbalance_ratio !== undefined && profile.target_summary.imbalance_ratio !== null && (
+                    <p className="mt-2 text-xs text-muted-foreground">Imbalance ratio: {profile.target_summary.imbalance_ratio}:1</p>
+                  )}
+                  <div className="mt-4 h-64 w-full max-w-xl">
+                    <BarChart width={520} height={250} data={classDistributionChartData} margin={{ left: 10, right: 20 }}>
+                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="cls" tickLine={false} axisLine={false} fontSize={11} />
+                      <YAxis tickLine={false} axisLine={false} fontSize={10} />
+                      <Tooltip />
+                      <Bar dataKey="count" fill="oklch(0.6 0.18 275)" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* 3. Preprocessing decisions */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">3. Preprocessing Decisions</h2>
+              <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                <div><strong>Train:</strong> {splitStats.train_n?.toLocaleString() ?? "—"}</div>
+                <div><strong>Validation:</strong> {splitStats.val_n?.toLocaleString() ?? "—"}</div>
+                <div><strong>Test:</strong> {splitStats.test_n?.toLocaleString() ?? "—"}</div>
+              </div>
+              {treatmentCounts.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Missing-value treatment</div>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {treatmentCounts.map((t) => (
+                      <li key={t.treatment}>{t.label}: <strong>{t.count}</strong> column{t.count === 1 ? "" : "s"}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {strategyRows.length > 0 && (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                        <th className="border-b border-border px-3 py-2">Column</th>
+                        <th className="border-b border-border px-3 py-2">Type</th>
+                        <th className="border-b border-border px-3 py-2">Scaler</th>
+                        <th className="border-b border-border px-3 py-2">Imputer</th>
+                        <th className="border-b border-border px-3 py-2">Encoding</th>
+                        <th className="border-b border-border px-3 py-2">Transform</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {strategyRows.map((row: any) => (
+                        <tr key={row.feature} className="odd:bg-background">
+                          <td className="border-b border-border px-3 py-2 font-mono text-xs">{row.feature}</td>
+                          <td className="border-b border-border px-3 py-2 text-xs">{row.type}</td>
+                          <td className="border-b border-border px-3 py-2 text-xs">{row.scaler}</td>
+                          <td className="border-b border-border px-3 py-2 text-xs">{row.imputer}</td>
+                          <td className="border-b border-border px-3 py-2 text-xs">{row.encoding}</td>
+                          <td className="border-b border-border px-3 py-2 text-xs">{row.transform}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {/* 4. Feature engineering summary */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">4. Feature Engineering Summary</h2>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div><strong>Before:</strong> {feOriginalFeatures ?? "—"}</div>
+                <div><strong>After:</strong> {feFinalFeatures ?? "—"}</div>
+                <div><strong>Added:</strong> {feAdded.length}</div>
+                <div><strong>Removed:</strong> {feRemoved.length}</div>
+              </div>
+              {interactionRows.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Top interaction terms</div>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {interactionRows.slice(0, 5).map((f: any) => (
+                      <li key={f.name}><code className="font-mono text-xs">{f.name}</code> ({f.feature_a} × {f.feature_b})</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {woeRows.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">WOE-encoded features</div>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {woeRows.map((w) => (
+                      <li key={w.feature}><code className="font-mono text-xs">{w.feature}</code> — {w.buckets} buckets{w.iv !== null ? `, IV ${w.iv.toFixed(4)}` : ""}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {rescuedFeatures.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Cascade-rescue actions</div>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {rescuedFeatures.map((r) => (
+                      <li key={r.feature}><code className="font-mono text-xs">{r.feature}</code> — {r.reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
+
+            {/* 5. Model training configuration */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">5. Model Training Configuration</h2>
+              <div className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                <div><strong>Model type:</strong> {trainingResult?.model_name ?? "—"}</div>
+                <div><strong>Class balancing:</strong> {trainingInfo.class_weighting?.method ?? (trainingInfo.class_weighting?.applied ? "class_weight='balanced'" : "None")}</div>
+                <div><strong>Cross-validation:</strong> {trainingConfig2.use_cv ? `${trainingConfig2.cv_folds}-fold (mean ${trainingInfo.cv_mean ?? "—"}, std ${trainingInfo.cv_std ?? "—"})` : "Not used"}</div>
+                <div><strong>OOT holdout:</strong> {trainingConfig2.use_oot ? `Cutoff ${trainingInfo.oot?.cutoff_date ?? "—"}, ${trainingInfo.oot?.oot_n ?? 0} rows` : "Not used"}</div>
+              </div>
+              <div className="mt-4">
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Hyperparameters — {hyperparams.source}</div>
+                {Object.keys(hyperparams.params).length > 0 ? (
+                  <ul className="mt-2 grid grid-cols-2 gap-1 text-sm sm:grid-cols-3">
+                    {Object.entries(hyperparams.params).map(([k, v]) => (
+                      <li key={k}><code className="font-mono text-xs">{k}</code>: {String(v)}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-muted-foreground">No overrides recorded — the model used its library defaults.</p>
+                )}
+              </div>
+            </section>
+
+            {/* 6. Evaluation metrics */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">6. Evaluation Metrics</h2>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div><strong>Accuracy:</strong> {metrics.accuracy ?? "—"}</div>
+                <div><strong>Precision:</strong> {metrics.precision ?? "—"}</div>
+                <div><strong>Recall:</strong> {metrics.recall ?? "—"}</div>
+                <div><strong>F1:</strong> {metrics.f1 ?? "—"}</div>
+                <div><strong>ROC-AUC:</strong> {metrics.roc_auc ?? "—"}</div>
+                <div><strong>PR-AUC:</strong> {metrics.pr_auc ?? "—"}</div>
+                <div><strong>KS:</strong> {metrics.ks_statistic ?? "—"}</div>
+                <div><strong>Brier:</strong> {metrics.brier_score ?? "—"}</div>
+                <div><strong>Gini:</strong> {gini ?? "—"}</div>
+              </div>
+              {metricsChartData.length > 0 && (
+                <div className="mt-4 h-64 w-full max-w-xl">
+                  <BarChart width={520} height={250} data={metricsChartData} margin={{ left: 10, right: 20 }}>
+                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="metric" tickLine={false} axisLine={false} fontSize={10} />
+                    <YAxis tickLine={false} axisLine={false} fontSize={10} domain={[0, 1]} />
+                    <Tooltip formatter={(value: number) => value.toFixed(4)} />
+                    <Bar dataKey="value" fill="oklch(0.6 0.2 25)" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </div>
+              )}
+              {metrics.threshold_used !== undefined && (
+                <p className="mt-4 text-sm">
+                  <strong>Decision threshold:</strong> {metrics.threshold_used}
+                  {metrics.threshold_selection && (
+                    <> — auto-selected to maximize {metrics.threshold_selection.metric} (F1 {metrics.threshold_selection.f1}, precision {metrics.threshold_selection.precision}, recall {metrics.threshold_selection.recall})</>
+                  )}
+                </p>
+              )}
+              {Object.keys(classificationReport).length > 0 && (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                        <th className="border-b border-border px-3 py-2">Class</th>
+                        <th className="border-b border-border px-3 py-2">Precision</th>
+                        <th className="border-b border-border px-3 py-2">Recall</th>
+                        <th className="border-b border-border px-3 py-2">F1</th>
+                        <th className="border-b border-border px-3 py-2">Support</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(classificationReport)
+                        .filter(([key]) => key !== "accuracy")
+                        .map(([key, row]: [string, any]) => (
+                          <tr key={key} className="odd:bg-background">
+                            <td className="border-b border-border px-3 py-2 font-mono text-xs">{key}</td>
+                            <td className="border-b border-border px-3 py-2 text-xs">{row.precision?.toFixed?.(4) ?? "—"}</td>
+                            <td className="border-b border-border px-3 py-2 text-xs">{row.recall?.toFixed?.(4) ?? "—"}</td>
+                            <td className="border-b border-border px-3 py-2 text-xs">{row["f1-score"]?.toFixed?.(4) ?? "—"}</td>
+                            <td className="border-b border-border px-3 py-2 text-xs">{row.support ?? "—"}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {/* 7. Explainability findings */}
+            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+              <h2 className="text-base font-semibold">7. Explainability Findings</h2>
+              {importanceRows.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Top features by importance</div>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
+                    {importanceRows.slice(0, 10).map((r) => (
+                      <li key={r.Feature}><code className="font-mono text-xs">{r.Feature}</code> — {r.Importance.toFixed(4)}</li>
+                    ))}
+                  </ol>
+                  <div className="mt-4 h-72 w-full max-w-xl">
+                    <BarChart
+                      width={560}
+                      height={280}
+                      layout="vertical"
+                      data={[...importanceRows].slice(0, 10).sort((a, b) => a.Importance - b.Importance)}
+                      margin={{ left: 130, right: 30 }}
+                    >
+                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
+                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
+                      <YAxis type="category" dataKey="Feature" tickLine={false} axisLine={false} fontSize={9} width={125} />
+                      <Tooltip formatter={(value: number) => value.toFixed(4)} />
+                      <Bar dataKey="Importance" fill="oklch(0.6 0.18 275)" radius={[0, 6, 6, 0]} />
+                    </BarChart>
+                  </div>
+                </div>
+              )}
+              {data?.summary ? (
+                <div className="mt-4 whitespace-pre-line text-sm text-foreground">{plainMarkdown(data.summary)}</div>
+              ) : (
+                <p className="mt-4 text-sm text-muted-foreground">Model performance summary is not available yet.</p>
+              )}
+            </section>
+          </div>
+
+          {/* Document Download Hub */}
+          <section className="no-print rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h3 className="text-sm font-semibold">📥 Document Download Hub</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Every downloadable artifact generated across the Model Development pipeline, in one place.</p>
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {downloadArtifacts.map((artifact) => (
+                <Button
+                  key={artifact.filename}
+                  variant="outline"
+                  onClick={artifact.onClick}
+                  disabled={!artifact.available}
+                  className="gap-2 justify-start"
+                >
+                  <Download className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{artifact.label}</span>
+                </Button>
+              ))}
             </div>
           </section>
         </TabsContent>
