@@ -101,6 +101,7 @@ from explainability import (
     generate_model_summary,
 )
 from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication, evaluate_replication_checks
+from validation_stress_core import run_stress_suite, run_manual_shock
 
 _validation_agent2_path = SOURCE_OF_TRUTH_DIR / "validation_agent2.py"
 _validation_agent2_spec = importlib.util.spec_from_file_location("source_validation_agent2", _validation_agent2_path)
@@ -2474,7 +2475,7 @@ async def validation_performance(
         })
 
     safe_replication_result = dict(replication_result)
-    for key in ["X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
+    for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
         safe_replication_result.pop(key, None)
 
     return {
@@ -2668,11 +2669,122 @@ async def validation_replication(
     flags = [c["id"] for c in checks if c.get("status") in ("FAIL",)]
 
     safe_result = dict(result)
-    for key in ["X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
+    for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
         safe_result.pop(key, None)
     safe_result = _serialize_stage5_payload(safe_result)
 
     return {"stage": "replication", "flags": flags, "report": {"replication": {"result": safe_result, "checks": checks}}}
+
+
+@app.post("/validation/stress/run")
+async def validation_stress_run(
+    algorithm: Optional[str] = Form(None),
+    model_name: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    seeds: Optional[str] = Form("42,43,44,45,46"),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    cv_folds: int = Form(5),
+    freq: Optional[str] = Form("quarterly"),
+    date_col: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """Stage 6 — Stress Testing & Backtesting.
+
+    Runs everything from validation_stress_core.run_stress_suite() in one call:
+    ablation-based sensitivity (6.1), macro stress scenarios (6.2), PSI score
+    stability (6.4), backtesting vs realised default rate (6.8), and
+    directional testing (6.9a-c). Ported from the Streamlit app's Stage 6
+    tabs — see validation_stress_core.py for what was intentionally dropped
+    (the LGD-dependent directional check).
+
+    Takes the same training params as /validation/replication and retrains
+    within this request (no pipeline is cached between requests in this
+    backend — same tradeoff /validation/replication already makes).
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+
+    try:
+        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    except Exception:
+        seed_list = [random_seed]
+
+    resolved_model_name = (algorithm or model_name or "").strip()
+    if not resolved_model_name:
+        raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+
+    rep_result = run_replication(
+        df=df,
+        target_col=target_col,
+        model_name=resolved_model_name,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
+        cv_folds=cv_folds,
+        reported={},
+        seeds=seed_list,
+    )
+
+    suite = run_stress_suite(rep_result, val_df=df, freq_key=freq or "quarterly", date_col=date_col)
+    return {"stage": "stress", "report": suite}
+
+
+@app.post("/validation/stress/shock")
+async def validation_stress_shock(
+    algorithm: Optional[str] = Form(None),
+    model_name: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    seeds: Optional[str] = Form("42,43,44,45,46"),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    cv_folds: int = Form(5),
+    shock_feature: str = Form(...),
+    shock_direction: str = Form(...),
+    shock_magnitude_pct: float = Form(20),
+) -> Dict[str, Any]:
+    """Stage 6 — manual single-feature shock (the interactive "Apply Shock"
+    control). Separate from /validation/stress/run because it's re-run on
+    demand with different feature/direction/magnitude each time, and there's
+    no cached pipeline to reuse — so, like /validation/stress/run, it
+    retrains within the request.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+
+    try:
+        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    except Exception:
+        seed_list = [random_seed]
+
+    resolved_model_name = (algorithm or model_name or "").strip()
+    if not resolved_model_name:
+        raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+
+    if shock_direction not in ("increase", "decrease"):
+        raise HTTPException(status_code=400, detail="shock_direction must be 'increase' or 'decrease'.")
+
+    rep_result = run_replication(
+        df=df,
+        target_col=target_col,
+        model_name=resolved_model_name,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
+        cv_folds=cv_folds,
+        reported={},
+        seeds=seed_list,
+    )
+
+    try:
+        shock_result = run_manual_shock(rep_result, shock_feature, shock_direction, shock_magnitude_pct)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {"stage": "stress_shock", "result": shock_result}
 
 
 @app.post("/validation/agent2")
