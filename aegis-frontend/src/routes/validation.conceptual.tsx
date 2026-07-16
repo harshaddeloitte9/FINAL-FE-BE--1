@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, AlertTriangle, AlertCircle, Clock, Check } from "lucide-react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
@@ -63,6 +63,7 @@ function Conceptual() {
     validationMddText,
     validationStage3Result,
     setValidationStage3Result,
+    validationProfile,
   } = useDataset();
 
   // Seed from shared context so returning to this page (e.g. via Back from
@@ -137,7 +138,6 @@ function Conceptual() {
   }, [datasetLoaded, file, profile?.csv_text]);
 
   const summary = data?.summary ?? { total: 0, pass: 0, warn: 0, fail: 0 };
-  const progress = summary.total > 0 ? Math.round((summary.pass / summary.total) * 100) : 0;
 
   return (
     <div className="space-y-8">
@@ -160,59 +160,44 @@ function Conceptual() {
       ) : (
         <>
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <h3 className="text-sm font-semibold">Conceptual Soundness Results</h3>
-            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <SummaryTile label="Total Checks" value={summary.total} tone="neutral" />
-              <SummaryTile label="PASS" value={summary.pass} tone="pass" />
-              <SummaryTile label="WARN" value={summary.warn} tone="warn" />
-              <SummaryTile label="FAIL" value={summary.fail} tone="fail" />
-            </div>
-            <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-muted">
-              <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />
-            </div>
+            <h3 className="mb-4 text-sm font-semibold">Conceptual Soundness Results</h3>
+            <ComplianceSummaryRow summary={summary} />
           </section>
 
           <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="text-sm font-bold text-primary">📐 Recommended Threshold Checks</div>
+                <div className="text-sm font-bold text-primary">📐 Threshold checks</div>
                 <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
               </div>
-              <div className="space-y-3">
-                {data?.thresholdChecks && data.thresholdChecks.length > 0 ? (
-                  data.thresholdChecks.map((c) => <ThresholdCheckCard key={c.check_id} check={c} />)
-                ) : (
-                  <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
-                    No threshold checks generated for this stage.
-                  </div>
-                )}
-              </div>
+              {data?.thresholdChecks && data.thresholdChecks.length > 0 ? (
+                <ThresholdPanel checks={data.thresholdChecks} profileSource={validationProfile ?? profile} />
+              ) : (
+                <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                  No threshold checks generated for this stage.
+                </div>
+              )}
             </div>
 
             <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="text-sm font-bold text-violet-500">🤖 RAG Agent Rules</div>
+                <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
                 <div className="text-xs text-muted-foreground">
                   Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)
                 </div>
               </div>
-              <div className="space-y-3">
-                {data?.ragRules && data.ragRules.length > 0 ? (
-                  data.ragRules.map((r) => <RagRuleCard key={r.rule_id} rule={r} />)
-                ) : (
-                  <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
-                    No RAG agent flags generated for this stage.
-                  </div>
-                )}
-              </div>
+              {data?.ragRules && data.ragRules.length > 0 ? (
+                <RagRulesPanel rules={data.ragRules} />
+              ) : (
+                <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                  No RAG agent flags generated for this stage.
+                </div>
+              )}
             </div>
           </section>
 
           <section className="rounded-xl border border-primary/30 bg-primary-soft p-6">
             <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
-            <p className="mt-2 text-sm">
-              Verdict: <VerdictBadge verdict={data?.regulatoryAlignment?.verdict} />
-            </p>
             <p className="mt-2 text-sm">
               Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/
               {data?.regulatoryAlignment?.counts?.fail ?? 0}
@@ -258,6 +243,7 @@ const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string;
   PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", badge: "bg-emerald-500 text-emerald-950", icon: "✅" },
   WARN: { border: "border-amber-500/40", bg: "bg-amber-500/10", badge: "bg-amber-500 text-amber-950", icon: "🟡" },
   FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950", icon: "🔴" },
+  PENDING: { border: "border-slate-400/40", bg: "bg-slate-400/10", badge: "bg-slate-400 text-slate-950", icon: "⏱️" },
 };
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -277,101 +263,372 @@ function statusStyle(status: string | undefined) {
   return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
 }
 
-function SummaryTile({ label, value, tone }: { label: string; value: number; tone: "neutral" | "pass" | "warn" | "fail" }) {
-  const classes =
+function statusIcon(status: string | undefined, className = "h-4 w-4") {
+  switch (status) {
+    case "FAIL":
+      return <AlertTriangle className={`${className} text-red-600 dark:text-red-400`} />;
+    case "WARN":
+      return <AlertCircle className={`${className} text-amber-600 dark:text-amber-400`} />;
+    case "PENDING":
+      return <Clock className={`${className} text-slate-500 dark:text-slate-400`} />;
+    default:
+      return <Check className={`${className} text-emerald-600 dark:text-emerald-400`} />;
+  }
+}
+
+// ── Checks-passed donut + pass/warn/fail count cards ─────────────────────
+
+function ComplianceDonut({ pass, warn, fail, size = 88 }: { pass: number; warn: number; fail: number; size?: number }) {
+  const total = pass + warn + fail;
+  const failPct = total > 0 ? (fail / total) * 100 : 0;
+  const warnPct = total > 0 ? (warn / total) * 100 : 0;
+  const score = total > 0 ? Math.round((pass / total) * 100) : 0;
+  const gradient =
+    total > 0
+      ? `conic-gradient(#dc2626 0% ${failPct}%, #d97706 ${failPct}% ${failPct + warnPct}%, #16a34a ${failPct + warnPct}% 100%)`
+      : "#e5e7eb";
+
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <div className="h-full w-full rounded-full" style={{ background: gradient }} />
+      <div
+        className="absolute flex items-center justify-center rounded-full bg-card"
+        style={{ inset: Math.round(size * 0.16) }}
+      >
+        <span className="text-lg font-bold text-foreground">{score}%</span>
+      </div>
+    </div>
+  );
+}
+
+function CountCard({ label, value, tone }: { label: string; value: number; tone: "pass" | "warn" | "fail" }) {
+  const color =
     tone === "pass"
-      ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+      ? "text-emerald-600 dark:text-emerald-400"
       : tone === "warn"
-      ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300"
-      : tone === "fail"
-      ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
-      : "border-border bg-background text-foreground";
-
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-red-600 dark:text-red-400";
+  const title = tone === "pass" ? "Pass" : tone === "warn" ? "Warn" : "Fail";
   return (
-    <div className={`rounded-xl border p-4 ${classes}`}>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className="mt-2 text-2xl font-semibold">{value}</div>
+    <div className="rounded-xl border border-border bg-background p-4">
+      <div className="text-xs text-muted-foreground">{title}</div>
+      <div className={`mt-1 text-2xl font-bold ${color}`}>{value}</div>
     </div>
   );
 }
 
-function VerdictBadge({ verdict }: { verdict?: string }) {
-  const classes =
-    verdict === "PASS"
-      ? "bg-emerald-500 text-emerald-950"
-      : verdict === "CONDITIONAL"
-      ? "bg-amber-500 text-amber-950"
-      : verdict === "FAIL"
-      ? "bg-red-500 text-red-950"
-      : "bg-muted text-foreground";
+function ComplianceSummaryRow({
+  summary,
+}: {
+  summary: { total: number; pass: number; warn: number; fail: number };
+}) {
   return (
-    <span className={`ml-1 rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide ${classes}`}>
-      {verdict ?? "—"}
-    </span>
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="flex items-center gap-4 rounded-xl border border-border bg-background p-4">
+        <ComplianceDonut pass={summary.pass} warn={summary.warn} fail={summary.fail} />
+        <div className="min-w-0">
+          <div className="text-xs text-muted-foreground">Checks passed</div>
+          <div className="text-base font-bold leading-tight text-foreground">
+            {summary.pass}/{summary.total} passed
+          </div>
+        </div>
+      </div>
+      <CountCard label="Pass" value={summary.pass} tone="pass" />
+      <CountCard label="Warn" value={summary.warn} tone="warn" />
+      <CountCard label="Fail" value={summary.fail} tone="fail" />
+    </div>
   );
 }
 
-function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
+// ── Dataset insight (e.g. missing values by column) shown inside a threshold
+// check's detail panel when the check text suggests it's relevant. Purely
+// additive UI — falls back to nothing if the profile doesn't have usable
+// fields, so it never breaks rendering of the underlying backend data. ──
+
+function extractMissingness(profileSource: any): { column: string; pct: number }[] | null {
+  if (!profileSource || typeof profileSource !== "object") return null;
+
+  const mapCandidates = [
+    profileSource.missing_by_column,
+    profileSource.missing_pct_by_column,
+    profileSource.column_missing_pct,
+    profileSource.missingness,
+    profileSource.null_pct_by_column,
+  ];
+  for (const candidate of mapCandidates) {
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      const entries = Object.entries(candidate)
+        .map(([column, raw]) => {
+          const num = Number(raw);
+          if (Number.isNaN(num)) return null;
+          return { column, pct: num <= 1 ? num * 100 : num };
+        })
+        .filter((e): e is { column: string; pct: number } => e !== null);
+      if (entries.length) return entries.sort((a, b) => b.pct - a.pct);
+    }
+  }
+
+  const arrayCandidates = [
+    profileSource.columns,
+    profileSource.column_stats,
+    profileSource.column_summary,
+    profileSource.column_profiles,
+  ];
+  for (const arr of arrayCandidates) {
+    if (Array.isArray(arr) && arr.length) {
+      const entries = arr
+        .map((c: any) => {
+          const column = c?.name ?? c?.column ?? c?.column_name;
+          const raw = c?.missing_pct ?? c?.missing_percentage ?? c?.null_pct ?? c?.pct_missing ?? c?.missing_rate;
+          if (column == null || raw == null) return null;
+          const num = Number(raw);
+          if (Number.isNaN(num)) return null;
+          return { column: String(column), pct: num <= 1 ? num * 100 : num };
+        })
+        .filter((e: any): e is { column: string; pct: number } => e !== null);
+      if (entries.length) return entries.sort((a, b) => b.pct - a.pct);
+    }
+  }
+
+  return null;
+}
+
+function MissingnessChart({ rows }: { rows: { column: string; pct: number }[] }) {
+  const top = rows.filter((r) => r.pct > 0).slice(0, 8);
+  if (!top.length) return null;
+  const max = Math.max(...top.map((r) => r.pct), 1);
+
+  return (
+    <div className="mt-4 rounded-lg border border-border/60 bg-background/60 p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Missing values by column
+      </div>
+      <div className="space-y-1.5">
+        {top.map((r) => (
+          <div key={r.column} className="flex items-center gap-2 text-xs">
+            <span className="w-28 shrink-0 truncate text-foreground/80" title={r.column}>
+              {r.column}
+            </span>
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-amber-500"
+                style={{ width: `${Math.min(100, (r.pct / max) * 100)}%` }}
+              />
+            </div>
+            <span className="w-12 shrink-0 text-right text-muted-foreground">{r.pct.toFixed(1)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DatasetInsight({ check, profileSource }: { check: ThresholdCheck; profileSource: any }) {
+  const text = `${check.title} ${check.detail} ${check.observed}`.toLowerCase();
+  const looksLikeMissingness = /missing|null value|completeness/.test(text);
+  if (!looksLikeMissingness) return null;
+
+  const rows = extractMissingness(profileSource);
+  if (!rows) return null;
+
+  return <MissingnessChart rows={rows} />;
+}
+
+// ── Threshold checks: compact tile grid, tap a tile for detail ──────────────
+
+function shortLabel(title: string, maxLen = 20): string {
+  const words = title.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return title.slice(0, maxLen);
+
+  let label = "";
+  for (const word of words) {
+    const candidate = label ? `${label} ${word}` : word;
+    if (candidate.length > maxLen && label) break;
+    label = candidate;
+    if (label.length >= maxLen) break;
+  }
+  return label.length > maxLen ? `${label.slice(0, maxLen - 1)}…` : label;
+}
+
+function ThresholdTile({
+  check,
+  active,
+  onClick,
+}: {
+  check: ThresholdCheck;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const palette =
+    check.status === "FAIL"
+      ? "border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"
+      : check.status === "WARN"
+      ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
+      : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex min-h-[64px] flex-col items-center justify-center gap-1 rounded-lg border p-2.5 text-center transition-colors ${palette} ${
+        active ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+      }`}
+    >
+      {statusIcon(check.status)}
+      <span className="text-[11px] font-semibold leading-tight">{shortLabel(check.title)}</span>
+    </button>
+  );
+}
+
+function ThresholdDetailPanel({ check, profileSource }: { check: ThresholdCheck; profileSource: any }) {
   const s = statusStyle(check.status);
-  const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "bg-muted text-foreground";
   return (
-    <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+    <div className={`mt-4 rounded-xl border ${s.border} ${s.bg} p-5`}>
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 break-words text-sm font-semibold text-foreground">
-          {s.icon} <span className="text-muted-foreground">[{check.check_id}]</span> {check.title}{" "}
-          <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
-            {check.severity}
-          </span>
+        <h4 className="text-base font-bold text-foreground">
+          [{check.check_id}] {check.title}
+        </h4>
+        <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {check.source} — {check.principle}
+      </p>
+      <dl className="mt-3 space-y-1.5 text-sm">
+        <div>
+          <dt className="inline font-semibold text-foreground">Observed </dt>
+          <dd className="inline text-foreground/90">{check.observed}</dd>
         </div>
-        <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
-      </div>
-      <div className="mt-2 text-xs text-muted-foreground">
-        📋 {check.source} — {check.principle}
-      </div>
-      <div className="mt-2 text-sm text-foreground">
-        📊 Observed: <code className="text-foreground/90">{check.observed}</code>
-      </div>
-      <div className="mt-1 text-xs text-muted-foreground">📐 Threshold: {check.threshold}</div>
-      <div className="mt-2 text-sm text-muted-foreground">💡 {check.detail}</div>
+        <div>
+          <dt className="inline font-semibold text-foreground">Threshold </dt>
+          <dd className="inline text-foreground/90">{check.threshold}</dd>
+        </div>
+      </dl>
+      <p className="mt-3 text-sm text-muted-foreground">{check.detail}</p>
+      <DatasetInsight check={check} profileSource={profileSource} />
     </div>
   );
 }
 
-function RagRuleCard({ rule }: { rule: RagRule }) {
-  const s = statusStyle(rule.status);
-  const sevClasses = SEVERITY_STYLES[rule.severity?.toUpperCase()] ?? "bg-muted text-foreground";
-  const csrc = CHECK_SOURCE_LABELS[rule.check_source ?? ""];
-  const observed = Array.isArray(rule.observed_value) ? rule.observed_value.join(", ") : rule.observed_value;
+function ThresholdPanel({ checks, profileSource }: { checks: ThresholdCheck[]; profileSource: any }) {
+  const statusRank: Record<string, number> = { FAIL: 0, WARN: 1, PASS: 2 };
+  const sorted = [...checks].sort((a, b) => (statusRank[a.status] ?? 3) - (statusRank[b.status] ?? 3));
+  const [selectedId, setSelectedId] = useState<string | null>(sorted[0]?.check_id ?? null);
+  const selected = checks.find((c) => c.check_id === selectedId) ?? null;
 
   return (
-    <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
+    <div>
+      <div className="mb-2 text-xs text-muted-foreground">Tap a tile for detail</div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {sorted.map((c) => (
+          <ThresholdTile key={c.check_id} check={c} active={selectedId === c.check_id} onClick={() => setSelectedId(c.check_id)} />
+        ))}
+      </div>
+      {selected ? <ThresholdDetailPanel check={selected} profileSource={profileSource} /> : null}
+    </div>
+  );
+}
+
+// ── RAG agent rules: filterable list, tap a row for detail ──────────────────
+
+type StatusFilter = "ALL" | "FAIL" | "WARN" | "PENDING" | "PASS";
+
+function ruleEffectiveStatus(rule: RagRule): string {
+  if (rule.not_verifiable) return "PENDING";
+  return (rule.status || "").toUpperCase();
+}
+
+function RagRuleRow({ rule, active, onClick }: { rule: RagRule; active: boolean; onClick: () => void }) {
+  const eff = ruleEffectiveStatus(rule);
+  const s = statusStyle(eff);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+        active ? `${s.border} ${s.bg}` : "border-border bg-card hover:bg-muted/50"
+      }`}
+    >
+      <span className="shrink-0">{statusIcon(eff)}</span>
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{rule.flag}</span>
+    </button>
+  );
+}
+
+function RagRuleDetailPanel({ rule }: { rule: RagRule }) {
+  const eff = ruleEffectiveStatus(rule);
+  const s = statusStyle(eff);
+  const observed = Array.isArray(rule.observed_value) ? rule.observed_value.join(", ") : rule.observed_value;
+  const csrc = CHECK_SOURCE_LABELS[rule.check_source ?? ""];
+
+  return (
+    <div className={`mt-4 rounded-xl border ${s.border} ${s.bg} p-5`}>
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 break-words text-sm font-semibold text-foreground">
-          {s.icon} <span className="text-muted-foreground">[{rule.rule_id}]</span> {rule.flag}
-          {rule.not_verifiable ? (
-            <span className="ml-1 text-xs italic text-muted-foreground"> · not verifiable with current data</span>
-          ) : null}
-          {csrc ? (
-            <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${csrc.classes}`}>{csrc.label}</span>
-          ) : null}
-          <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
-            {rule.severity}
-          </span>
-        </div>
-        <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{rule.status}</span>
+        <h4 className="text-base font-bold text-foreground">{rule.flag}</h4>
+        <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${s.badge}`}>{eff}</span>
       </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {rule.source} — {rule.principle}
+        {csrc ? ` · ${csrc.label.replace(/^\S+\s/, "")}` : ""}
+        {rule.not_verifiable ? " · not verifiable with current data" : ""}
+      </p>
       {observed != null && observed !== "" ? (
-        <div className="mt-2 text-sm text-foreground">
-          📊 Observed: <code className="text-foreground/90">{observed}</code>
-        </div>
+        <p className="mt-3 text-sm text-foreground">
+          Observed: <span className="text-foreground/90">{observed}</span>
+        </p>
       ) : null}
-      {rule.reasoning ? (
-        <div className="mt-2 text-xs italic text-violet-600 dark:text-violet-300">🧠 {rule.reasoning}</div>
-      ) : null}
-      <div className="mt-2 text-sm text-muted-foreground">💡 {rule.suggestion}</div>
-      <div className="mt-1 text-xs text-muted-foreground">
-        📋 {rule.source} — {rule.principle}
+      {rule.reasoning ? <p className="mt-2 text-xs italic text-violet-600 dark:text-violet-300">{rule.reasoning}</p> : null}
+      <p className="mt-3 text-sm text-muted-foreground">{rule.suggestion}</p>
+    </div>
+  );
+}
+
+function RagRulesPanel({ rules }: { rules: RagRule[] }) {
+  const [filter, setFilter] = useState<StatusFilter>("ALL");
+  const [selectedId, setSelectedId] = useState<string | null>(rules[0]?.rule_id ?? null);
+
+  const filtered = filter === "ALL" ? rules : rules.filter((r) => ruleEffectiveStatus(r) === filter);
+  const selected = filtered.find((r) => r.rule_id === selectedId) ?? filtered[0] ?? null;
+
+  const tabs: { key: StatusFilter; label: string }[] = [
+    { key: "ALL", label: "All" },
+    { key: "FAIL", label: "Fail" },
+    { key: "WARN", label: "Warn" },
+    { key: "PENDING", label: "Pending" },
+    { key: "PASS", label: "Pass" },
+  ];
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap gap-1.5">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setFilter(t.key)}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+              filter === t.key
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
+
+      <div className="space-y-1.5">
+        {filtered.length ? (
+          filtered.map((r) => (
+            <RagRuleRow key={r.rule_id} rule={r} active={selected?.rule_id === r.rule_id} onClick={() => setSelectedId(r.rule_id)} />
+          ))
+        ) : (
+          <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
+            No rules match this filter.
+          </div>
+        )}
+      </div>
+
+      {selected ? <RagRuleDetailPanel rule={selected} /> : null}
     </div>
   );
 }

@@ -2,6 +2,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Legend } from "recharts";
+import { useEffect, useMemo, useState } from "react";
+import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
 
@@ -10,29 +12,176 @@ export const Route = createFileRoute("/validation/stress")({
   component: Stress,
 });
 
-const scenarios = [
-  { name: "Base",      pd: 4.7, ecl: 100, color: "oklch(0.76 0.18 130)" },
-  { name: "Adverse",   pd: 7.2, ecl: 152 },
-  { name: "Severe",    pd: 11.4, ecl: 241 },
-  { name: "Reverse",   pd: 14.8, ecl: 312 },
+const FREQ_OPTIONS: { key: string; label: string }[] = [
+  { key: "monthly", label: "Monthly" },
+  { key: "quarterly", label: "Quarterly" },
+  { key: "half_yearly", label: "Half-Yearly" },
+  { key: "yearly", label: "Yearly" },
 ];
 
-const stability = Array.from({ length: 12 }, (_, i) => ({
-  month: `M${i + 1}`,
-  auc: +(0.875 - Math.abs(Math.sin(i / 3)) * 0.02).toFixed(3),
-  psi: +(0.04 + Math.abs(Math.sin(i / 4)) * 0.06).toFixed(3),
-}));
+function statusTone(status: string | undefined): "pass" | "warn" | "fail" | "pending" {
+  switch (status) {
+    case "PASS":
+      return "pass";
+    case "WARN":
+      return "warn";
+    case "FAIL":
+      return "fail";
+    default:
+      return "pending";
+  }
+}
 
-const backtest = Array.from({ length: 12 }, (_, i) => ({
-  month: `M${i + 1}`,
-  predicted: +(4.5 + Math.sin(i / 2) * 0.4).toFixed(2),
-  actual:    +(4.6 + Math.sin(i / 2) * 0.5 + (i > 8 ? 0.3 : 0)).toFixed(2),
-}));
+const TONE_CLASSES: Record<string, string> = {
+  pass: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
+  warn: "border-amber-500/40 bg-amber-500/10 text-amber-400",
+  fail: "border-red-500/40 bg-red-500/10 text-red-400",
+  pending: "border-slate-500/40 bg-slate-500/10 text-slate-400",
+};
+
+const TONE_ICON: Record<string, string> = {
+  pass: "✅",
+  warn: "🟡",
+  fail: "🔴",
+  pending: "⏳",
+};
+
+function CheckCard({ check }: { check: { id: string; title: string; status: string; observed: string; threshold: string; source: string } }) {
+  const tone = statusTone(check.status);
+  return (
+    <div className={`rounded-lg border-l-4 p-4 ${TONE_CLASSES[tone]} bg-card border border-border`}>
+      <div className="text-sm font-semibold text-foreground">
+        {TONE_ICON[tone]} [{check.id}] {check.title}
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">{check.observed}</div>
+      <div className="mt-1 text-[11px] text-muted-foreground/80">
+        {check.threshold} — {check.source}
+      </div>
+    </div>
+  );
+}
 
 function Stress() {
   const { file, profile } = useDataset();
   const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
   const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
+  const columns: string[] = useMemo(() => (profile?.columns ?? profile?.col_types?.all ?? []) as string[], [profile]);
+
+  const [algorithms, setAlgorithms] = useState<string[]>([]);
+  const [targetCol, setTargetCol] = useState<string>("");
+  const [algorithm, setAlgorithm] = useState<string>("");
+  const [freq, setFreq] = useState<string>("quarterly");
+
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [report, setReport] = useState<any | null>(null);
+
+  const [shockFeature, setShockFeature] = useState<string>("");
+  const [shockDirection, setShockDirection] = useState<"increase" | "decrease">("increase");
+  const [shockMagnitude, setShockMagnitude] = useState<number>(20);
+  const [shockRunning, setShockRunning] = useState(false);
+  const [shockError, setShockError] = useState<string | null>(null);
+  const [shockResult, setShockResult] = useState<any | null>(null);
+
+  useEffect(() => {
+    void api<{ models: string[] }>("/models/list")
+      .then((res) => {
+        setAlgorithms(res.models ?? []);
+        setAlgorithm((prev) => prev || res.models?.[0] || "");
+      })
+      .catch(() => setAlgorithms([]));
+  }, []);
+
+  useEffect(() => {
+    if (!targetCol && columns.length > 0) {
+      // Best-effort default: prefer an obvious target-sounding column, else the last column.
+      const guess = columns.find((c) => /default|target|label|bad_flag/i.test(c)) ?? columns[columns.length - 1];
+      setTargetCol(guess);
+    }
+  }, [columns, targetCol]);
+
+  useEffect(() => {
+    if (!shockFeature && report?.available && report.numeric_features?.length) {
+      setShockFeature(report.numeric_features[0]);
+    }
+  }, [report, shockFeature]);
+
+  const buildForm = () => {
+    const form = new FormData();
+    if (file) {
+      form.append("file", file);
+    } else if (profile?.csv_text) {
+      form.append("csv_text", profile.csv_text);
+    }
+    form.append("target_col", targetCol);
+    form.append("algorithm", algorithm);
+    return form;
+  };
+
+  const runStressSuite = async () => {
+    if (!datasetReady || !targetCol || !algorithm) return;
+    setRunError(null);
+    setRunning(true);
+    setShockResult(null);
+    try {
+      const form = buildForm();
+      form.append("freq", freq);
+      const resp = await formUpload<{ stage: string; report: any }>("/validation/stress/run", form);
+      setReport(resp.report ?? null);
+      if (!resp.report?.available) {
+        setRunError(resp.report?.reason ?? "Stress suite did not return a usable result.");
+      }
+    } catch (error: any) {
+      setReport(null);
+      setRunError(error?.message ?? "Failed to run stress & backtesting checks.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const applyShock = async () => {
+    if (!shockFeature || !targetCol || !algorithm) return;
+    setShockError(null);
+    setShockRunning(true);
+    try {
+      const form = buildForm();
+      form.append("shock_feature", shockFeature);
+      form.append("shock_direction", shockDirection);
+      form.append("shock_magnitude_pct", String(shockMagnitude));
+      const resp = await formUpload<{ stage: string; result: any }>("/validation/stress/shock", form);
+      setShockResult(resp.result ?? null);
+    } catch (error: any) {
+      setShockResult(null);
+      setShockError(error?.message ?? "Shock failed.");
+    } finally {
+      setShockRunning(false);
+    }
+  };
+
+  const macroChartData = useMemo(() => {
+    const scenarios = report?.macro_scenarios?.scenarios ?? [];
+    return scenarios.map((s: any) => ({
+      name: s.name,
+      "Base PD": +(s.base_pd * 100).toFixed(2),
+      "Scenario PD": +(s.scn_pd * 100).toFixed(2),
+    }));
+  }, [report]);
+
+  const psiChartData = useMemo(() => {
+    const bins = report?.psi?.bins ?? [];
+    return bins.map((b: any) => ({ bin: b.bin, "Train %": b.train_pct, "Test %": b.test_pct }));
+  }, [report]);
+
+  const backtestChartData = useMemo(() => {
+    const periods = report?.backtest?.periods ?? [];
+    return periods.map((p: any) => ({
+      period: p.period,
+      "Actual default rate": +(p.actual_dr * 100).toFixed(2),
+      "Avg predicted PD": +(p.avg_pred_pd * 100).toFixed(2),
+    }));
+  }, [report]);
+
+  const summary = report?.summary;
 
   return (
     <div className="space-y-8">
@@ -49,76 +198,288 @@ function Stress() {
         )}
       </section>
 
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h3 className="text-sm font-semibold">Run configuration</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Stress testing retrains the replicated model within this run (same approach as Stage 4 Model Replication —
+          nothing is cached between requests), then applies sensitivity, macro-scenario, stability, backtesting, and
+          directional checks against it.
+        </p>
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div>
+            <label className="text-xs text-muted-foreground">Target column</label>
+            <select
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={targetCol}
+              onChange={(e) => setTargetCol(e.target.value)}
+            >
+              <option value="" disabled>Select target column</option>
+              {columns.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground">Algorithm</label>
+            <select
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={algorithm}
+              onChange={(e) => setAlgorithm(e.target.value)}
+            >
+              <option value="" disabled>Select algorithm</option>
+              {algorithms.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground">Backtest period grouping</label>
+            <select
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={freq}
+              onChange={(e) => setFreq(e.target.value)}
+            >
+              {FREQ_OPTIONS.map((f) => (
+                <option key={f.key} value={f.key}>{f.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-end">
+            <button
+              type="button"
+              disabled={!datasetReady || !targetCol || !algorithm || running}
+              onClick={() => void runStressSuite()}
+              className="w-full rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:opacity-50"
+            >
+              {running ? "Running…" : "Run Stress Suite"}
+            </button>
+          </div>
+        </div>
+        {runError ? <div className="mt-3 text-xs text-red-500">{runError}</div> : null}
+      </section>
+
+      {summary ? (
+        <section className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          {[
+            ["Checks", (summary.pass ?? 0) + (summary.warn ?? 0) + (summary.fail ?? 0) + (summary.pending ?? 0), undefined],
+            ["PASS", summary.pass, "pass"],
+            ["WARN", summary.warn, "warn"],
+            ["FAIL", summary.fail, "fail"],
+          ].map(([label, value, tone]) => (
+            <div key={label as string} className={`rounded-xl border p-4 ${tone ? TONE_CLASSES[tone as string] : "border-border bg-card"}`}>
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+              <div className="mt-1 text-2xl font-semibold text-foreground">{value}</div>
+            </div>
+          ))}
+        </section>
+      ) : null}
+
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h3 className="text-sm font-semibold">Stress scenarios — ECL multiplier</h3>
-          <p className="text-xs text-muted-foreground">Baseline ECL indexed to 100</p>
+          <h3 className="text-sm font-semibold">Sensitivity — AUC drop on feature removal</h3>
+          <p className="text-xs text-muted-foreground">From Stage 4 ablation. SS1/23 P4.3.</p>
           <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={scenarios}>
-                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                <XAxis dataKey="name" tickLine={false} axisLine={false} fontSize={11} />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                <Bar dataKey="ecl" fill="oklch(0.6 0.18 135)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {report?.sensitivity?.available ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={report.sensitivity.rows.map((r: any) => ({ feature: r.feature, "AUC drop": r.auc_drop }))}>
+                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
+                  <XAxis dataKey="feature" tickLine={false} axisLine={false} fontSize={10} angle={-30} textAnchor="end" height={60} />
+                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
+                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
+                  <Bar dataKey="AUC drop" fill="oklch(0.6 0.18 135)" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                Run the stress suite to see ablation results.
+              </div>
+            )}
+          </div>
+          {report?.sensitivity?.check ? <div className="mt-4"><CheckCard check={report.sensitivity.check} /></div> : null}
+
+          <div className="mt-6 border-t border-border pt-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual feature shock</h4>
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <select
+                className="rounded-md border border-border bg-background p-2 text-sm"
+                value={shockFeature}
+                onChange={(e) => setShockFeature(e.target.value)}
+              >
+                {(report?.numeric_features ?? []).map((f: string) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+              <select
+                className="rounded-md border border-border bg-background p-2 text-sm"
+                value={shockDirection}
+                onChange={(e) => setShockDirection(e.target.value as "increase" | "decrease")}
+              >
+                <option value="increase">Increase (+)</option>
+                <option value="decrease">Decrease (-)</option>
+              </select>
+              <input
+                type="number"
+                min={5}
+                max={100}
+                step={5}
+                value={shockMagnitude}
+                onChange={(e) => setShockMagnitude(Number(e.target.value))}
+                className="rounded-md border border-border bg-background p-2 text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={!shockFeature || shockRunning}
+              onClick={() => void applyShock()}
+              className="mt-3 w-full rounded-lg bg-primary/90 px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary disabled:opacity-50"
+            >
+              {shockRunning ? "Applying…" : "⚡ Apply Shock"}
+            </button>
+            {shockError ? <div className="mt-2 text-xs text-red-500">{shockError}</div> : null}
+            {shockResult ? (
+              <div className="mt-3 rounded-lg border border-border bg-background p-3 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">{shockResult.feature}</span> shocked {shockResult.direction} {shockResult.magnitude_pct}%:
+                base avg PD <b>{shockResult.base_pd.toFixed(4)}</b> → shocked avg PD <b>{shockResult.shock_pd.toFixed(4)}</b>{" "}
+                (change <b>{shockResult.pd_change >= 0 ? "+" : ""}{shockResult.pd_change.toFixed(4)}, {shockResult.pd_change_pct.toFixed(1)}%</b>)
+              </div>
+            ) : null}
           </div>
         </div>
 
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-          <h3 className="text-sm font-semibold">Stability over time</h3>
-          <p className="text-xs text-muted-foreground">Rolling AUC and PSI</p>
+          <h3 className="text-sm font-semibold">Score stability (PSI) — train vs test</h3>
+          <p className="text-xs text-muted-foreground">SS11/13 §10.6. PSI &lt; 0.10 stable, 0.10–0.25 minor shift, &gt; 0.25 major shift.</p>
           <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={stability}>
-                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={11} />
-                <YAxis yAxisId="l" tickLine={false} axisLine={false} fontSize={11} domain={[0.8, 0.9]} />
-                <YAxis yAxisId="r" orientation="right" tickLine={false} axisLine={false} fontSize={11} domain={[0, 0.2]} />
-                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line yAxisId="l" type="monotone" dataKey="auc" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                <Line yAxisId="r" type="monotone" dataKey="psi" stroke="oklch(0.6 0.22 27)" strokeWidth={2.5} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            {psiChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={psiChartData}>
+                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
+                  <XAxis dataKey="bin" tickLine={false} axisLine={false} fontSize={9} angle={-30} textAnchor="end" height={60} />
+                  <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
+                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="Train %" fill="oklch(0.6 0.16 260)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Test %" fill="oklch(0.6 0.18 135)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                Run the stress suite to see the score distribution.
+              </div>
+            )}
           </div>
+          {report?.psi?.check ? <div className="mt-4"><CheckCard check={report.psi.check} /></div> : null}
         </div>
       </section>
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h3 className="text-sm font-semibold">Macro stress scenarios — average predicted PD</h3>
+        <p className="text-xs text-muted-foreground">
+          SS3/18 §2.1.{" "}
+          {report?.macro_scenarios?.detected_drivers
+            ? Object.entries(report.macro_scenarios.detected_drivers).map(([k, v]) => `${k} → ${v}`).join(", ")
+            : ""}
+        </p>
+        <div className="mt-4 h-64">
+          {macroChartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={macroChartData}>
+                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
+                <XAxis dataKey="name" tickLine={false} axisLine={false} fontSize={11} />
+                <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
+                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="Base PD" fill="oklch(0.6 0.16 260)" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Scenario PD" fill="oklch(0.6 0.22 27)" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+              Run the stress suite to see scenario results.
+            </div>
+          )}
+        </div>
+        {report?.macro_scenarios?.scenarios?.length ? (
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            {report.macro_scenarios.scenarios.map((s: any) => (
+              <div key={s.id} className="rounded-lg border border-border bg-background p-3 text-xs">
+                <div className="font-semibold text-foreground">{s.name}</div>
+                <div className="mt-1 text-muted-foreground">{s.desc}</div>
+                <div className="mt-2 text-muted-foreground">
+                  Base <b>{s.base_pd.toFixed(4)}</b> → Scenario <b>{s.scn_pd.toFixed(4)}</b> ({s.pd_change_pct >= 0 ? "+" : ""}{s.pd_change_pct.toFixed(1)}%)
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground/70">
+                  {s.applied?.length ? `Applied: ${s.applied.join("; ")}` : "No matching driver columns found"}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <h3 className="text-sm font-semibold">Backtesting — predicted vs actual default rate</h3>
-        <p className="text-xs text-muted-foreground">Trailing 12 months · binomial test p = 0.18 (no rejection)</p>
+        <p className="text-xs text-muted-foreground">
+          {report?.backtest?.available
+            ? `Grouped by ${report.backtest.freq} · date column: ${report.backtest.date_col}`
+            : report?.backtest?.reason ?? "Run the stress suite to see backtesting results."}
+        </p>
         <div className="mt-4 h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={backtest}>
-              <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-              <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={11} />
-              <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
-              <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Line type="monotone" dataKey="predicted" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} />
-              <Line type="monotone" dataKey="actual" stroke="oklch(0.6 0.22 27)" strokeWidth={2.5} />
-            </LineChart>
-          </ResponsiveContainer>
+          {backtestChartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={backtestChartData}>
+                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
+                <XAxis dataKey="period" tickLine={false} axisLine={false} fontSize={11} />
+                <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
+                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="Avg predicted PD" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} />
+                <Line type="monotone" dataKey="Actual default rate" stroke="oklch(0.6 0.22 27)" strokeWidth={2.5} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">No backtesting data yet.</div>
+          )}
+        </div>
+        {report?.backtest?.check ? <div className="mt-4"><CheckCard check={report.backtest.check} /></div> : null}
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h3 className="text-sm font-semibold">Directional testing — economic intuition check</h3>
+        <p className="text-xs text-muted-foreground">
+          SS1/23 P4.3 · SS3/18 §2.1. Each driver is shocked ±10% in the adverse direction; average predicted PD should
+          move as basic credit-risk intuition expects.
+        </p>
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          {(report?.directional ?? []).map((r: any) => {
+            if (r.status === "SKIP") {
+              return (
+                <div key={r.id} className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-4 text-xs">
+                  <div className="font-semibold text-foreground">⏳ [{r.id}] {r.driver} → {r.expected}</div>
+                  <div className="mt-1 text-muted-foreground">{r.note}</div>
+                </div>
+              );
+            }
+            const tone = statusTone(r.status);
+            return (
+              <div key={r.id} className={`rounded-lg border p-4 text-xs ${TONE_CLASSES[tone]}`}>
+                <div className="font-semibold text-foreground">{TONE_ICON[tone]} [{r.id}] {r.driver} → {r.expected}</div>
+                {r.status === "ERROR" ? (
+                  <div className="mt-1 text-muted-foreground">{r.error}</div>
+                ) : (
+                  <div className="mt-1 text-muted-foreground">
+                    {r.column} shocked {r.shock_desc}: avg PD {r.base_pd.toFixed(4)} → {r.new_pd.toFixed(4)} ({r.delta >= 0 ? "+" : ""}{r.delta.toFixed(4)})
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {!report?.directional?.length ? (
+            <div className="text-xs text-muted-foreground">Run the stress suite to see directional test results.</div>
+          ) : null}
         </div>
       </section>
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {[
-          ["Sensitivity", "±10% feature perturbation — output drift &lt; 3%", "PASS"],
-          ["Stress sims", "Severe scenario doubles ECL — within tolerance", "PASS"],
-          ["Backtest", "12-month coverage; binomial test not rejected", "PASS"],
-        ].map(([t, d, s]) => (
-          <div key={t} className="rounded-xl border border-border bg-card p-5 shadow-elegant">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{t}</div>
-            <div className="mt-2 text-sm" dangerouslySetInnerHTML={{ __html: d }} />
-            <span className="mt-3 inline-flex rounded-full border border-primary/30 bg-primary-soft px-2 py-0.5 text-[10px] font-semibold">
-              {s}
-            </span>
-          </div>
-        ))}
-      </section>
       <div className="text-right">
         <Link
           to="/validation/regulatory"
@@ -127,6 +488,7 @@ function Stress() {
           Continue to Stage 7
           <ArrowRight className="h-4 w-4" />
         </Link>
-      </div>    </div>
+      </div>
+    </div>
   );
 }
