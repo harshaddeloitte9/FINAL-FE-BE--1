@@ -533,8 +533,8 @@ function Profiling() {
           <div className="mt-4">
             {correlationColumns.length > 0 && correlationValues.length > 0 ? (
               <>
-                <div className="overflow-x-auto">
-                  <table style={{ borderCollapse: "separate", borderSpacing: "3px" }}>
+                <div className="flex justify-center overflow-x-auto">
+                  <table style={{ borderCollapse: "separate", borderSpacing: "6px", width: "100%", maxWidth: "720px" }}>
                     <thead>
                       <tr>
                         <th className="p-1" />
@@ -542,9 +542,9 @@ function Profiling() {
                           <th
                             key={column}
                             title={column}
-                            className="max-w-[56px] truncate p-1 text-[10px] font-medium text-muted-foreground"
+                            className="max-w-[72px] truncate p-1 text-xs font-medium text-muted-foreground"
                           >
-                            {column.length > 7 ? `${column.slice(0, 6)}…` : column}
+                            {column.length > 9 ? `${column.slice(0, 8)}…` : column}
                           </th>
                         ))}
                       </tr>
@@ -554,15 +554,15 @@ function Profiling() {
                         <tr key={rowColumn}>
                           <th
                             title={rowColumn}
-                            className="whitespace-nowrap p-1 pr-2 text-right text-[10px] font-medium text-muted-foreground"
+                            className="whitespace-nowrap p-1 pr-3 text-right text-xs font-medium text-muted-foreground"
                           >
-                            {rowColumn.length > 10 ? `${rowColumn.slice(0, 9)}…` : rowColumn}
+                            {rowColumn.length > 12 ? `${rowColumn.slice(0, 11)}…` : rowColumn}
                           </th>
                           {(correlationValues[rowIndex] ?? []).map((value, colIndex) => (
                             <td
                               key={`${rowColumn}-${correlationColumns[colIndex]}`}
                               title={`${rowColumn} × ${correlationColumns[colIndex]}: ${value.toFixed(2)}`}
-                              className="h-8 w-8 rounded-sm text-center align-middle text-[11px] font-medium tabular-nums"
+                              className="h-14 w-14 rounded-md text-center align-middle text-sm font-medium tabular-nums"
                               style={correlationCellStyle(value)}
                             >
                               {value.toFixed(2)}
@@ -573,10 +573,10 @@ function Profiling() {
                     </tbody>
                   </table>
                 </div>
-                <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <div className="mx-auto mt-4 flex max-w-[720px] items-center gap-2 text-xs text-muted-foreground">
                   <span>-1</span>
                   <div
-                    className="h-2 flex-1 rounded-full"
+                    className="h-2.5 flex-1 rounded-full"
                     style={{ background: "linear-gradient(to right, rgba(13,148,136,0.9), rgba(148,163,184,0.15), rgba(5,150,105,0.9))" }}
                   />
                   <span>+1</span>

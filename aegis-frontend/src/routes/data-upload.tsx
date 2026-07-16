@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, CheckCircle2, Cloud, Database, FileSpreadsheet, Folder, Globe2, HardDrive, Info, Table2, Upload } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
@@ -20,10 +20,22 @@ function DataUpload() {
     name: string;
     rows: number;
     cols: number;
+    missingCells: number;
+    duplicateRows: number;
   } | null>(null);
   const { setUploadResult, profile } = useDataset();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Dataset state lives in a provider mounted above the router, so it
+  // otherwise survives client-side navigation for the whole tab session.
+  // This screen should only ever reflect an upload made during the current
+  // visit, so clear any carried-over state the moment it mounts.
+  useEffect(() => {
+    setUploadResult(null, null);
+    setUploadSummary(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const dataSourceOptions = [
     { value: "upload", label: "Upload File (CSV / XLSX)", icon: Upload },
     { value: "database", label: "Database Connection", icon: Database },
@@ -47,6 +59,8 @@ function DataUpload() {
       name: datasetName,
       rows,
       cols,
+      missingCells: Number(response?.missing_cells ?? 0),
+      duplicateRows: Number(response?.duplicate_rows ?? 0),
     });
   };
 
@@ -255,14 +269,34 @@ function DataUpload() {
       )}
 
       {uploadSummary ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          <span className="inline-flex items-center gap-2 font-semibold">
-            <CheckCircle2 className="h-5 w-5" />
-            {`Loaded ${uploadSummary.name}`}
-          </span>
-          <span className="ml-2">
-            — {uploadSummary.rows.toLocaleString()} rows × {uploadSummary.cols.toLocaleString()} columns
-          </span>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex items-center justify-between">
+            <span className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-800">
+              <CheckCircle2 className="h-5 w-5" />
+              {`Upload successful — ${uploadSummary.name}`}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+              Uploaded
+            </span>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-lg border border-emerald-200 bg-white/60 p-3 text-center">
+              <div className="text-xs uppercase tracking-wider text-emerald-700/80">Rows</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-emerald-900">{uploadSummary.rows.toLocaleString()}</div>
+            </div>
+            <div className="rounded-lg border border-emerald-200 bg-white/60 p-3 text-center">
+              <div className="text-xs uppercase tracking-wider text-emerald-700/80">Columns</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-emerald-900">{uploadSummary.cols.toLocaleString()}</div>
+            </div>
+            <div className="rounded-lg border border-emerald-200 bg-white/60 p-3 text-center">
+              <div className="text-xs uppercase tracking-wider text-emerald-700/80">Missing Cells</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-emerald-900">{uploadSummary.missingCells.toLocaleString()}</div>
+            </div>
+            <div className="rounded-lg border border-emerald-200 bg-white/60 p-3 text-center">
+              <div className="text-xs uppercase tracking-wider text-emerald-700/80">Duplicates</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-emerald-900">{uploadSummary.duplicateRows.toLocaleString()}</div>
+            </div>
+          </div>
         </div>
       ) : null}
 

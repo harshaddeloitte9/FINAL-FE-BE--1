@@ -1,7 +1,7 @@
 ﻿import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import {
-  ArrowLeft, ArrowRight, Download, Minus, Plus, BarChart as BarChartIcon,
+  ArrowLeft, ArrowRight, Download, BarChart as BarChartIcon,
   Table as TableIcon, Brain, Loader2, AlertTriangle,
   CheckCircle2, Info,
 } from "lucide-react";
@@ -59,7 +59,10 @@ function Preprocessing() {
   const [preprocess, setPreprocess] = useState<any>(preprocessingResult ?? null);
   const [testSize, setTestSize] = useState(preprocessingResult?.split_config?.test_size ?? 0.15);
   const [valSize, setValSize] = useState(preprocessingResult?.split_config?.val_size ?? 0.15);
-  const [randomSeed, setRandomSeed] = useState(preprocessingResult?.split_config?.random_seed ?? 42);
+  // Not user-configurable in the UI — hardcoded to match the backend default.
+  // Stage 4's seed-stability check (R4.6) varies the seed programmatically via
+  // its own control on the Model Validation screen, independent of this value.
+  const randomSeed = 42;
 
   // ── Reviewer's confirmed choices — sent back to the API on every call ──
   const [treatmentOverrides, setTreatmentOverrides] = useState<Record<string, string>>({});
@@ -215,7 +218,6 @@ function Preprocessing() {
     if (!preprocess?.split_config) return;
     setTestSize(preprocess.split_config.test_size ?? 0.15);
     setValSize(preprocess.split_config.val_size ?? 0.15);
-    setRandomSeed(preprocess.split_config.random_seed ?? 42);
   }, [preprocess?.split_config]);
 
   if (!profile) {
@@ -359,30 +361,6 @@ function Preprocessing() {
           </div>
 
           <div className="grid gap-4">
-            <div>
-              <div className="text-sm font-medium">Random Seed</div>
-              <div className="mt-2 flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 w-9 p-0"
-                  onClick={() => setRandomSeed((value) => Math.max(1, value - 1))}
-                >
-                  <Minus className="h-4 w-4" />
-                </Button>
-                <div className="flex-1 rounded-xl border border-border bg-background px-3 py-2 text-center font-mono text-sm">{randomSeed}</div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 w-9 p-0"
-                  onClick={() => setRandomSeed((value) => value + 1)}
-                >
-                  <Plus className="h-4 w-4" />
-                </Button>
-              </div>
-              <div className="mt-2 text-xs text-muted-foreground">Ensures reproducible splits and consistent training statistics.</div>
-            </div>
-
             <div className="grid grid-cols-3 gap-3">
               <div className="rounded-xl border border-border bg-background p-4 text-center">
                 <div className="text-xs uppercase tracking-wider text-muted-foreground">Train</div>
