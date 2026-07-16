@@ -60,6 +60,8 @@ type DatasetState = {
   validationStage4Result?: Record<string, any> | null;
   validationStage5Result?: Record<string, any> | null;
   validationStage7Result?: Record<string, any> | null;
+  validationStage7BiasResult?: Record<string, any> | null;
+  validationStage8Result?: Record<string, any> | null;
   setUploadResult: (file: File | null, profile: DatasetProfile | null) => void;
   setProfile: (profile: DatasetProfile | null) => void;
   setRecommendations: (recommendations: ModelRecommendation[] | null) => void;
@@ -80,6 +82,8 @@ type DatasetState = {
   setValidationStage4Result: (result: Record<string, any> | null) => void;
   setValidationStage5Result: (result: Record<string, any> | null) => void;
   setValidationStage7Result: (result: Record<string, any> | null) => void;
+  setValidationStage7BiasResult: (result: Record<string, any> | null) => void;
+  setValidationStage8Result: (result: Record<string, any> | null) => void;
 };
 
 const DatasetContext = React.createContext<DatasetState | null>(null);
@@ -105,6 +109,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [validationStage4Result, setValidationStage4ResultState] = React.useState<Record<string, any> | null>(null);
   const [validationStage5Result, setValidationStage5ResultState] = React.useState<Record<string, any> | null>(null);
   const [validationStage7Result, setValidationStage7ResultState] = React.useState<Record<string, any> | null>(null);
+  const [validationStage7BiasResult, setValidationStage7BiasResultState] = React.useState<Record<string, any> | null>(null);
+  const [validationStage8Result, setValidationStage8ResultState] = React.useState<Record<string, any> | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
   React.useEffect(() => {
@@ -269,6 +275,14 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setValidationStage7ResultState(result);
   }, []);
 
+  const setValidationStage7BiasResult = React.useCallback((result: Record<string, any> | null) => {
+    setValidationStage7BiasResultState(result);
+  }, []);
+
+  const setValidationStage8Result = React.useCallback((result: Record<string, any> | null) => {
+    setValidationStage8ResultState(result);
+  }, []);
+
   const value = React.useMemo(
     () => ({
       file,
@@ -291,6 +305,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationStage4Result,
       validationStage5Result,
       validationStage7Result,
+      validationStage7BiasResult,
+      validationStage8Result,
       setUploadResult,
       setProfile: setProfileState,
       setRecommendations,
@@ -311,6 +327,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationStage4Result,
       setValidationStage5Result,
       setValidationStage7Result,
+      setValidationStage7BiasResult,
+      setValidationStage8Result,
     }),
     [
       file,
@@ -333,6 +351,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationStage4Result,
       validationStage5Result,
       validationStage7Result,
+      validationStage7BiasResult,
+      validationStage8Result,
       setUploadResult,
       setRecommendations,
       setSelectedModel,
@@ -352,6 +372,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setValidationStage4Result,
       setValidationStage5Result,
       setValidationStage7Result,
+      setValidationStage7BiasResult,
+      setValidationStage8Result,
     ],
   );
 

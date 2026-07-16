@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -81,84 +81,42 @@ type IntakeResponse = {
   chk_attestation?: boolean;
 };
 
-const fallbackIntake: IntakeDisplay = {
+// Neutral placeholder shown until the reviewer actually loads a demo (or
+// completes a real intake) — deliberately has no plausible-looking values,
+// since a prior version of this screen fetched a canned "clean" demo
+// snapshot unconditionally on mount and displayed it as if it were live data.
+const emptyIntake: IntakeDisplay = {
   title: "Stage 1 — Intake & Governance",
   description:
     "Capture model metadata, upload all required artifacts, and complete the governance attestation checklist before proceeding to automated validation stages.",
   modelMetadata: {
     title: "Model metadata",
     description: "Key registration details supplied by the development team.",
-    registeredLabel: "Registered",
-    items: [
-      ["Model ID", "CR-PD-XGB-027"],
-      ["Model name", "Retail PD — XGBoost Champion"],
-      ["Owner", "A. Khurana · Risk Validation"],
-      ["Developer", "Credit Risk Modelling, EMEA"],
-      ["Version", "v1.7.6"],
-      ["Risk tier", "Tier 2 — Material"],
-      ["Last validated", "12 Apr 2026"],
-      ["Next review", "12 Jul 2026"],
-    ],
+    registeredLabel: "Not yet registered",
+    items: [],
   },
   targetDefinition: {
     title: "Target definition",
-    expression: "default_12m ∈ {0, 1}",
-    detail: "positive class = 90+ DPD within 12m",
+    expression: "Not yet determined",
+    detail: "Load a demo or upload a dataset to populate the target definition",
     baseRateLabel: "Base rate",
-    baseRate: "4.7%",
+    baseRate: "—",
     sampleSizeLabel: "Sample size",
-    sampleSize: "219,486",
+    sampleSize: "—",
   },
   riskTier: {
     title: "Risk tier",
-    value: "Tier 2",
-    description: "Material — quarterly independent validation required.",
+    value: "—",
+    description: "Upload a dataset or load a demo to determine risk tier.",
   },
   artifactTitle: "Artifact inventory",
   artifactDescription: "Uploaded evidence to support subsequent validation stages.",
-  artifactSummary: "3 required · 3 optional",
-  artifacts: [
-    {
-      fileName: "retail_pd_validation.csv",
-      status: "Uploaded",
-      timestamp: "Uploaded 21 Jun 2026 · 09:13",
-      required: true,
-    },
-    {
-      fileName: "retail_pd_mdd.pdf",
-      status: "Uploaded",
-      timestamp: "Uploaded 21 Jun 2026 · 09:15",
-      required: true,
-    },
-    {
-      fileName: "training_pipeline.zip",
-      status: "Uploaded",
-      timestamp: "Uploaded 21 Jun 2026 · 09:17",
-      required: true,
-    },
-    {
-      fileName: "data_profile.xlsx",
-      status: "Optional",
-      timestamp: "Pending review",
-      required: false,
-    },
-    {
-      fileName: "assumptions_limitations.pdf",
-      status: "Optional",
-      timestamp: "Pending review",
-      required: false,
-    },
-    {
-      fileName: "performance_report.xlsx",
-      status: "Optional",
-      timestamp: "Pending review",
-      required: false,
-    },
-  ],
+  artifactSummary: "No artifacts yet",
+  artifacts: [],
   governance: {
     title: "Governance attestation",
     description: "Confirm the model and validation plan are ready to proceed.",
-    status: "Pending review",
+    status: "Not started",
     checklist: [
       "Model is registered in the model inventory",
       "Risk tier assignment has been documented",
@@ -177,7 +135,12 @@ const fallbackIntake: IntakeDisplay = {
 };
 
 function Intake() {
-  const [intake, setIntake] = useState<IntakeDisplay>(fallbackIntake);
+  const [intake, setIntake] = useState<IntakeDisplay>(emptyIntake);
+  // True only once a demo has actually been loaded (or, in future, a real
+  // intake has been saved) — gates the model-metadata/risk-tier/artifact
+  // cards so they show a neutral prompt instead of pre-filled-looking data
+  // before the reviewer has done anything.
+  const [intakeLoaded, setIntakeLoaded] = useState(false);
   const navigate = useNavigate();
   const {
     setUploadResult,
@@ -248,6 +211,7 @@ function Intake() {
         throw new Error("Invalid demo response from backend.");
       }
       setIntake(response.display);
+      setIntakeLoaded(true);
       const snapshot = response.val_intake_data;
       if (snapshot) {
         const intakeSnapshot = { ...snapshot, mdd_text: snapshot.mdd_text ?? null };
@@ -293,57 +257,6 @@ function Intake() {
       setDemoLoading(false);
     }
   };
-
-  useEffect(() => {
-    let active = true;
-    void api<IntakeResponse>("/validation/intake")
-      .then((response) => {
-        if (active && response.display) {
-          setIntake(response.display);
-          // Prefill lightweight form fields from snapshot if present
-          const snapshot = response.val_intake_data;
-          if (snapshot) {
-            const intakeSnapshot = { ...snapshot, mdd_text: snapshot.mdd_text ?? null };
-            setValidationIntakeData(intakeSnapshot);
-            setModelName(snapshot.model_name ?? "");
-            setOwningTeam(snapshot.owning_team ?? "");
-            setModelOwner(snapshot.model_owner ?? "");
-            setLeadValidator(snapshot.lead_validator ?? "");
-            setModelType(snapshot.model_type ?? "PD (Probability of Default)");
-            setTier(snapshot.model_tier ?? "Tier 2 — Medium Risk");
-            setVersion(snapshot.model_version ?? "");
-            setPurpose(snapshot.model_purpose ?? "");
-            if (snapshot.mdd_text) {
-              setMddText(snapshot.mdd_text);
-              setMddFileName("Parsed MDD from backend");
-              setValidationMddText(snapshot.mdd_text);
-            }
-          }
-          setChkInventory(response.chk_inventory ?? false);
-          setChkTier(response.chk_tier ?? false);
-          setChkArtifacts(response.chk_artifacts ?? false);
-          setChkPrevFindings(response.chk_prev_findings ?? false);
-          setChkRegScope(response.chk_reg_scope ?? false);
-          setChkIndependence(response.chk_independence ?? false);
-          setChkPlanApproved(response.chk_plan_approved ?? false);
-          setChkAttestation(response.chk_attestation ?? false);
-          if (response.val_mdd_reported_metrics) {
-            setMddMetrics(response.val_mdd_reported_metrics);
-            setValidationMddMetrics(response.val_mdd_reported_metrics);
-          }
-          setDemoMode(response.demo_label ?? response.demo_mode ?? null);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setIntake(fallbackIntake);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
 
   return (
     <div className="space-y-6">
@@ -401,24 +314,24 @@ function Intake() {
 
           <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Model name</div>
-              <input value={modelName} onChange={(e) => setModelName(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Model name</div>
+              <input value={modelName} onChange={(e) => setModelName(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Owning team / business unit</div>
-              <input value={owningTeam} onChange={(e) => setOwningTeam(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Owning team / business unit</div>
+              <input value={owningTeam} onChange={(e) => setOwningTeam(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Model owner (name)</div>
-              <input value={modelOwner} onChange={(e) => setModelOwner(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Model owner (name)</div>
+              <input value={modelOwner} onChange={(e) => setModelOwner(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Lead validator (name)</div>
-              <input value={leadValidator} onChange={(e) => setLeadValidator(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Lead validator (name)</div>
+              <input value={leadValidator} onChange={(e) => setLeadValidator(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Model type</div>
-              <select value={modelType} onChange={(e) => setModelType(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Model type</div>
+              <select value={modelType} onChange={(e) => setModelType(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground">
                 <option>PD (Probability of Default)</option>
                 <option>LGD (Loss Given Default)</option>
                 <option>EAD (Exposure at Default)</option>
@@ -426,20 +339,20 @@ function Intake() {
               </select>
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Model version</div>
-              <input value={version} onChange={(e) => setVersion(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Model version</div>
+              <input value={version} onChange={(e) => setVersion(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Risk tier</div>
-              <select value={tier} onChange={(e) => setTier(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Risk tier</div>
+              <select value={tier} onChange={(e) => setTier(e.target.value)} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground">
                 <option>Tier 1 — High Risk</option>
                 <option>Tier 2 — Medium Risk</option>
                 <option>Tier 3 — Low Risk</option>
               </select>
             </div>
             <div className="rounded-lg border border-border bg-background px-3 py-3 md:col-span-2">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Model purpose</div>
-              <textarea value={purpose} onChange={(e) => setPurpose(e.target.value)} rows={3} className="mt-1 w-full bg-background px-2 py-2 text-sm" />
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Model purpose</div>
+              <textarea value={purpose} onChange={(e) => setPurpose(e.target.value)} rows={3} className="mt-1 w-full bg-background px-2 py-2 text-sm font-semibold text-foreground" />
             </div>
           </div>
         </div>
@@ -475,15 +388,21 @@ function Intake() {
           </div>
         </div>
 
-        <div className="mt-6 grid gap-3 lg:grid-cols-3">
-          {intake.artifacts.map((artifact) => (
-            <div key={artifact.fileName} className="rounded-lg border border-border bg-background p-4">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{artifact.fileName}</div>
-              <div className="mt-3 text-sm font-semibold text-foreground">{artifact.status}</div>
-              <div className="mt-2 text-[11px] text-muted-foreground">{artifact.timestamp}</div>
-            </div>
-          ))}
-        </div>
+        {intake.artifacts.length > 0 ? (
+          <div className="mt-6 grid gap-3 lg:grid-cols-3">
+            {intake.artifacts.map((artifact) => (
+              <div key={artifact.fileName} className="rounded-lg border border-border bg-background p-4">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{artifact.fileName}</div>
+                <div className="mt-3 text-sm font-semibold text-foreground">{artifact.status}</div>
+                <div className="mt-2 text-[11px] text-muted-foreground">{artifact.timestamp}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-6 rounded-lg border border-dashed border-border bg-background p-6 text-center text-sm text-muted-foreground">
+            No artifacts on file yet — load a demo above or upload files below.
+          </div>
+        )}
 
         <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
           {/* Dataset upload */}

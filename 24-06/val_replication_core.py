@@ -157,6 +157,120 @@ def parse_mdd_file(uploaded_file) -> str:
         raise RuntimeError(f"Could not read MDD: {e}")
 
 
+def _resolve_model_class(model_name: str):
+    registry = CLASSIFICATION_MODELS
+    normalized_model_name = model_name
+    alias_map = {
+        "LogisticRegression": "Logistic Regression",
+        "LogisticRegressionClassifier": "Logistic Regression",
+        "RandomForest": "Random Forest",
+        "RandomForestClassifier": "Random Forest",
+        "GradientBoosting": "Gradient Boosting",
+        "GradientBoostingClassifier": "Gradient Boosting",
+        "XGBoostClassifier": "XGBoost",
+        "LightGBMClassifier": "LightGBM",
+    }
+    if model_name in alias_map:
+        normalized_model_name = alias_map[model_name]
+    if normalized_model_name not in registry:
+        raise ValueError(f"Model '{model_name}' not found. Available: {list(registry.keys())}")
+    model_cls = registry[normalized_model_name]["class"]
+    default_params = registry[normalized_model_name].get("default_params", {}).copy()
+    try:
+        valid_keys = set(model_cls().get_params().keys())
+        default_params = {k: v for k, v in default_params.items() if k in valid_keys}
+    except Exception:
+        pass
+    return model_cls, default_params
+
+
+def _fit_core(
+    df: pd.DataFrame,
+    target_col: str,
+    model_name: str,
+    test_size: float,
+    val_size: float,
+    random_seed: int,
+    cv_folds: int,
+) -> Dict[str, Any]:
+    """Shared train/split/fit core used by both full replication and the
+    lighter-weight bias check — factored out so a bias-check run doesn't
+    have to pay for replication's seed-stability + ablation loops just to
+    get a fitted pipeline and a test split."""
+    col_types = detect_column_types(df)
+    task_type = detect_task_type(df[target_col])
+    X, y, _, prep_report, _ = prepare_data(df, col_types, target_col)
+
+    X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test = split_data(
+        X, y,
+        test_size=test_size,
+        val_size=val_size,
+        task_type=task_type,
+        random_state=random_seed,
+    )
+    split_stats = compute_split_stats(
+        X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test
+    )
+
+    fe_plan = analyze_for_feature_engineering(
+        X_train_raw, y_train, col_types, task_type
+    )
+    X_train, fe_summary = apply_feature_engineering(X_train_raw, fe_plan)
+    X_val, _ = apply_feature_engineering(X_val_raw, fe_plan)
+    X_test_eng, _ = apply_feature_engineering(X_test_raw, fe_plan)
+
+    import copy as _copy
+    live_cols = set(X_train.columns)
+    prep_report_fe = _copy.deepcopy(prep_report)
+    prep_report_fe["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_cols}
+    prep_report_fe["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_cols}
+
+    model_cls, default_params = _resolve_model_class(model_name)
+    model_inst = model_cls(**default_params)
+
+    pipeline, training_info, feature_names = train_model(
+        X_train, y_train,
+        col_types=col_types,
+        target_col=target_col,
+        prep_report=prep_report_fe,
+        model=model_inst,
+        use_smote=False,
+        use_cv=True,
+        cv_folds=cv_folds,
+        use_hyperopt=False,
+        task_type=task_type,
+    )
+
+    y_proba_2d = _proba_2d(pipeline, X_test_eng)
+    y_proba = _proba_1d(pipeline, X_test_eng)
+    y_pred = pipeline.predict(X_test_eng)
+    if y_proba is None:
+        raise RuntimeError("Model does not support predict_proba — AUC cannot be computed.")
+
+    metrics = compute_binary_metrics(
+        y_test.values, y_pred, y_proba_2d,
+        threshold=0.5,
+    )
+    try:
+        metrics["roc_auc"] = round(float(roc_auc_score(y_test.values, y_proba)), 4)
+    except Exception:
+        pass
+    metrics["gini"] = _gini(y_test.values, y_proba)
+    metrics["ks"] = _ks(y_test.values, y_proba)
+
+    return {
+        "col_types": col_types,
+        "task_type": task_type,
+        "X": X, "y": y,
+        "X_train": X_train, "X_test": X_test_eng, "y_train": y_train, "y_test": y_test,
+        "prep_report": prep_report, "prep_report_fe": prep_report_fe,
+        "model_cls": model_cls, "default_params": default_params,
+        "pipeline": pipeline, "training_info": training_info,
+        "y_proba": y_proba, "y_pred": y_pred,
+        "metrics": metrics, "split_stats": split_stats,
+    }
+
+
 def run_replication(
     df: pd.DataFrame,
     target_col: str,
@@ -188,88 +302,16 @@ def run_replication(
     }
     t0 = time.time()
     try:
-        col_types = detect_column_types(df)
-        task_type = detect_task_type(df[target_col])
-        X, y, _, prep_report, _ = prepare_data(df, col_types, target_col)
-
-        X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test = split_data(
-            X, y,
-            test_size=test_size,
-            val_size=val_size,
-            task_type=task_type,
-            random_state=random_seed,
-        )
-        out["split_stats"] = compute_split_stats(
-            X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test
-        )
-
-        fe_plan = analyze_for_feature_engineering(
-            X_train_raw, y_train, col_types, task_type
-        )
-        X_train, fe_summary = apply_feature_engineering(X_train_raw, fe_plan)
-        X_val, _ = apply_feature_engineering(X_val_raw, fe_plan)
-        X_test_eng, _ = apply_feature_engineering(X_test_raw, fe_plan)
-
-        import copy as _copy
-        live_cols = set(X_train.columns)
-        prep_report_fe = _copy.deepcopy(prep_report)
-        prep_report_fe["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_cols}
-        prep_report_fe["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_cols}
-
-        registry = CLASSIFICATION_MODELS
-        normalized_model_name = model_name
-        alias_map = {
-            "LogisticRegression": "Logistic Regression",
-            "LogisticRegressionClassifier": "Logistic Regression",
-            "RandomForest": "Random Forest",
-            "RandomForestClassifier": "Random Forest",
-            "GradientBoosting": "Gradient Boosting",
-            "GradientBoostingClassifier": "Gradient Boosting",
-            "XGBoostClassifier": "XGBoost",
-            "LightGBMClassifier": "LightGBM",
-        }
-        if model_name in alias_map:
-            normalized_model_name = alias_map[model_name]
-        if normalized_model_name not in registry:
-            raise ValueError(f"Model '{model_name}' not found. Available: {list(registry.keys())}")
-        model_cls = registry[normalized_model_name]["class"]
-        default_params = registry[normalized_model_name].get("default_params", {}).copy()
-        try:
-            valid_keys = set(model_cls().get_params().keys())
-            default_params = {k: v for k, v in default_params.items() if k in valid_keys}
-        except Exception:
-            pass
-        model_inst = model_cls(**default_params)
-
-        pipeline, training_info, feature_names = train_model(
-            X_train, y_train,
-            col_types=col_types,
-            target_col=target_col,
-            prep_report=prep_report_fe,
-            model=model_inst,
-            use_smote=False,
-            use_cv=True,
-            cv_folds=cv_folds,
-            use_hyperopt=False,
-            task_type=task_type,
-        )
-
-        y_proba_2d = _proba_2d(pipeline, X_test_eng)
-        y_proba = _proba_1d(pipeline, X_test_eng)
-        y_pred = pipeline.predict(X_test_eng)
-        if y_proba is None:
-            raise RuntimeError("Model does not support predict_proba — AUC cannot be computed.")
-
-        metrics = compute_binary_metrics(
-            y_test.values, y_pred, y_proba_2d,
-            threshold=0.5,
-        )
-        try:
-            metrics["roc_auc"] = round(float(roc_auc_score(y_test.values, y_proba)), 4)
-        except Exception:
-            pass
-        metrics["gini"] = _gini(y_test.values, y_proba)
-        metrics["ks"] = _ks(y_test.values, y_proba)
+        fit = _fit_core(df, target_col, model_name, test_size, val_size, random_seed, cv_folds)
+        col_types = fit["col_types"]
+        task_type = fit["task_type"]
+        X, y = fit["X"], fit["y"]
+        X_train, X_test_eng, y_train, y_test = fit["X_train"], fit["X_test"], fit["y_train"], fit["y_test"]
+        prep_report, prep_report_fe = fit["prep_report"], fit["prep_report_fe"]
+        model_cls, default_params = fit["model_cls"], fit["default_params"]
+        pipeline = fit["pipeline"]
+        y_proba, y_pred, metrics = fit["y_proba"], fit["y_pred"], fit["metrics"]
+        out["split_stats"] = fit["split_stats"]
 
         # Feature importance of the replicated model, exposed so Stage 7
         # (Explainability & Fairness) can chart it without re-running
@@ -285,8 +327,8 @@ def run_replication(
         out.update({
             "success": True,
             "metrics": metrics,
-            "cv_mean_auc": training_info.get("cv_mean"),
-            "cv_std_auc": training_info.get("cv_std"),
+            "cv_mean_auc": fit["training_info"].get("cv_mean"),
+            "cv_std_auc": fit["training_info"].get("cv_std"),
             "timing_s": 0.0,
             "X_train": X_train,
             "X_test": X_test_eng,
@@ -371,6 +413,117 @@ def run_replication(
         out["traceback"] = traceback.format_exc()
 
     out["timing_s"] = round(time.time() - t0, 1)
+    return out
+
+
+PROTECTED_KEYWORDS = [
+    "age", "gender", "sex", "region", "ethnicity",
+    "race", "nationality", "marital", "education",
+    # "employment_type" only matched a column literally named that exact
+    # compound (missing e.g. "employment_length", "employment_status") —
+    # broadened to the stem so any employment-category column is caught.
+    "employment", "loan_purpose",
+]
+
+
+def detect_protected_columns(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns if any(k in c.lower() for k in PROTECTED_KEYWORDS)]
+
+
+def run_bias_check(
+    df: pd.DataFrame,
+    target_col: str,
+    model_name: str,
+    protected_col: Optional[str],
+    test_size: float,
+    val_size: float,
+    random_seed: int,
+    cv_folds: int,
+) -> Dict[str, Any]:
+    """Fair lending bias check (Stage 7 Explainability & Fairness tab).
+
+    Mirrors app.py's render_val_regulatory() Tab 2 bias-check button: trains
+    the model on the same split as replication, then compares AUC across
+    groups of a protected characteristic. Uses `_fit_core` rather than
+    `run_replication` so it skips replication's seed-stability + ablation
+    loops, which this check has no use for.
+    """
+    out: Dict[str, Any] = {
+        "success": False,
+        "error": None,
+        "protected_columns": detect_protected_columns(df),
+        "bias_col": protected_col,
+        "rows": [],
+        "check": None,
+    }
+    if not protected_col:
+        return out
+
+    try:
+        fit = _fit_core(df, target_col, model_name, test_size, val_size, random_seed, cv_folds)
+        y_test = fit["y_test"]
+        y_proba = fit["y_proba"]
+
+        if protected_col not in df.columns:
+            out["error"] = f"Column '{protected_col}' not found in dataset."
+            return out
+
+        test_idx = y_test.index
+        bias_vals = df.loc[test_idx, protected_col].fillna("Unknown").astype(str)
+        groups = sorted(bias_vals.unique())
+
+        rows = []
+        for grp in groups:
+            mask = (bias_vals == grp).values
+            if mask.sum() < 10:
+                continue
+            y_grp = y_test.values[mask]
+            p_grp = y_proba[mask]
+            try:
+                auc = round(float(roc_auc_score(y_grp, p_grp)), 4) if len(np.unique(y_grp)) > 1 else None
+            except Exception:
+                auc = None
+            rows.append({
+                "Group": grp,
+                "Count": int(mask.sum()),
+                "Default Rate": round(float(y_grp.mean()), 4),
+                "Avg Predicted PD": round(float(p_grp.mean()), 4),
+                "AUC": auc,
+            })
+
+        out["success"] = True
+        out["rows"] = rows
+
+        auc_vals = [r["AUC"] for r in rows if r["AUC"] is not None]
+        if len(auc_vals) >= 2:
+            auc_gap = round(float(max(auc_vals) - min(auc_vals)), 4)
+            status = "PASS" if auc_gap < 0.05 else ("WARN" if auc_gap < 0.10 else "FAIL")
+            out["check"] = {
+                "check_id": "8.2",
+                "title": f"Fair Lending Bias Check — {protected_col}",
+                "severity": "HIGH",
+                "status": status,
+                "source": "SS1/23",
+                "principle": "P1.3",
+                "observed": f"AUC gap across groups: {auc_gap:.4f} (max: {max(auc_vals):.4f}, min: {min(auc_vals):.4f})",
+                "threshold": "AUC gap across protected groups < 0.05",
+                "detail": "Large AUC gap indicates model performs differently for different groups — potential discrimination risk",
+            }
+        else:
+            out["check"] = {
+                "check_id": "8.2",
+                "title": f"Fair Lending Bias Check — {protected_col}",
+                "severity": "HIGH",
+                "status": "WARN",
+                "source": "SS1/23",
+                "principle": "P1.3",
+                "observed": "Fewer than 2 groups with >= 10 records — AUC gap not computable",
+                "threshold": "AUC gap across protected groups < 0.05",
+                "detail": "",
+            }
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+
     return out
 
 

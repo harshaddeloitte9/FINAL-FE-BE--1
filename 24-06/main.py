@@ -11,6 +11,7 @@ import json
 import importlib.util
 import os
 import random
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -28,8 +29,9 @@ for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
     if path_str not in sys.path:
         sys.path.insert(0 if path == BACKEND_DIR else 1, path_str)
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -100,7 +102,10 @@ from explainability import (
     extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
     generate_model_summary,
 )
-from val_replication_core import extract_metrics_from_mdd, parse_mdd_file, run_replication, evaluate_replication_checks
+from val_replication_core import (
+    extract_metrics_from_mdd, parse_mdd_file, run_replication, evaluate_replication_checks,
+    run_bias_check, detect_protected_columns,
+)
 
 _validation_agent2_path = SOURCE_OF_TRUTH_DIR / "validation_agent2.py"
 _validation_agent2_spec = importlib.util.spec_from_file_location("source_validation_agent2", _validation_agent2_path)
@@ -109,6 +114,13 @@ if _validation_agent2_spec is None or _validation_agent2_spec.loader is None:
 _validation_agent2_module = importlib.util.module_from_spec(_validation_agent2_spec)
 _validation_agent2_spec.loader.exec_module(_validation_agent2_module)
 ValidationAgent2 = _validation_agent2_module.ValidationAgent2
+# ValidationAgent2.check_regulatory_compliance() (SOURCE_OF_TRUTH_DIR's
+# validation_agent2.py) inlines these keyword lists as literal _mdd_contains()
+# args rather than module constants — mirrored here verbatim (lines ~1442,
+# ~1462 of that file) so Stage 8's findings compilation checks the MDD with
+# the exact same keyword sets Stage 7's 7.1/7.2 checks use.
+CALIBRATION_KEYWORDS = ["calibrat", "platt", "isotonic", "through the cycle", "ttc"]
+STAGING_KEYWORDS = ["stage 1", "stage 2", "stage 3", "staging", "sicr", "lifetime ecl", "12 month"]
 
 # Source-of-truth Agent2: the RAG rule-matching agent (rag_store/val_mdd_rules.json,
 # check_for_validation / check_mdd_keywords / check_documents_with_llm). This is a
@@ -125,26 +137,58 @@ SourceAgent2 = _source_agent2_module.Agent2
 
 app = FastAPI()
 
+_ALLOWED_ORIGINS = [
+    "http://localhost:8080",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8081",
+    "http://localhost:3001",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:3001",
+    "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
+]
+_ALLOWED_ORIGIN_REGEX = re.compile(r"https://.*-harshads-projects-d63c4e68\.vercel\.app")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8081",
-        "http://localhost:3001",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:8081",
-        "http://127.0.0.1:3001",
-        "https://final-ok9cvxfh0-harshads-projects-d63c4e68.vercel.app",
-    ],
-    allow_origin_regex=r"https://.*-harshads-projects-d63c4e68\.vercel\.app",
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=_ALLOWED_ORIGIN_REGEX.pattern,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Turn unhandled exceptions into a normal JSON response with CORS headers,
+    instead of letting them fall through to Starlette's default 500 handling.
+
+    Handlers registered for the bare `Exception` class run inside Starlette's
+    ServerErrorMiddleware (see Starlette's own docs on this) — which sits
+    OUTSIDE CORSMiddleware in the stack no matter what handler is registered
+    here, so CORSMiddleware never gets a chance to add
+    Access-Control-Allow-Origin to this response. Confirmed by testing: the
+    plain-JSONResponse version of this handler (no manual headers) still came
+    back with no CORS header on a genuine crash. The browser then reports
+    "Failed to fetch"/a CORS error for what's actually a server-side 500,
+    indistinguishable from a real network failure. Fix is to set the header
+    ourselves, directly on the response this handler returns.
+    """
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+    origin = request.headers.get("origin")
+    if origin and (origin in _ALLOWED_ORIGINS or _ALLOWED_ORIGIN_REGEX.match(origin)):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
 
 def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd_text: str = "") -> dict:
     agent = ValidationAgent2()
@@ -2675,6 +2719,58 @@ async def validation_replication(
     return {"stage": "replication", "flags": flags, "report": {"replication": {"result": safe_result, "checks": checks}}}
 
 
+@app.post("/validation/stage7/bias-check")
+async def validation_stage7_bias_check(
+    algorithm: Optional[str] = Form(None),
+    model_name: Optional[str] = Form(None),
+    target_col: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    protected_col: Optional[str] = Form(None),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    cv_folds: int = Form(5),
+) -> Dict[str, Any]:
+    """Stage 7 Fair Lending Bias Check (Explainability & Fairness tab).
+
+    Mirrors app.py's render_val_regulatory() Tab 2 bias-check button. The
+    backend is stateless (no persisted Stage 4 session), so this reruns the
+    train/split via `_fit_core` (shared with /validation/replication) rather
+    than reusing a cached model — same pattern /validation/performance
+    already uses for "Stage 4" data.
+
+    If `protected_col` is omitted, only detects candidate protected columns
+    (age/gender/region/etc.) so the frontend can populate its selector.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+    resolved_model_name = (algorithm or model_name or "").strip()
+    if not resolved_model_name:
+        raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+
+    if not protected_col:
+        return {
+            "success": True,
+            "error": None,
+            "protected_columns": detect_protected_columns(df),
+            "bias_col": None,
+            "rows": [],
+            "check": None,
+        }
+
+    result = run_bias_check(
+        df=df,
+        target_col=target_col,
+        model_name=resolved_model_name,
+        protected_col=protected_col,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
+        cv_folds=cv_folds,
+    )
+    return result
+
+
 @app.post("/validation/agent2")
 async def validation_agent2(
     file: Optional[UploadFile] = File(None),
@@ -3031,6 +3127,218 @@ async def validation_stage7_run(
     }
 
     return {"checks": checks, "summary": summary}
+
+
+@app.post("/validation/stage8/findings")
+async def validation_stage8_findings(
+    intake_json: Optional[str] = Form(None),
+    mdd_text: Optional[str] = Form(None),
+    validation_profile_json: Optional[str] = Form(None),
+    rep_metrics_json: Optional[str] = Form(None),
+    benchmark_metrics_json: Optional[str] = Form(None),
+    shock_result_json: Optional[str] = Form(None),
+    bias_auc_gap: Optional[float] = Form(None),
+) -> Dict[str, Any]:
+    """Compile the Stage 8 Findings Tracker + overall verdict.
+
+    Direct port of app.py's render_val_findings() all_findings compilation
+    (app.py:7484-7617). The backend is stateless, so every piece that would
+    have been st.session_state on the Streamlit side is passed in from the
+    frontend's app-context instead — each already computed by an earlier
+    stage's own endpoint/response. CALIBRATION_KEYWORDS/STAGING_KEYWORDS are
+    imported from the same source-of-truth validation_agent2.py Stage 3 uses,
+    so the keyword lists can't drift between stages.
+    """
+    ij: Dict[str, Any] = {}
+    if intake_json:
+        try:
+            ij = json.loads(intake_json) or {}
+        except Exception:
+            ij = {}
+
+    mdd_lower = (mdd_text or "").lower()
+
+    profile: Dict[str, Any] = {}
+    if validation_profile_json:
+        try:
+            profile = json.loads(validation_profile_json) or {}
+        except Exception:
+            profile = {}
+
+    rep_metrics: Dict[str, Any] = {}
+    if rep_metrics_json:
+        try:
+            rep_metrics = json.loads(rep_metrics_json) or {}
+        except Exception:
+            rep_metrics = {}
+
+    bm_metrics: Dict[str, Any] = {}
+    if benchmark_metrics_json:
+        try:
+            bm_metrics = json.loads(benchmark_metrics_json) or {}
+        except Exception:
+            bm_metrics = {}
+
+    shock_res: Dict[str, Any] = {}
+    if shock_result_json:
+        try:
+            shock_res = json.loads(shock_result_json) or {}
+        except Exception:
+            shock_res = {}
+
+    all_findings: List[Dict[str, Any]] = []
+
+    # Stage 1 findings
+    if not ij.get("model_inventory_registered"):
+        all_findings.append({"stage": "Stage 1", "check": "1.2 Model Inventory",
+            "severity": "HIGH", "status": "FAIL",
+            "finding": "Model not registered in model inventory",
+            "recommendation": "Register model with unique ID before deployment",
+            "regulation": "SS1/23 P1.2"})
+    if not ij.get("independence_confirmed"):
+        all_findings.append({"stage": "Stage 1", "check": "1.4 Independence",
+            "severity": "HIGH", "status": "FAIL",
+            "finding": "Validation independence not confirmed",
+            "recommendation": "Confirm validation team has no conflict of interest",
+            "regulation": "SS1/23 P4.1"})
+
+    # Stage 2 findings — /data/profile's missing_by_column is
+    # {col: {"count": int, "percentage": float 0-100}} and duplicate_rate is
+    # a 0-100 percentage (see main.py's build_profile ~line 916), so divide
+    # by 100 to match the 0-1 fractions the legacy Streamlit thresholds use.
+    missing_by_column = profile.get("missing_by_column") or {}
+    if missing_by_column:
+        def _pct(entry: Any) -> float:
+            return float(entry.get("percentage", 0)) if isinstance(entry, dict) else float(entry or 0)
+        worst_col = max(missing_by_column, key=lambda c: _pct(missing_by_column[c]))
+        missing_max = _pct(missing_by_column[worst_col]) / 100.0
+        if missing_max > 0.20:
+            all_findings.append({"stage": "Stage 2", "check": "2.2 Missing Data",
+                "severity": "HIGH", "status": "FAIL",
+                "finding": f"Column '{worst_col}' has {missing_max:.1%} missing values",
+                "recommendation": "Investigate data pipeline — impute or remove high-missing columns",
+                "regulation": "SS1/23 P3.2"})
+    dupes = float(profile.get("duplicate_rate") or 0) / 100.0
+    if dupes > 0.01:
+        all_findings.append({"stage": "Stage 2", "check": "2.9 Duplicates",
+            "severity": "MEDIUM", "status": "WARN",
+            "finding": f"Duplicate row rate: {dupes:.2%}",
+            "recommendation": "Remove duplicate records before training",
+            "regulation": "SS1/23 P3.2"})
+
+    # Stage 3 MDD findings
+    for kw, check, finding, rec, reg, sev in [
+        (CALIBRATION_KEYWORDS, "7.1 Calibration",
+         "MDD has no calibration section", "Document PD calibration methodology", "IFRS 9 §5.5", "HIGH"),
+        (STAGING_KEYWORDS, "7.2 IFRS 9 Staging",
+         "MDD does not describe IFRS 9 staging logic", "Add Stage 1/2/3 classification and SICR triggers", "IFRS 9 §5.5.3", "HIGH"),
+        (["limitation", "weakness"], "3.4 Limitations",
+         "MDD has no limitations section", "Add model limitations per SS1/23 P3.4", "SS1/23 P3.4", "HIGH"),
+        (["assumption"], "3.3 Assumptions",
+         "MDD does not document model assumptions", "Document all modelling assumptions with rationale", "SS1/23 P3.3", "MEDIUM"),
+        (["macro", "gdp", "unemployment"], "2.4b Forward-Looking Documentation (MDD)",
+         "MDD does not reference macro/forward-looking variables", "Add macro overlay per IFRS 9 B5.5.49", "IFRS 9 B5.5.49", "MEDIUM"),
+    ]:
+        if not any(k in mdd_lower for k in kw):
+            all_findings.append({"stage": "Stage 3/7", "check": check,
+                "severity": sev, "status": "FAIL",
+                "finding": finding, "recommendation": rec, "regulation": reg})
+
+    # Stage 4 — AUC replication gap
+    stated_auc = ij.get("stated_auc")
+    rep_auc = rep_metrics.get("roc_auc")
+    if stated_auc and rep_auc:
+        gap = abs(float(stated_auc) - float(rep_auc))
+        if gap > 0.05:
+            all_findings.append({"stage": "Stage 4", "check": "4.2 AUC Replication",
+                "severity": "HIGH", "status": "FAIL",
+                "finding": f"AUC gap of {gap:.4f} — stated {stated_auc:.4f} vs replicated {rep_auc:.4f}",
+                "recommendation": "Developer must reconcile stated and replicated performance before resubmission",
+                "regulation": "SS1/23 P4.1"})
+
+    # Stage 5 — metric thresholds
+    for metric, val, threshold, op, check, reg, sev in [
+        ("ROC-AUC", rep_auc, 0.70, ">=", "5.1 ROC-AUC", "SS1/23 P4.1", "HIGH"),
+        ("Recall", rep_metrics.get("recall"), 0.60, ">=", "5.2 Recall", "SS1/23 P4.4", "HIGH"),
+        ("Gini", round(2 * (rep_auc or 0) - 1, 4) if rep_auc else None, 0.40, ">=", "5.3 Gini", "SS11/13 §10.3", "HIGH"),
+        ("Brier Score", rep_metrics.get("brier_score"), 0.25, "<=", "5.4 Brier", "SS11/13 §10.5", "MEDIUM"),
+    ]:
+        if val is not None:
+            failed = (op == ">=" and val < threshold) or (op == "<=" and val > threshold)
+            if failed:
+                all_findings.append({"stage": "Stage 5", "check": check,
+                    "severity": sev, "status": "FAIL",
+                    "finding": f"{metric} = {val:.4f} — below regulatory minimum {op} {threshold}",
+                    "recommendation": f"Model does not meet minimum {metric} threshold — consider retraining or additional data",
+                    "regulation": reg})
+
+    # Stage 5 — benchmarking
+    if bm_metrics and rep_auc:
+        bm_auc = bm_metrics.get("roc_auc", 0)
+        if rep_auc < bm_auc - 0.02:
+            all_findings.append({"stage": "Stage 5", "check": "5.B Benchmarking",
+                "severity": "MEDIUM", "status": "WARN",
+                "finding": f"Submitted model AUC ({rep_auc:.4f}) underperforms benchmark ({bm_auc:.4f})",
+                "recommendation": "Marginal improvement over baseline may not justify model complexity — review feature set",
+                "regulation": "SS1/23 P4.2"})
+
+    # Stage 6 — sensitivity shock
+    if shock_res and abs(shock_res.get("pd_change_pct", 0)) > 50:
+        all_findings.append({"stage": "Stage 6", "check": "6.1 Sensitivity",
+            "severity": "MEDIUM", "status": "WARN",
+            "finding": f"Shocking '{shock_res.get('feature')}' by {shock_res.get('magnitude_pct')}% changes avg PD by {shock_res.get('pd_change_pct', 0):.1f}%",
+            "recommendation": "Model may be over-sensitive to this feature — validate stability with wider test",
+            "regulation": "SS1/23 P4.3"})
+
+    # Stage 7 — bias
+    if bias_auc_gap is not None and bias_auc_gap > 0.10:
+        all_findings.append({"stage": "Stage 7", "check": "8.2 Fair Lending",
+            "severity": "HIGH", "status": "FAIL",
+            "finding": f"AUC gap of {bias_auc_gap:.4f} across protected groups",
+            "recommendation": "Investigate discriminatory bias — model may treat protected groups unfairly",
+            "regulation": "SS1/23 P1.3"})
+
+    # ── Overall verdict ──────────────────────────────────────────────
+    high_count = sum(1 for f in all_findings if f["severity"] == "HIGH" and f["status"] == "FAIL")
+    medium_count = sum(1 for f in all_findings if f["severity"] == "MEDIUM")
+    total_count = len(all_findings)
+
+    if high_count == 0 and medium_count <= 2:
+        verdict = "APPROVED"
+        verdict_desc = "Model meets all regulatory requirements and validation standards."
+    elif high_count <= 2:
+        verdict = "CONDITIONALLY APPROVED"
+        verdict_desc = f"Model may proceed subject to resolution of {high_count} HIGH finding(s) within agreed timeframe."
+    else:
+        verdict = "REJECTED"
+        verdict_desc = f"Model has {high_count} unresolved HIGH findings. Resubmission required after remediation."
+
+    # ── Monitoring & revalidation recommendations, driven by model tier ──
+    tier = ij.get("model_tier", "Tier 2")
+    if "1" in str(tier) or "High" in str(tier):
+        monitoring_frequency = "Monthly"
+        revalidation_trigger = "Annual (or triggered by PSI > 0.25 or AUC drop > 0.05)"
+    elif "2" in str(tier) or "Medium" in str(tier):
+        monitoring_frequency = "Quarterly"
+        revalidation_trigger = "18-monthly (or triggered by significant portfolio change)"
+    else:
+        monitoring_frequency = "Semi-annually"
+        revalidation_trigger = "Every 2 years (or triggered by model change)"
+
+    return {
+        "findings": all_findings,
+        "verdict": verdict,
+        "verdict_desc": verdict_desc,
+        "high_count": high_count,
+        "medium_count": medium_count,
+        "low_count": max(total_count - high_count - medium_count, 0),
+        "total_count": total_count,
+        "monitoring_frequency": monitoring_frequency,
+        "revalidation_trigger": revalidation_trigger,
+        "model_tier": tier,
+        "stated_auc": stated_auc,
+        "replicated_auc": rep_auc,
+    }
 
 
 @app.post("/validation/stage3/llm-check")
