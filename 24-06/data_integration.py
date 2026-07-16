@@ -111,9 +111,12 @@ class SQLiteDataSource(DataSource):
     def load(self) -> pd.DataFrame:
         if self._table not in list_tables(self._db_path):
             raise DataIntegrationError(f"Table '{self._table}' not found in the uploaded database.")
-        with sqlite3.connect(self._db_path) as conn:
+        conn = sqlite3.connect(self._db_path)
+        try:
             logger.info("SQLiteDataSource: loading table '%s' from %s", self._table, self._db_path)
             return pd.read_sql_query(f'SELECT * FROM "{self._table}"', conn)
+        finally:
+            conn.close()
 
     def metadata(self, df: Optional[pd.DataFrame] = None) -> SourceMetadata:
         d = df if df is not None else self.load()
@@ -160,17 +163,28 @@ class FredDataSource(DataSource):
 # ─────────────────────────────────────────────────────────────────────────
 
 def list_tables(db_path: str | Path) -> list[str]:
-    with sqlite3.connect(str(db_path)) as conn:
+    # `with sqlite3.connect(...) as conn` only commits/rolls back the
+    # transaction — it does NOT close the connection. On Windows that leaves
+    # the underlying file handle open, so a caller's os.unlink() on the temp
+    # db file right after this returns fails with "file is being used by
+    # another process". Close explicitly instead.
+    conn = sqlite3.connect(str(db_path))
+    try:
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
         return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 def inspect_table(db_path: str | Path, table: str, sample_rows: int = 200) -> dict[str, Any]:
     """Schema + lightweight stats for one table, used both to show the user
     what's in their database and as input to relationship discovery."""
-    with sqlite3.connect(str(db_path)) as conn:
+    conn = sqlite3.connect(str(db_path))
+    try:
         row_count = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
         sample = pd.read_sql_query(f'SELECT * FROM "{table}" LIMIT {int(sample_rows)}', conn)
+    finally:
+        conn.close()
 
     columns = []
     for col in sample.columns:

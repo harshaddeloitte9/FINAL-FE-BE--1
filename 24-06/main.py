@@ -1125,6 +1125,18 @@ def _save_upload_to_temp(file: UploadFile, suffix: str = ".db") -> str:
         return tmp.name
 
 
+def _unlink_quietly(path: str) -> None:
+    """Best-effort temp-file cleanup. On Windows a sqlite3 connection can
+    still hold the file open for a moment after its Python object goes out
+    of scope, so os.unlink() can raise PermissionError here even though the
+    actual request already completed successfully — that shouldn't turn a
+    good response into a 500."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 @app.post("/data/integration/sqlite/inspect")
 async def integration_sqlite_inspect(db_file: UploadFile = File(...)) -> Dict[str, Any]:
     """Part B — upload a SQLite database and discover every table plus its
@@ -1139,7 +1151,7 @@ async def integration_sqlite_inspect(db_file: UploadFile = File(...)) -> Dict[st
     except di.DataIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
-        os.unlink(tmp_path)
+        _unlink_quietly(tmp_path)
 
 
 @app.post("/data/integration/relationships")
@@ -1182,7 +1194,7 @@ async def integration_relationships(
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if tmp_path:
-            os.unlink(tmp_path)
+            _unlink_quietly(tmp_path)
 
 
 @app.post("/data/integration/run")
@@ -1262,7 +1274,7 @@ async def integration_run(
         return profile
     finally:
         if tmp_path:
-            os.unlink(tmp_path)
+            _unlink_quietly(tmp_path)
 
 
 
