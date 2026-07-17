@@ -37,6 +37,9 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import joblib
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -1098,20 +1101,163 @@ def _fetch_remote_csv(api_url: str, http_method: str = "GET") -> str:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.post("/data/api")
-async def fetch_api_data(
-    api_url: str = Form(...),
-    http_method: str = Form("GET"),
+def _normalize_db_type(db_type: str) -> str:
+    if db_type is None:
+        return ""
+    return db_type.strip().lower()
+
+
+def _build_database_url(
+    db_type: str,
+    host: Optional[str],
+    port: Optional[str],
+    database: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+) -> str:
+    db_type = _normalize_db_type(db_type)
+    database = (database or "").strip()
+    if not database:
+        raise HTTPException(status_code=400, detail="Database name/path is required.")
+
+    if db_type == "sqlite":
+        if database == ":memory:":
+            return "sqlite:///:memory:"
+        path = Path(database)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        return f"sqlite:///{path.as_posix()}"
+
+    username = (username or "").strip()
+    password = (password or "").strip()
+    host = (host or "localhost").strip() or "localhost"
+    port = (port or "").strip()
+
+    if db_type == "postgresql":
+        driver = "psycopg2"
+        default_port = "5432"
+    elif db_type == "mysql":
+        driver = "pymysql"
+        default_port = "3306"
+    elif db_type in ("sqlserver", "mssql"):
+        driver = "pyodbc"
+        default_port = "1433"
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported database type '{db_type}'.")
+
+    port = port or default_port
+    if db_type in ("sqlserver", "mssql"):
+        if not username or not password:
+            raise HTTPException(status_code=400, detail="Username and password are required for SQL Server.")
+        driver_query = "?driver=ODBC+Driver+17+for+SQL+Server"
+        return f"mssql+{driver}://{username}:{password}@{host}:{port}/{database}{driver_query}"
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required for database connections.")
+
+    return f"{db_type}+{driver}://{username}:{password}@{host}:{port}/{database}"
+
+
+def _create_database_engine(
+    db_type: str,
+    host: Optional[str],
+    port: Optional[str],
+    database: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+):
+    url = _build_database_url(db_type, host, port, database, username, password)
+    try:
+        engine = create_engine(url, future=True, connect_args={"connect_timeout": 10} if _normalize_db_type(db_type) != "sqlite" else {})
+        return engine
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=400, detail=f"Database URL error: {exc}")
+
+
+def _inspect_database_tables(engine) -> List[str]:
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    views = inspector.get_view_names()
+    return sorted(set(tables + views))
+
+
+@app.post("/data/database/test")
+async def test_database_connection(
+    db_type: str = Form(...),
+    host: Optional[str] = Form(None),
+    port: Optional[str] = Form(None),
+    database: Optional[str] = Form(None),
+    username: Optional[str] = Form(None),
+    password: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
-    csv_text = _fetch_remote_csv(api_url, http_method)
-    df = await _read_dataframe(csv_text=csv_text)
-    parsed_url = urllib.parse.urlparse(api_url)
-    filename = Path(parsed_url.path).name
-    dataset_name = filename if filename else "API dataset"
-    profile = _build_data_profile(df, dataset_name=dataset_name)
+    engine = _create_database_engine(db_type, host, port, database, username, password)
+    try:
+        with engine.connect() as connection:
+            # SQLAlchemy 2.0 requires an executable SQL expression; use text()
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=400, detail=f"Database connection failed: {exc}")
+    finally:
+        engine.dispose()
+    return {"status": "ok"}
+
+
+@app.post("/data/database/tables")
+async def list_database_tables(
+    db_type: str = Form(...),
+    host: Optional[str] = Form(None),
+    port: Optional[str] = Form(None),
+    database: Optional[str] = Form(None),
+    username: Optional[str] = Form(None),
+    password: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    engine = _create_database_engine(db_type, host, port, database, username, password)
+    try:
+        tables = _inspect_database_tables(engine)
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to list tables: {exc}")
+    finally:
+        engine.dispose()
+    return {"tables": tables}
+
+
+@app.post("/data/database/fetch")
+async def fetch_database_table(
+    db_type: str = Form(...),
+    host: Optional[str] = Form(None),
+    port: Optional[str] = Form(None),
+    database: Optional[str] = Form(None),
+    username: Optional[str] = Form(None),
+    password: Optional[str] = Form(None),
+    selected_table: str = Form(...),
+) -> Dict[str, Any]:
+    engine = _create_database_engine(db_type, host, port, database, username, password)
+    try:
+        if "." in selected_table:
+            schema, table_name = selected_table.split(".", 1)
+        else:
+            schema = None
+            table_name = selected_table
+
+        try:
+            df = pd.read_sql_table(table_name, con=engine, schema=schema)
+        except Exception:
+            query = f"SELECT * FROM {selected_table}"
+            df = pd.read_sql_query(query, con=engine)
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch table '{selected_table}': {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch table '{selected_table}': {exc}")
+    finally:
+        engine.dispose()
+
+    profile = _build_data_profile(df, dataset_name=selected_table)
     profile["csv_text"] = df.to_csv(index=False)
-    profile["source_type"] = "api"
-    profile["api_url"] = api_url
+    profile["source_type"] = "database"
+    profile["database_type"] = db_type
+    profile["database_host"] = host
+    profile["database_name"] = database
+    profile["database_table"] = selected_table
     return profile
 
 
