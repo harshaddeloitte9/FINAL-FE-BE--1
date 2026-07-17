@@ -82,7 +82,6 @@ except ImportError:
     resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
 from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid, CLASSIFICATION_MODELS
 from train_new import split_data, compute_split_stats, train_model
-import ecl_engine as ecl
 import evaluate_new as eval_engine
 import fred_client
 import data_integration as di
@@ -552,25 +551,6 @@ class TierRequest(BaseModel):
     training_config: Dict[str, Any]
     metrics: Dict[str, Any]
     fe_summary: Optional[Dict[str, Any]] = None
-
-
-class ECLConfigRequest(BaseModel):
-    lgd_method: str = "fixed"
-    lgd_fixed: float = 0.45
-    ltv_col: Optional[str] = None
-    lgd_haircut: float = 0.20
-    lgd_floor: float = 0.05
-    lgd_cap: float = 0.95
-    ead_undrawn_col: Optional[str] = None
-    ead_ccf: float = 1.0
-    pd_relative_threshold: float = 1.5
-    pd_absolute_threshold: float = 0.03
-    dpd_sicr_threshold: int = 30
-    dpd_impaired_threshold: int = 90
-    credit_impaired_pd_floor: float = 0.20
-    maturity_col: Optional[str] = None
-    dpd_col: Optional[str] = None
-    orig_pd_col: Optional[str] = None
 
 
 _agent2: Optional[Agent2] = None
@@ -4022,40 +4002,3 @@ async def validation_stage3_llm(
         raise HTTPException(status_code=500, detail=f"LLM deep-check failed: {e}")
 
     return {"llm_results": [_normalize_rag_rule(r) for r in llm_results]}
-
-
-@app.post("/ecl/compute")
-async def compute_ecl(
-    model_artifact: UploadFile = File(...),
-    file: Optional[UploadFile] = File(None),
-    csv_text: Optional[str] = Form(None),
-    target_col: Optional[str] = Form(None),
-    ead_col: Optional[str] = Form(None),
-    loan_type_col: Optional[str] = Form(None),
-    lgd_map: Optional[str] = Form(None),
-    cfg: str = Form(None),
-    synthetic_samples: Optional[int] = Form(None),
-) -> Dict[str, Any]:
-    df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
-    pipeline = await _load_model_artifact(model_artifact)
-    if target_col is not None and target_col in df.columns:
-        X = df.drop(columns=[target_col], errors='ignore')
-    else:
-        X = df
-    config_data = json.loads(cfg) if cfg else {}
-    ecl_cfg = ecl.ECLConfig(**config_data)
-    lgd_map_data = json.loads(lgd_map) if lgd_map else None
-    result_df, summary = ecl.compute(
-        pipeline=pipeline,
-        X=X,
-        data=df,
-        ead_col=ead_col,
-        cfg=ecl_cfg,
-        loan_type_col=loan_type_col,
-        lgd_map=lgd_map_data,
-    )
-    return {
-        "summary": summary,
-        "sample_rows": result_df.head(20).replace({pd.NA: None}).to_dict(orient="records"),
-        "columns": result_df.columns.astype(str).tolist(),
-    }

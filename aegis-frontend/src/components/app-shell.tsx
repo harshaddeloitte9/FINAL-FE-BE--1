@@ -62,8 +62,6 @@ const validationNav: NavItem[] = [
 const developmentPaths = [
   ...developmentNav.map((n) => n.to),
   "/pd",
-  "/lgd",
-  "/ead",
 ];
 
 function resolveWorkspace(pathname: string): "landing" | "development" | "validation" {
@@ -74,8 +72,6 @@ function resolveWorkspace(pathname: string): "landing" | "development" | "valida
 }
 
 function resolveActiveModelTab(pathname: string): ModelTab["key"] {
-  if (pathname.startsWith("/lgd")) return "lgd";
-  if (pathname.startsWith("/ead")) return "ead";
   if (pathname.startsWith("/pd") || [
     "/data-upload",
     "/profiling",

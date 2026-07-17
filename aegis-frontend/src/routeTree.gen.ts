@@ -15,12 +15,9 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ProfilingRouteImport } from './routes/profiling'
 import { Route as PreprocessingRouteImport } from './routes/preprocessing'
 import { Route as PdRouteImport } from './routes/pd'
-import { Route as LgdRouteImport } from './routes/lgd'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as ExplainabilityRouteImport } from './routes/explainability'
 import { Route as EvaluationRouteImport } from './routes/evaluation'
-import { Route as EclProvisionsRouteImport } from './routes/ecl-provisions'
-import { Route as EadRouteImport } from './routes/ead'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
 import { Route as IndexRouteImport } from './routes/index'
@@ -64,11 +61,6 @@ const PdRoute = PdRouteImport.update({
   path: '/pd',
   getParentRoute: () => rootRouteImport,
 } as any)
-const LgdRoute = LgdRouteImport.update({
-  id: '/lgd',
-  path: '/lgd',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const FeaturesRoute = FeaturesRouteImport.update({
   id: '/features',
   path: '/features',
@@ -82,16 +74,6 @@ const ExplainabilityRoute = ExplainabilityRouteImport.update({
 const EvaluationRoute = EvaluationRouteImport.update({
   id: '/evaluation',
   path: '/evaluation',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const EclProvisionsRoute = EclProvisionsRouteImport.update({
-  id: '/ecl-provisions',
-  path: '/ecl-provisions',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const EadRoute = EadRouteImport.update({
-  id: '/ead',
-  path: '/ead',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DevelopmentRoute = DevelopmentRouteImport.update({
@@ -159,12 +141,9 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
-  '/ead': typeof EadRoute
-  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
-  '/lgd': typeof LgdRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -185,12 +164,9 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
-  '/ead': typeof EadRoute
-  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
-  '/lgd': typeof LgdRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -211,12 +187,9 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
-  '/ead': typeof EadRoute
-  '/ecl-provisions': typeof EclProvisionsRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
-  '/lgd': typeof LgdRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -239,12 +212,9 @@ export interface FileRouteTypes {
     | '/'
     | '/data-upload'
     | '/development'
-    | '/ead'
-    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
-    | '/lgd'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -265,12 +235,9 @@ export interface FileRouteTypes {
     | '/'
     | '/data-upload'
     | '/development'
-    | '/ead'
-    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
-    | '/lgd'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -290,12 +257,9 @@ export interface FileRouteTypes {
     | '/'
     | '/data-upload'
     | '/development'
-    | '/ead'
-    | '/ecl-provisions'
     | '/evaluation'
     | '/explainability'
     | '/features'
-    | '/lgd'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -317,12 +281,9 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
-  EadRoute: typeof EadRoute
-  EclProvisionsRoute: typeof EclProvisionsRoute
   EvaluationRoute: typeof EvaluationRoute
   ExplainabilityRoute: typeof ExplainabilityRoute
   FeaturesRoute: typeof FeaturesRoute
-  LgdRoute: typeof LgdRoute
   PdRoute: typeof PdRoute
   PreprocessingRoute: typeof PreprocessingRoute
   ProfilingRoute: typeof ProfilingRoute
@@ -375,13 +336,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/lgd': {
-      id: '/lgd'
-      path: '/lgd'
-      fullPath: '/lgd'
-      preLoaderRoute: typeof LgdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/features': {
       id: '/features'
       path: '/features'
@@ -401,20 +355,6 @@ declare module '@tanstack/react-router' {
       path: '/evaluation'
       fullPath: '/evaluation'
       preLoaderRoute: typeof EvaluationRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/ecl-provisions': {
-      id: '/ecl-provisions'
-      path: '/ecl-provisions'
-      fullPath: '/ecl-provisions'
-      preLoaderRoute: typeof EclProvisionsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/ead': {
-      id: '/ead'
-      path: '/ead'
-      fullPath: '/ead'
-      preLoaderRoute: typeof EadRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/development': {
@@ -536,12 +476,9 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
-  EadRoute: EadRoute,
-  EclProvisionsRoute: EclProvisionsRoute,
   EvaluationRoute: EvaluationRoute,
   ExplainabilityRoute: ExplainabilityRoute,
   FeaturesRoute: FeaturesRoute,
-  LgdRoute: LgdRoute,
   PdRoute: PdRoute,
   PreprocessingRoute: PreprocessingRoute,
   ProfilingRoute: ProfilingRoute,
