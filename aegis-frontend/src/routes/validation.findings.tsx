@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import React from "react";
 import { PageHeader } from "@/components/app-shell";
-import { ArrowRight, AlertTriangle, RefreshCw } from "lucide-react";
+import { ArrowRight, AlertTriangle, RefreshCw, Printer, ChevronDown, ChevronRight } from "lucide-react";
 import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
@@ -81,6 +81,52 @@ function downloadCsv(filename: string, rows: Array<Record<string, unknown>>) {
 function todayLabel() {
   return new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
+
+// Plain-English justification for the verdict — mirrors the exact thresholds
+// the /validation/stage8/findings endpoint uses to decide it (main.py: verdict
+// is APPROVED iff 0 HIGH findings and <=2 MEDIUM; CONDITIONALLY APPROVED iff
+// <=2 HIGH findings; REJECTED otherwise). Kept in sync with that logic rather
+// than re-deriving it, since the API only returns the outcome, not the "why".
+function verdictReasoning(data: Stage8Response): string {
+  const { verdict, high_count, medium_count } = data;
+  if (verdict === "APPROVED") {
+    return `Approved because there are 0 unresolved HIGH findings and ${medium_count} MEDIUM finding(s) — both within the thresholds required for full approval (max 2 MEDIUM, 0 HIGH).`;
+  }
+  if (verdict === "CONDITIONALLY APPROVED") {
+    const mediumNote = medium_count > 2
+      ? ` (and ${medium_count} MEDIUM findings, which alone would exceed the 2 allowed for full approval)`
+      : "";
+    return `Conditionally approved because ${high_count} HIGH finding(s) were raised${mediumNote} — this is within the maximum of 2 HIGH findings allowed for conditional approval, so deployment may proceed once they are resolved within the agreed timeframe.`;
+  }
+  return `Rejected because ${high_count} unresolved HIGH findings exceed the maximum of 2 allowed for conditional approval — full remediation and resubmission is required before this model can be reconsidered.`;
+}
+
+// Same Stage 5 metric/threshold table the backend evaluates (main.py, Stage
+// 5 section of /validation/stage8/findings) — reproduced here because the
+// API only returns FAILING metrics as findings, not the full pass/fail
+// picture needed to show "why something passed" as well as "why it failed".
+type MetricThresholdRow = { metric: string; value: number | null; threshold: number; op: ">=" | "<="; regulation: string; pass: boolean | null };
+
+function metricThresholdRows(repMetrics: Record<string, any>): MetricThresholdRow[] {
+  const rocAuc = typeof repMetrics.roc_auc === "number" ? repMetrics.roc_auc : null;
+  const gini = rocAuc !== null ? Math.round((2 * rocAuc - 1) * 10000) / 10000 : null;
+  const rows: Array<[string, number | null, number, ">=" | "<=", string]> = [
+    ["ROC-AUC", rocAuc, 0.70, ">=", "SS1/23 P4.1"],
+    ["Recall", typeof repMetrics.recall === "number" ? repMetrics.recall : null, 0.60, ">=", "SS1/23 P4.4"],
+    ["Gini", gini, 0.40, ">=", "SS11/13 §10.3"],
+    ["Brier Score", typeof repMetrics.brier_score === "number" ? repMetrics.brier_score : null, 0.25, "<=", "SS11/13 §10.5"],
+  ];
+  return rows.map(([metric, value, threshold, op, regulation]) => ({
+    metric,
+    value,
+    threshold,
+    op,
+    regulation,
+    pass: value === null ? null : op === ">=" ? value >= threshold : value <= threshold,
+  }));
+}
+
+const STAGE_ORDER = ["Stage 1", "Stage 2", "Stage 3/7", "Stage 4", "Stage 5", "Stage 6", "Stage 7"];
 
 function Findings() {
   const ds = useDataset();
@@ -199,6 +245,32 @@ function Findings() {
     setRemediation((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   };
 
+  // Grouped-by-stage, collapsed-by-default view of the findings tracker —
+  // one row per finding (Stage / Finding / Severity / Status), full detail
+  // only shown once a row is expanded. S.No numbers the flattened list so
+  // it stays stable/unique across groups.
+  const [expandedFindings, setExpandedFindings] = React.useState<Record<number, boolean>>({});
+  const toggleFinding = (idx: number) => setExpandedFindings((prev) => ({ ...prev, [idx]: !prev[idx] }));
+
+  const groupedFindings = React.useMemo(() => {
+    const indexed = findings.map((f, i) => ({ ...f, _sno: i + 1 }));
+    const byStage = new Map<string, typeof indexed>();
+    for (const f of indexed) {
+      if (!byStage.has(f.stage)) byStage.set(f.stage, []);
+      byStage.get(f.stage)!.push(f);
+    }
+    const orderedStages = [
+      ...STAGE_ORDER.filter((s) => byStage.has(s)),
+      ...Array.from(byStage.keys()).filter((s) => !STAGE_ORDER.includes(s)),
+    ];
+    return orderedStages.map((stage) => ({ stage, items: byStage.get(stage)! }));
+  }, [findings]);
+
+  const repMetricsForReport = (validationStage5Result as any)?.report?.metrics ?? {};
+  const metricRows = React.useMemo(() => metricThresholdRows(repMetricsForReport), [repMetricsForReport]);
+
+  const downloadFullReportPdf = () => window.print();
+
   const ij = validationIntakeData ?? {};
   const verdictStyle = VERDICT_STYLES[data?.verdict ?? ""] ?? VERDICT_STYLES.REJECTED;
 
@@ -292,9 +364,34 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
         </div>
       ) : data ? (
         <>
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              onClick={downloadFullReportPdf}
+              className="no-print inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+            >
+              <Printer className="h-4 w-4" />
+              Download Full Report (PDF)
+            </button>
+          </div>
+
+          <div id="full-report-content" className="space-y-8">
+          {/* Model identity */}
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h3 className="text-sm font-semibold">1. Model Identity</h3>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+              <div><strong>Model:</strong> {ij.model_name ?? "N/A"}</div>
+              <div><strong>Type:</strong> {ij.model_type ?? "N/A"}</div>
+              <div><strong>Risk tier:</strong> {data.model_tier}</div>
+              <div><strong>Validator:</strong> {signOff.validator || "—"}</div>
+              <div><strong>Validation date:</strong> {todayLabel()}</div>
+            </div>
+          </section>
+
           {/* Overall verdict banner */}
           <section className={`rounded-xl border-2 ${verdictStyle.border} ${verdictStyle.bg} p-6 shadow-elegant`}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">2. Overall Verdict</h3>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
               <div className={`text-2xl font-extrabold ${verdictStyle.text}`}>
                 {verdictStyle.icon} {data.verdict}
               </div>
@@ -305,6 +402,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
               </div>
             </div>
             <p className="mt-3 text-sm text-foreground/80">{data.verdict_desc}</p>
+            <p className="mt-2 text-sm font-medium text-foreground">{verdictReasoning(data)}</p>
             <p className="mt-2 text-xs text-muted-foreground">
               Model: {ij.model_name ?? "N/A"} · Type: {ij.model_type ?? "N/A"} · Tier: {data.model_tier} · Date: {todayLabel()}
             </p>
@@ -313,7 +411,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           {/* Findings tracker */}
           <section className="space-y-4">
             <div>
-              <h3 className="text-sm font-semibold">📋 Findings Tracker</h3>
+              <h3 className="text-sm font-semibold">3. Findings Summary</h3>
               <p className="text-xs text-muted-foreground">
                 Auto-compiled from Stages 1–7. All HIGH findings must be resolved before model deployment.
               </p>
@@ -344,30 +442,97 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                   </div>
                 </div>
 
-                <div className="space-y-3">
-                  {findings.map((f, i) => {
-                    const s = severityStyle(f.severity);
-                    return (
-                      <div key={`${f.stage}-${f.check}-${i}`} className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 flex-1 break-words text-sm font-semibold text-foreground">
-                            [{f.stage}] {f.check}{" "}
-                            <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${s.badge}`}>
-                              {f.severity}
-                            </span>
-                          </div>
-                          <span className="shrink-0 text-xs font-bold text-muted-foreground">{f.status}</span>
-                        </div>
-                        <div className="mt-2 text-sm text-foreground">📌 {f.finding}</div>
-                        <div className="mt-2 text-sm text-muted-foreground">💡 {f.recommendation}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">📋 {f.regulation}</div>
+                <div className="no-print space-y-6">
+                  {groupedFindings.map(({ stage, items }) => (
+                    <div key={stage}>
+                      <div className="mb-2 flex items-center gap-2">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{stage}</h4>
+                        <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+                          {items.length} finding{items.length === 1 ? "" : "s"}
+                        </span>
                       </div>
-                    );
-                  })}
+                      <div className="overflow-hidden rounded-lg border border-border">
+                        <table className="w-full text-sm">
+                          <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
+                            <tr>
+                              <th className="w-10 px-3 py-2 text-left">S.No</th>
+                              <th className="px-3 py-2 text-left">Finding</th>
+                              <th className="px-3 py-2 text-left">Severity</th>
+                              <th className="px-3 py-2 text-left">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border">
+                            {items.map((f) => {
+                              const s = severityStyle(f.severity);
+                              const expanded = Boolean(expandedFindings[f._sno]);
+                              return (
+                                <React.Fragment key={f._sno}>
+                                  <tr
+                                    className="cursor-pointer hover:bg-background/60"
+                                    onClick={() => toggleFinding(f._sno)}
+                                  >
+                                    <td className="px-3 py-2 align-top text-muted-foreground">{f._sno}</td>
+                                    <td className="px-3 py-2 align-top">
+                                      <div className="flex items-center gap-1.5 font-medium text-foreground">
+                                        {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                                        {f.check}
+                                      </div>
+                                    </td>
+                                    <td className="px-3 py-2 align-top">
+                                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${s.badge}`}>
+                                        {f.severity}
+                                      </span>
+                                    </td>
+                                    <td className="px-3 py-2 align-top text-xs font-bold text-muted-foreground">{f.status}</td>
+                                  </tr>
+                                  {expanded && (
+                                    <tr className={`${s.bg}`}>
+                                      <td className="px-3 py-3" />
+                                      <td colSpan={3} className="px-3 py-3">
+                                        <div className="text-sm text-foreground">📌 {f.finding}</div>
+                                        <div className="mt-2 text-sm text-muted-foreground">💡 {f.recommendation}</div>
+                                        <div className="mt-1 text-xs text-muted-foreground">📋 {f.regulation}</div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
                 </div>
 
-                {/* Remediation log */}
-                <div>
+                {/* Print-only: full findings detail, always expanded, since a
+                    static PDF has no click-to-expand affordance. */}
+                <div className="print-only space-y-6">
+                  {groupedFindings.map(({ stage, items }) => (
+                    <div key={`print-${stage}`}>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{stage}</h4>
+                      <div className="mt-2 space-y-2">
+                        {items.map((f) => {
+                          const s = severityStyle(f.severity);
+                          return (
+                            <div key={`print-${f._sno}`} className={`rounded-r-lg border-l-4 ${s.border} ${s.bg} p-3`}>
+                              <div className="text-sm font-semibold text-foreground">
+                                {f._sno}. {f.check} — <span className="uppercase">{f.severity}</span> ({f.status})
+                              </div>
+                              <div className="mt-1 text-sm text-foreground">📌 {f.finding}</div>
+                              <div className="mt-1 text-sm text-muted-foreground">💡 {f.recommendation}</div>
+                              <div className="mt-1 text-xs text-muted-foreground">📋 {f.regulation}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Remediation log — an internal working tool for tracking
+                    owners/deadlines, not part of the formal PDF report. */}
+                <div className="no-print">
                   <h3 className="text-sm font-semibold">📝 Remediation Action Log</h3>
                   <p className="text-xs text-muted-foreground">Add owners and deadlines for each finding before sign-off.</p>
                   <div className="mt-3 overflow-x-auto rounded-lg border border-border">
@@ -439,9 +604,47 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
             )}
           </section>
 
+          {/* Performance metrics vs regulatory thresholds */}
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <h3 className="text-sm font-semibold">4. Performance Metrics vs Regulatory Thresholds</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Replicated (Stage 4/5) metrics evaluated against the minimum required by regulation.</p>
+            <div className="mt-3 overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Metric</th>
+                    <th className="px-3 py-2 text-left">Value</th>
+                    <th className="px-3 py-2 text-left">Threshold</th>
+                    <th className="px-3 py-2 text-left">Regulation</th>
+                    <th className="px-3 py-2 text-left">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {metricRows.map((row) => (
+                    <tr key={row.metric}>
+                      <td className="px-3 py-2 align-top font-medium">{row.metric}</td>
+                      <td className="px-3 py-2 align-top">{row.value !== null ? row.value.toFixed(4) : "N/A"}</td>
+                      <td className="px-3 py-2 align-top text-muted-foreground">{row.op} {row.threshold}</td>
+                      <td className="px-3 py-2 align-top text-muted-foreground">{row.regulation}</td>
+                      <td className="px-3 py-2 align-top">
+                        {row.pass === null ? (
+                          <span className="text-muted-foreground">N/A</span>
+                        ) : row.pass ? (
+                          <span className="rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-950">Pass</span>
+                        ) : (
+                          <span className="rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-bold uppercase text-red-950">Fail</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           {/* Monitoring & revalidation */}
           <section>
-            <h3 className="text-sm font-semibold">📅 Monitoring & Revalidation Recommendations</h3>
+            <h3 className="text-sm font-semibold">5. Monitoring & Revalidation Recommendations</h3>
             <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="rounded-lg border border-border bg-card p-4">
                 <div className="text-xs font-bold text-primary">MONITORING FREQUENCY</div>
@@ -458,18 +661,19 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
 
           {/* Executive summary */}
           <section>
-            <h3 className="text-sm font-semibold">📰 Executive Summary</h3>
-            <p className="text-xs text-muted-foreground">Auto-generated from validation findings. Edit before final sign-off.</p>
+            <h3 className="text-sm font-semibold">6. Executive Summary</h3>
+            <p className="text-xs text-muted-foreground no-print">Auto-generated from validation findings. Edit before final sign-off.</p>
             <textarea
               value={execSummary}
               onChange={(e) => setExecSummary(e.target.value)}
               rows={14}
-              className="mt-3 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed"
+              className="no-print mt-3 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed"
             />
+            <pre className="print-only mt-3 whitespace-pre-wrap font-mono text-xs leading-relaxed">{execSummary}</pre>
           </section>
 
           {/* Downloads */}
-          <section>
+          <section className="no-print">
             <h3 className="text-sm font-semibold">📥 Download Evidence Pack</h3>
             <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
               <button
@@ -520,7 +724,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
 
           {/* Sign-off */}
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <h3 className="text-sm font-semibold">Sign-off</h3>
+            <h3 className="text-sm font-semibold">7. Sign-off</h3>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
               {(
                 [
@@ -535,13 +739,17 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     value={signOff[key]}
                     onChange={(e) => setSignOff((prev) => ({ ...prev, [key]: e.target.value }))}
                     placeholder="Name / status"
-                    className="mt-1 w-full rounded-md border border-border bg-card px-2 py-1 text-sm font-semibold"
+                    className="no-print mt-1 w-full rounded-md border border-border bg-card px-2 py-1 text-sm font-semibold"
                   />
+                  <div className="print-only mt-1 border-b border-foreground/40 pb-1 text-sm font-semibold">
+                    {signOff[key] || " "}
+                  </div>
                   <div className="mt-1 text-xs text-muted-foreground">{sub}</div>
                 </div>
               ))}
             </div>
           </section>
+          </div>
         </>
       ) : null}
 
