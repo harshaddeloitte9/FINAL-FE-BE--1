@@ -273,15 +273,6 @@ function Performance() {
         )}
       </section>
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        {metricCards.map((m) => (
-          <div key={m.label} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{m.label}</div>
-            <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{m.value}</div>
-          </div>
-        ))}
-      </section>
-
       {!payload && !loading ? (
         <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground shadow-elegant">
           Run the analysis to populate the Stage 5 performance report.

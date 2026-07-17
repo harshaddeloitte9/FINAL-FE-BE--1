@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Legend } from "recharts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
@@ -139,6 +139,21 @@ function Stress() {
     }
   };
 
+  const hasAutoRun = useRef(false);
+  useEffect(() => {
+    if (hasAutoRun.current) return;
+    if (!datasetReady || !targetCol || !algorithm || running) return;
+    hasAutoRun.current = true;
+    void runStressSuite();
+  }, [datasetReady, targetCol, algorithm]);
+
+  useEffect(() => {
+    if (!hasAutoRun.current) return;
+    void runStressSuite();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freq]);
+
+
   const applyShock = async () => {
     if (!shockFeature || !targetCol || !algorithm) return;
     setShockError(null);
@@ -205,55 +220,8 @@ function Stress() {
           nothing is cached between requests), then applies sensitivity, macro-scenario, stability, backtesting, and
           directional checks against it.
         </p>
-        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
-          <div>
-            <label className="text-xs text-muted-foreground">Target column</label>
-            <select
-              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
-              value={targetCol}
-              onChange={(e) => setTargetCol(e.target.value)}
-            >
-              <option value="" disabled>Select target column</option>
-              {columns.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground">Algorithm</label>
-            <select
-              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
-              value={algorithm}
-              onChange={(e) => setAlgorithm(e.target.value)}
-            >
-              <option value="" disabled>Select algorithm</option>
-              {algorithms.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground">Backtest period grouping</label>
-            <select
-              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
-              value={freq}
-              onChange={(e) => setFreq(e.target.value)}
-            >
-              {FREQ_OPTIONS.map((f) => (
-                <option key={f.key} value={f.key}>{f.label}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-end">
-            <button
-              type="button"
-              disabled={!datasetReady || !targetCol || !algorithm || running}
-              onClick={() => void runStressSuite()}
-              className="w-full rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:opacity-50"
-            >
-              {running ? "Running…" : "Run Stress Suite"}
-            </button>
-          </div>
+        <div className="mt-4 text-xs text-muted-foreground">
+          {running ? "Running stress suite…" : report ? "Stress suite complete." : !datasetReady ? "Waiting for an active dataset…" : null}
         </div>
         {runError ? <div className="mt-3 text-xs text-red-500">{runError}</div> : null}
       </section>
@@ -418,12 +386,29 @@ function Stress() {
       </section>
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <h3 className="text-sm font-semibold">Backtesting — predicted vs actual default rate</h3>
-        <p className="text-xs text-muted-foreground">
-          {report?.backtest?.available
-            ? `Grouped by ${report.backtest.freq} · date column: ${report.backtest.date_col}`
-            : report?.backtest?.reason ?? "Run the stress suite to see backtesting results."}
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Backtesting — predicted vs actual default rate</h3>
+            <p className="text-xs text-muted-foreground">
+              {report?.backtest?.available
+                ? `Grouped by ${report.backtest.freq} · date column: ${report.backtest.date_col}`
+                : report?.backtest?.reason ?? "Run the stress suite to see backtesting results."}
+            </p>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground">Backtest period grouping</label>
+            <select
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={freq}
+              disabled={running}
+              onChange={(e) => setFreq(e.target.value)}
+            >
+              {FREQ_OPTIONS.map((f) => (
+                <option key={f.key} value={f.key}>{f.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
         <div className="mt-4 h-72">
           {backtestChartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
