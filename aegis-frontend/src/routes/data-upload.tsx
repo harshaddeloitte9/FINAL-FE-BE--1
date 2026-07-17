@@ -24,6 +24,14 @@ type JoinCandidate = {
   right_table: string;
   right_column: string;
   confidence: number;
+  cardinality: string;
+  reasons: string[];
+};
+
+type PrimaryKeyInfo = {
+  table: string;
+  column: string;
+  confidence: number;
   reasons: string[];
 };
 
@@ -43,7 +51,10 @@ function bestCandidate(candidates: JoinCandidate[], tableA: string, tableB: stri
   // Normalize so left = tableA, right = tableB regardless of which order discovery found it in.
   return found.left_table === tableA
     ? found
-    : { left_table: tableA, left_column: found.right_column, right_table: tableB, right_column: found.left_column, confidence: found.confidence, reasons: found.reasons };
+    : {
+        left_table: tableA, left_column: found.right_column, right_table: tableB, right_column: found.left_column,
+        confidence: found.confidence, cardinality: found.cardinality, reasons: found.reasons,
+      };
 }
 
 function DataUpload() {
@@ -67,6 +78,7 @@ function DataUpload() {
   const [fredApiKey, setFredApiKey] = useState("");
 
   const [candidates, setCandidates] = useState<JoinCandidate[]>([]);
+  const [primaryKeys, setPrimaryKeys] = useState<PrimaryKeyInfo[]>([]);
   const [relLoading, setRelLoading] = useState(false);
   const [relError, setRelError] = useState<string | null>(null);
 
@@ -126,8 +138,9 @@ function DataUpload() {
       form.append("customer_file", custFile);
       form.append("db_file", database);
       form.append("selected_tables", selected.join(","));
-      const resp = await formUpload<{ candidates: JoinCandidate[] }>("/data/integration/relationships", form);
+      const resp = await formUpload<{ primary_keys: PrimaryKeyInfo[]; candidates: JoinCandidate[] }>("/data/integration/relationships", form);
       setCandidates(resp.candidates);
+      setPrimaryKeys(resp.primary_keys ?? []);
 
       const cl = loan ? bestCandidate(resp.candidates, "customer", loan) : null;
       setCustomerLoanJoin(cl ? { left: cl.left_column, right: cl.right_column } : null);
@@ -137,6 +150,7 @@ function DataUpload() {
     } catch (error: any) {
       setRelError(error?.message ?? "Failed to discover relationships between sources.");
       setCandidates([]);
+      setPrimaryKeys([]);
     } finally {
       setRelLoading(false);
     }
@@ -323,17 +337,9 @@ function DataUpload() {
       {/* Relationships */}
       {(loanTable || collateralTable) && customerFile && dbFile ? (
         <div className="rounded-xl border border-border bg-card p-5 shadow-elegant">
-          <div className="flex items-center gap-2">
-            <Link2 className="h-5 w-5 text-muted-foreground" />
-            <h4 className="text-sm font-semibold">Discovered relationships</h4>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Suggested automatically from column names, data types, and value overlap. Override either side if it picked the wrong column.
-          </p>
-          {relLoading ? <p className="mt-3 text-xs text-muted-foreground">Discovering relationships…</p> : null}
-          {relError ? <p className="mt-3 text-xs text-red-500">{relError}</p> : null}
+          {relError ? <p className="mb-3 text-xs text-red-500">{relError}</p> : null}
 
-          <div className="mt-3 space-y-3">
+          <div className="space-y-3">
             {loanTable ? (
               <JoinRow
                 leftLabel="customer"
@@ -342,7 +348,7 @@ function DataUpload() {
                 rightColumns={loanColumns}
                 value={customerLoanJoin}
                 onChange={setCustomerLoanJoin}
-                confidence={bestCandidate(candidates, "customer", loanTable)?.confidence}
+                candidate={bestCandidate(candidates, "customer", loanTable)}
               />
             ) : null}
             {loanTable && collateralTable ? (
@@ -353,7 +359,7 @@ function DataUpload() {
                 rightColumns={collateralColumns}
                 value={loanCollateralJoin}
                 onChange={setLoanCollateralJoin}
-                confidence={bestCandidate(candidates, loanTable, collateralTable)?.confidence}
+                candidate={bestCandidate(candidates, loanTable, collateralTable)}
               />
             ) : null}
           </div>
@@ -488,7 +494,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function JoinRow({
-  leftLabel, rightLabel, leftColumns, rightColumns, value, onChange, confidence,
+  leftLabel, rightLabel, leftColumns, rightColumns, value, onChange, candidate,
 }: {
   leftLabel: string;
   rightLabel: string;
@@ -496,38 +502,52 @@ function JoinRow({
   rightColumns: string[];
   value: { left: string; right: string } | null;
   onChange: (v: { left: string; right: string }) => void;
-  confidence?: number;
+  candidate?: JoinCandidate | null;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm">
-      <span className="font-medium text-foreground">{leftLabel}</span>
-      <select
-        value={value?.left ?? ""}
-        onChange={(e) => onChange({ left: e.target.value, right: value?.right ?? "" })}
-        className="rounded-md border border-input bg-background px-2 py-1 text-xs"
-      >
-        <option value="">select column</option>
-        {leftColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
-      <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
-      <span className="font-medium text-foreground">{rightLabel}</span>
-      <select
-        value={value?.right ?? ""}
-        onChange={(e) => onChange({ left: value?.left ?? "", right: e.target.value })}
-        className="rounded-md border border-input bg-background px-2 py-1 text-xs"
-      >
-        <option value="">select column</option>
-        {rightColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
-      {typeof confidence === "number" ? (
-        <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-          {Math.round(confidence * 100)}% confidence
-        </span>
-      ) : (
-        <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
-          no suggestion — select manually
-        </span>
-      )}
+    <div className="rounded-lg border border-border bg-background px-3 py-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">{leftLabel}</span>
+        <select
+          value={value?.left ?? ""}
+          onChange={(e) => onChange({ left: e.target.value, right: value?.right ?? "" })}
+          className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+        >
+          <option value="">select column</option>
+          {leftColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="font-medium text-foreground">{rightLabel}</span>
+        <select
+          value={value?.right ?? ""}
+          onChange={(e) => onChange({ left: value?.left ?? "", right: e.target.value })}
+          className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+        >
+          <option value="">select column</option>
+          {rightColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        {candidate ? (
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {candidate.cardinality}
+            </span>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {Math.round(candidate.confidence * 100)}% confidence
+            </span>
+          </span>
+        ) : (
+          <span className="ml-auto shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+            no suggestion — select manually
+          </span>
+        )}
+      </div>
+      {candidate?.reasons?.length ? (
+        <ul className="mt-1.5 space-y-0.5 pl-1 text-[11px] text-muted-foreground">
+          {candidate.reasons.map((r, i) => (
+            <li key={i}>— {r}</li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

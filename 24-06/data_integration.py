@@ -204,19 +204,62 @@ def inspect_table(db_path: str | Path, table: str, sample_rows: int = 200) -> di
 # ─────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class PrimaryKeyCandidate:
+    """Step 1 output — a column that structurally qualifies as a primary key
+    (no missing values, 100% unique) in its own table, evaluated completely
+    independently of every other table. This is what makes the engine
+    O(tables x columns) instead of O(columns^2 x tables^2): everything in
+    Step 2 only ever looks at this shortlist, never at the full column set
+    of every table pair."""
+    table: str
+    column: str
+    row_count: int
+    unique_count: int
+    unique_pct: float
+    missing_count: int
+    missing_pct: float
+    dtype: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "table": self.table, "column": self.column, "row_count": self.row_count,
+            "unique_count": self.unique_count, "unique_pct": round(self.unique_pct, 4),
+            "missing_count": self.missing_count, "missing_pct": round(self.missing_pct, 4),
+            "dtype": self.dtype,
+        }
+
+
+@dataclass
+class PrimaryKeyResult:
+    """A primary-key candidate plus a confidence score and plain-language
+    reasons — the object the UI renders as "Primary Key: X, Confidence: Y%,
+    Reason: ...". Confidence starts from the structural qualification
+    (unique + no missing) and is boosted by how strongly some other table's
+    column actually references it (see discover_relationships)."""
+    table: str
+    column: str
+    confidence: float
+    reasons: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"table": self.table, "column": self.column, "confidence": round(self.confidence, 3), "reasons": self.reasons}
+
+
+@dataclass
 class JoinCandidate:
     left_table: str
     left_column: str
     right_table: str
     right_column: str
     confidence: float
+    cardinality: str  # "1:1" or "1:many", from the foreign-key side's own uniqueness
     reasons: list[str]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "left_table": self.left_table, "left_column": self.left_column,
             "right_table": self.right_table, "right_column": self.right_column,
-            "confidence": round(self.confidence, 3), "reasons": self.reasons,
+            "confidence": round(self.confidence, 3), "cardinality": self.cardinality, "reasons": self.reasons,
         }
 
 
@@ -241,79 +284,165 @@ def _dtype_compatible(a: pd.Series, b: pd.Series) -> bool:
     return a_num == b_num
 
 
-def _value_overlap(a: pd.Series, b: pd.Series, sample_size: int = 2000) -> float:
-    a_vals = set(a.dropna().astype(str).sample(min(len(a.dropna()), sample_size), random_state=0)) if len(a.dropna()) else set()
-    b_vals = set(b.dropna().astype(str).sample(min(len(b.dropna()), sample_size), random_state=0)) if len(b.dropna()) else set()
-    if not a_vals or not b_vals:
+def _fk_overlap(fk_series: pd.Series, pk_series: pd.Series, sample_size: int = 5000) -> float:
+    """Directional, per Step 2: % of the FOREIGN key's distinct values that
+    exist in the candidate primary key — not the old symmetric "smaller side"
+    overlap. A FK column that's a proper subset of its PK should score ~100%
+    even if the PK table itself is much larger."""
+    fk_vals = fk_series.dropna().astype(str)
+    if len(fk_vals) > sample_size:
+        fk_vals = fk_vals.sample(sample_size, random_state=0)
+    fk_set = set(fk_vals)
+    pk_set = set(pk_series.dropna().astype(str))
+    if not fk_set or not pk_set:
         return 0.0
-    inter = len(a_vals & b_vals)
-    smaller = min(len(a_vals), len(b_vals))
-    return inter / smaller if smaller else 0.0
+    return len(fk_set & pk_set) / len(fk_set)
 
 
-def score_join(left_col: pd.Series, right_col: pd.Series, left_name: str, right_name: str) -> tuple[float, list[str]]:
+# ─────────────────────────────────────────────────────────────────────────
+# Step 1 — candidate primary key detection (per table, independent)
+# ─────────────────────────────────────────────────────────────────────────
+
+def detect_primary_key_candidates(tables: dict[str, pd.DataFrame]) -> list[PrimaryKeyCandidate]:
+    """A column stays a candidate only if it has zero missing values AND
+    every value is unique. Everything else is discarded immediately —
+    this shortlist is what Step 2 compares against, instead of every column
+    in every table."""
+    candidates: list[PrimaryKeyCandidate] = []
+    for table_name, df in tables.items():
+        n = len(df)
+        if n == 0:
+            continue
+        for col in df.columns:
+            series = df[col]
+            missing = int(series.isna().sum())
+            unique = int(series.nunique(dropna=True))
+            if missing == 0 and unique == n:
+                candidates.append(PrimaryKeyCandidate(
+                    table=table_name, column=str(col), row_count=n,
+                    unique_count=unique, unique_pct=1.0,
+                    missing_count=0, missing_pct=0.0, dtype=str(series.dtype),
+                ))
+        if not any(c.table == table_name for c in candidates):
+            logger.info("detect_primary_key_candidates: no column in '%s' is fully unique + non-null — "
+                        "that table has no primary key candidate and can only appear as a foreign-key side.", table_name)
+    logger.info("detect_primary_key_candidates: %d candidate(s) found across %d table(s)", len(candidates), len(tables))
+    return candidates
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Step 2 + 3 — foreign key detection against the PK shortlist, and scoring
+# ─────────────────────────────────────────────────────────────────────────
+
+def score_foreign_key(fk_series: pd.Series, pk_series: pd.Series, fk_name: str, pk_name: str) -> tuple[float, float, str, list[str]]:
+    """Returns (confidence, overlap, cardinality, reasons). Weights, per the
+    brief: overlap highest, then cardinality, then dtype, then name
+    similarity lowest — 0.55 / 0.20 / 0.15 / 0.10, so a perfect match on
+    every dimension caps at 1.0."""
     reasons: list[str] = []
-    score = 0.0
 
-    name_sim = _name_similarity(left_name, right_name)
+    overlap = _fk_overlap(fk_series, pk_series)
+    if overlap <= 0:
+        return 0.0, 0.0, "n/a", ["no overlapping values with this primary key"]
+    reasons.append(f"{round(overlap * 100, 1)}% of values exist in the primary key column")
+
+    dtype_ok = _dtype_compatible(fk_series, pk_series)
+    reasons.append("compatible data types" if dtype_ok else "data types differ")
+
+    fk_non_null = fk_series.dropna()
+    has_duplicates = bool(fk_non_null.duplicated().any()) if len(fk_non_null) else False
+    cardinality = "1:many" if has_duplicates else "1:1"
+    reasons.append(f"{cardinality} relationship pattern (foreign key column {'is' if cardinality == '1:1' else 'is not'} itself unique)")
+
+    name_sim = _name_similarity(fk_name, pk_name)
     if name_sim >= 0.5:
-        score += 0.35 * name_sim
-        reasons.append(f"column names are similar ('{left_name}' ~ '{right_name}')")
+        reasons.append(f"column names are similar ('{fk_name}' ~ '{pk_name}')")
 
-    if _dtype_compatible(left_col, right_col):
-        score += 0.15
-    else:
-        score -= 0.15
-
-    left_unique = left_col.nunique(dropna=True) / len(left_col) if len(left_col) else 0
-    right_unique = right_col.nunique(dropna=True) / len(right_col) if len(right_col) else 0
-    if max(left_unique, right_unique) >= 0.9:
-        score += 0.2
-        reasons.append("one side looks like a primary key (high uniqueness)")
-
-    overlap = _value_overlap(left_col, right_col)
-    if overlap > 0:
-        score += 0.35 * overlap
-        reasons.append(f"~{round(overlap * 100)}% of values overlap between the two columns")
-
-    return max(0.0, min(1.0, score)), reasons
+    score = 0.55 * overlap + 0.20 + (0.15 if dtype_ok else -0.15) + 0.10 * name_sim
+    return max(0.0, min(1.0, score)), overlap, cardinality, reasons
 
 
 def discover_relationships(
     tables: dict[str, pd.DataFrame],
-    min_confidence: float = 0.3,
-) -> list[JoinCandidate]:
-    """Scores every column pair across every pair of tables and returns
-    ranked join candidates. Callers should treat candidates with
-    confidence >= ~0.6 as safe defaults, and anything lower as "ask the
-    user to confirm" (see the /data/integration/relationships endpoint)."""
-    names = list(tables.keys())
-    candidates: list[JoinCandidate] = []
+    min_confidence: float = 0.2,
+) -> tuple[list[PrimaryKeyResult], list[JoinCandidate]]:
+    """Two-stage discovery:
 
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            left_name, right_name = names[i], names[j]
-            left_df, right_df = tables[left_name], tables[right_name]
-            best_for_pair: Optional[JoinCandidate] = None
+      Step 1: detect_primary_key_candidates() — independent per table.
+      Step 2: for every OTHER table's columns, score against only the PK
+              shortlist (not every column in every table).
+      Step 3: rank by confidence (overlap-dominated).
+      Step 4: also derive a confidence + reasons for each primary key
+              itself, boosted by how strongly it's actually referenced.
 
-            for lcol in left_df.columns:
-                for rcol in right_df.columns:
-                    try:
-                        conf, reasons = score_join(left_df[lcol], right_df[rcol], str(lcol), str(rcol))
-                    except Exception as exc:
-                        logger.warning("score_join failed for %s.%s vs %s.%s: %s", left_name, lcol, right_name, rcol, exc)
-                        continue
-                    if conf < min_confidence:
-                        continue
-                    cand = JoinCandidate(left_name, str(lcol), right_name, str(rcol), conf, reasons)
-                    if best_for_pair is None or cand.confidence > best_for_pair.confidence:
-                        best_for_pair = cand
+    Cost is O(tables x columns) for Step 1, then O(pk_candidates x other
+    tables' columns) for Step 2 — versus the old O(columns^2 x tables^2)
+    all-pairs comparison.
+    """
+    pk_candidates = detect_primary_key_candidates(tables)
+    if not pk_candidates:
+        logger.warning("discover_relationships: no primary-key candidates found in any table — "
+                        "no column has zero missing values and 100%% uniqueness. No relationships can be inferred.")
+        return [], []
 
-            if best_for_pair is not None:
-                candidates.append(best_for_pair)
+    join_candidates: list[JoinCandidate] = []
+    # Track the strongest reference into each PK, so we can explain *why*
+    # that PK is trustworthy (Step 4) instead of just "it's unique".
+    best_reference: dict[tuple[str, str], tuple[float, str, str]] = {}
 
-    candidates.sort(key=lambda c: c.confidence, reverse=True)
-    return candidates
+    for pk in pk_candidates:
+        pk_series = tables[pk.table][pk.column]
+        for fk_table, fk_df in tables.items():
+            if fk_table == pk.table:
+                continue
+            for fk_col in fk_df.columns:
+                try:
+                    conf, overlap, cardinality, reasons = score_foreign_key(fk_df[fk_col], pk_series, str(fk_col), pk.column)
+                except Exception as exc:
+                    logger.warning("score_foreign_key failed for %s.%s -> %s.%s: %s", fk_table, fk_col, pk.table, pk.column, exc)
+                    continue
+                if conf < min_confidence:
+                    continue
+
+                join_candidates.append(JoinCandidate(
+                    left_table=fk_table, left_column=str(fk_col),
+                    right_table=pk.table, right_column=pk.column,
+                    confidence=conf, cardinality=cardinality, reasons=reasons,
+                ))
+
+                key = (pk.table, pk.column)
+                current_best = best_reference.get(key)
+                if current_best is None or overlap > current_best[0]:
+                    best_reference[key] = (overlap, fk_table, str(fk_col))
+
+    # A foreign-key column should reference exactly one primary key — if a
+    # column scored against multiple PK candidates, keep only its best match
+    # rather than presenting the same column as "maybe this, maybe that".
+    best_per_fk_column: dict[tuple[str, str], JoinCandidate] = {}
+    for cand in join_candidates:
+        key = (cand.left_table, cand.left_column)
+        current = best_per_fk_column.get(key)
+        if current is None or cand.confidence > current.confidence:
+            best_per_fk_column[key] = cand
+    join_candidates = sorted(best_per_fk_column.values(), key=lambda c: c.confidence, reverse=True)
+
+    pk_results: list[PrimaryKeyResult] = []
+    for pk in pk_candidates:
+        reasons = ["100% unique values", "No missing values"]
+        ref = best_reference.get((pk.table, pk.column))
+        if ref:
+            overlap, fk_table, fk_col = ref
+            reasons.append(f"Referenced by the {fk_table} table")
+            reasons.append(f"{round(overlap * 100, 1)}% value overlap with {fk_table}.{fk_col}")
+            confidence = min(0.99, 0.80 + 0.19 * overlap)
+        else:
+            reasons.append("Not yet referenced by any other selected table")
+            confidence = 0.80
+        pk_results.append(PrimaryKeyResult(table=pk.table, column=pk.column, confidence=confidence, reasons=reasons))
+
+    pk_results.sort(key=lambda r: r.confidence, reverse=True)
+    logger.info("discover_relationships: %d primary key(s), %d join candidate(s)", len(pk_results), len(join_candidates))
+    return pk_results, join_candidates
 
 
 # ─────────────────────────────────────────────────────────────────────────

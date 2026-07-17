@@ -1188,8 +1188,11 @@ async def integration_relationships(
         if len(tables) < 2:
             raise HTTPException(status_code=400, detail="At least two sources are required to discover relationships.")
 
-        candidates = di.discover_relationships(tables)
-        return {"candidates": [c.as_dict() for c in candidates]}
+        primary_keys, candidates = di.discover_relationships(tables)
+        return {
+            "primary_keys": [pk.as_dict() for pk in primary_keys],
+            "candidates": [c.as_dict() for c in candidates],
+        }
     except di.DataIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
