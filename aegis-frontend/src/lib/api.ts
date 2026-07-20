@@ -13,6 +13,22 @@ export class ApiError extends Error {
   }
 }
 
+// FastAPI error responses are {"detail": "..."} (or occasionally a list of
+// validation errors) — pull that out so ApiError.message is the actual
+// reason ("FRED_API_KEY environment variable is not set on the server")
+// instead of just "500 Internal Server Error", which told the user nothing
+// about what to fix.
+function extractDetail(status: number, statusText: string, body: unknown): string {
+  if (body && typeof body === "object" && "detail" in (body as any)) {
+    const detail = (body as any).detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail) && detail.length > 0) {
+      return detail.map((d) => (typeof d === "string" ? d : d?.msg ?? JSON.stringify(d))).join("; ");
+    }
+  }
+  return `${status} ${statusText}`;
+}
+
 export async function api<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -27,7 +43,7 @@ export async function api<T = unknown>(
   const text = await res.text();
   const body = text ? safeJson(text) : undefined;
   if (!res.ok) {
-    throw new ApiError(res.status, `${res.status} ${res.statusText}`, body);
+    throw new ApiError(res.status, extractDetail(res.status, res.statusText, body), body);
   }
   return body as T;
 }
@@ -49,7 +65,7 @@ export async function formUpload<T = unknown>(path: string, form: FormData): Pro
     const body = text ? safeJson(text) : undefined;
     if (!res.ok) {
       console.error("formUpload: response error", res.status, body);
-      throw new ApiError(res.status, `${res.status} ${res.statusText}`, body);
+      throw new ApiError(res.status, extractDetail(res.status, res.statusText, body), body);
     }
     return body as T;
   } catch (err) {
