@@ -479,7 +479,11 @@ function Profiling() {
                   })}
                 </div>
                 <div className="h-72">
-                  <PlotlyChart figure={classDistributionFigure} style={{ height: "100%", minHeight: "100%" }} />
+                  <PlotlyChart
+                    figure={classDistributionFigure}
+                    style={{ height: "100%", minHeight: "100%" }}
+                    config={{ displayModeBar: false }}
+                  />
                 </div>
               </div>
             ) : (

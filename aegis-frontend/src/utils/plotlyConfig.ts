@@ -17,11 +17,8 @@ export const plotlyConfig: any = {
       "toImage"
     ],
     [
-      "zoom2d",
-      "pan2d",
       "zoomIn2d",
       "zoomOut2d",
-      "autoScale2d",
       "resetScale2d"
     ]
   ],

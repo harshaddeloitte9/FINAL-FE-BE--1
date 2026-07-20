@@ -5,9 +5,10 @@ interface PlotlyChartProps {
   figure: any;
   useContainerWidth?: boolean;
   style?: React.CSSProperties;
+  config?: Record<string, any>;
 }
 
-const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = true, style }) => {
+const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = true, style, config }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const plotlyRef = useRef<any>(null);
 
@@ -34,7 +35,8 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
         try {
           // Pass the shared Plotly config so every chart uses the same ModeBar
           // and interactivity settings. Do not modify figure.data or figure.layout.
-          plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, plotlyConfig);
+          const mergedConfig = { ...plotlyConfig, ...(config ?? {}) };
+          plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, mergedConfig);
         } catch (err) {
           console.error("PlotlyChart: failed to render figure", err);
         }
@@ -53,7 +55,7 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
         });
       }
     };
-  }, [figure]);
+  }, [figure, config]);
 
   const containerStyle: React.CSSProperties = style?.height
     ? { width: "100%", ...style }
