@@ -74,6 +74,7 @@ function Training() {
     setComparisonResults,
     setSelectedComparisonModel,
     preprocessingResult,
+    decisionThreshold,
   } = useDataset();
 
   // ── Split config: owned by Preprocessing (Step 3). Training only reads it. ──
@@ -305,6 +306,10 @@ function Training() {
     if (Object.keys(config.manual_params).length > 0) {
       trainForm.append("manual_params", JSON.stringify(config.manual_params));
     }
+    // PD classification cut-off from Settings — passed explicitly so
+    // evaluation metrics use the reviewer's chosen threshold instead of
+    // always auto-selecting the F1-maximizing one.
+    trainForm.append("threshold", String(decisionThreshold));
 
     const trainResponse = await formUpload("/models/train", trainForm);
     if (!trainResponse?.training_info || !trainResponse?.split_stats || !trainResponse?.model_artifact) {

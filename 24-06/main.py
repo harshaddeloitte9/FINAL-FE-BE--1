@@ -2210,6 +2210,7 @@ async def train_model_endpoint(
     synthetic_samples: Optional[int] = Form(None),
     use_oot: bool = Form(False),
     date_col: Optional[str] = Form(None),
+    threshold: Optional[float] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
@@ -2300,7 +2301,7 @@ async def train_model_endpoint(
             y_proba = None
 
     metrics, evaluation_data = _build_evaluation_data(
-        y_test.values, y_pred, y_proba, task_type, threshold=None,
+        y_test.values, y_pred, y_proba, task_type, threshold=threshold,
         dates=dates_test, date_columns=[origination_date_col] if origination_date_col else [],
     )
 
