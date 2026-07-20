@@ -84,6 +84,7 @@ function DataUpload() {
   // ── Macroeconomic data (FRED) — opt-in only ────────────────────────────────
   const [macroEnabled, setMacroEnabled] = useState(false);
   const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
+  const [macroCandidatesLoading, setMacroCandidatesLoading] = useState(false);
   const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
   const [macroColumns, setMacroColumns] = useState<string[]>([]);
   const [macroDateColUsed, setMacroDateColUsed] = useState<string | null>(null);
@@ -127,8 +128,15 @@ function DataUpload() {
 
   // Fetch date-column candidates once macro data is switched on and a
   // customer file is available — lightweight, only runs when needed.
+  // FRED needs a date to know which time period's economic data to attach to
+  // each record, so the dropdown is always pre-filled with the best guess
+  // (same detect_macro_date_col() auto-detection the Streamlit app uses) —
+  // it only falls back to asking the user when nothing in the dataset looks
+  // like a real date column.
   useEffect(() => {
     if (!macroEnabled || !customerFile) return;
+    setMacroCandidatesLoading(true);
+    setMacroError(null);
     (async () => {
       try {
         const form = new FormData();
@@ -137,10 +145,24 @@ function DataUpload() {
           "/data/macro/date-columns",
           form,
         );
-        setMacroCandidates(res.candidates ?? []);
-        setSelectedMacroDateCol(res.default_date_col ?? (res.candidates?.[0]?.column ?? ""));
-      } catch {
-        // Non-fatal — the macro section just won't have a default selection.
+        const candidateList = res.candidates ?? [];
+        setMacroCandidates(candidateList);
+        const bestGuess =
+          res.default_date_col
+          ?? candidateList.find((c) => c.is_preferred)?.column
+          ?? candidateList[0]?.column
+          ?? "";
+        setSelectedMacroDateCol(bestGuess);
+      } catch (err) {
+        setMacroCandidates([]);
+        setSelectedMacroDateCol("");
+        setMacroError(
+          err instanceof Error
+            ? `Could not detect a date column: ${err.message}`
+            : "Could not detect a date column — pick one manually below.",
+        );
+      } finally {
+        setMacroCandidatesLoading(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -421,22 +443,29 @@ function DataUpload() {
                   <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Loan origination date column
                   </label>
-                  <select
-                    className="mt-2 w-full max-w-md rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                    value={selectedMacroDateCol}
-                    onChange={(e) => setSelectedMacroDateCol(e.target.value)}
-                  >
-                    <option value="">— none —</option>
-                    {macroCandidates.map(({ column, is_preferred }) => (
-                      <option key={column} value={column}>
-                        {is_preferred ? `⭐ ${column} (origination/loan date)` : column}
-                      </option>
-                    ))}
-                  </select>
+                  {macroCandidatesLoading ? (
+                    <div className="mt-2 flex w-full max-w-md items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
+                      <Loader className="h-4 w-4 animate-spin" />
+                      Detecting date column…
+                    </div>
+                  ) : (
+                    <select
+                      className="mt-2 w-full max-w-md rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                      value={selectedMacroDateCol}
+                      onChange={(e) => setSelectedMacroDateCol(e.target.value)}
+                    >
+                      <option value="">— select a date column —</option>
+                      {macroCandidates.map(({ column, is_preferred }) => (
+                        <option key={column} value={column}>
+                          {is_preferred ? `⭐ ${column} (origination/loan date)` : column}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
                 <button
                   type="button"
-                  disabled={!selectedMacroDateCol || macroLoading}
+                  disabled={!selectedMacroDateCol || macroLoading || macroCandidatesLoading}
                   className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={fetchMacroFeatures}
                 >
