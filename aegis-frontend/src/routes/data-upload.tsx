@@ -81,8 +81,7 @@ function DataUpload() {
   const [loanTable, setLoanTable] = useState<string>("");
   const [collateralTable, setCollateralTable] = useState<string>("");
 
-  // ── Macroeconomic data (FRED) — opt-in only ────────────────────────────────
-  const [macroEnabled, setMacroEnabled] = useState(false);
+  // ── Macroeconomic data (FRED) ───────────────────────────────────────────────
   const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
   const [macroCandidatesLoading, setMacroCandidatesLoading] = useState(false);
   const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
@@ -126,15 +125,14 @@ function DataUpload() {
     if (dbTables) void discoverRelationships(f, dbFile, loanTable, collateralTable);
   };
 
-  // Fetch date-column candidates once macro data is switched on and a
-  // customer file is available — lightweight, only runs when needed.
+  // Fetch date-column candidates once a customer file is available.
   // FRED needs a date to know which time period's economic data to attach to
   // each record, so the dropdown is always pre-filled with the best guess
   // (same detect_macro_date_col() auto-detection the Streamlit app uses) —
   // it only falls back to asking the user when nothing in the dataset looks
   // like a real date column.
   useEffect(() => {
-    if (!macroEnabled || !customerFile) return;
+    if (!customerFile) return;
     setMacroCandidatesLoading(true);
     setMacroError(null);
     (async () => {
@@ -166,7 +164,7 @@ function DataUpload() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [macroEnabled, customerFile]);
+  }, [customerFile]);
 
   const fetchMacroFeatures = async () => {
     const baseFile = originalCustomerFileRef.current ?? customerFile;
@@ -405,23 +403,17 @@ function DataUpload() {
           ) : null}
         </div>
 
-        {/* Macro data — opt-in only */}
+        {/* Macro data */}
         <div className="rounded-xl border border-border bg-card p-5 shadow-elegant md:col-span-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <TrendingUp className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <h4 className="text-sm font-semibold">Macroeconomic data</h4>
-                <p className="text-xs text-muted-foreground">Fetches macroeconomic indicators (interest rates, unemployment, inflation, etc.) from FRED and matches them to each record by date.</p>
-              </div>
+          <div className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-muted-foreground" />
+            <div>
+              <h4 className="text-sm font-semibold">Macroeconomic data</h4>
+              <p className="text-xs text-muted-foreground">Fetches macroeconomic indicators (interest rates, unemployment, inflation, etc.) from FRED and matches them to each record by date.</p>
             </div>
-            <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">
-              <input type="checkbox" checked={macroEnabled} onChange={(e) => setMacroEnabled(e.target.checked)} className="h-4 w-4 accent-primary" />
-              Include macro data
-            </label>
           </div>
 
-          {macroEnabled && customerFile ? (
+          {customerFile ? (
             macroColumns.length > 0 ? (
               <div className="mt-4 space-y-3">
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
