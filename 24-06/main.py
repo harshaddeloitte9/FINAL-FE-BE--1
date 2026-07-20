@@ -334,6 +334,19 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
         hyperparams_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "clean_params.json"
         demo_label = "Demo A"
 
+    # Derive the Risk Tier banner from the same model_tier used above (and
+    # edited via the Model Metadata dropdown) so the two never disagree.
+    # Cadence wording mirrors Stage 8's monitoring-frequency-by-tier logic
+    # (see _build_stage8_findings's "driven by model tier" block) rather than
+    # inventing new phrasing.
+    tier_value = model_data["model_tier"].split("—")[0].strip()
+    if "1" in tier_value or "High" in model_data["model_tier"]:
+        tier_description = "High risk — monthly independent validation required."
+    elif "2" in tier_value or "Medium" in model_data["model_tier"]:
+        tier_description = "Material — quarterly independent validation required."
+    else:
+        tier_description = "Standard — semi-annual independent validation required."
+
     try:
         mdd_text = mdd_file.read_text(encoding="utf-8")
     except Exception:
@@ -387,8 +400,8 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
             },
             "riskTier": {
                 "title": "Risk tier",
-                "value": "Tier 2",
-                "description": "Material — quarterly independent validation required.",
+                "value": tier_value,
+                "description": tier_description,
             },
             "artifacts": [
                 {"fileName": "retail_pd_validation.csv", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 · 09:13", "required": True},
