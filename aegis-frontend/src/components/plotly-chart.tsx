@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import plotlyConfig from "@/utils/plotlyConfig";
 
 interface PlotlyChartProps {
   figure: any;
@@ -31,10 +32,9 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
       }
       if (containerRef.current) {
         try {
-          plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, {
-            responsive: true,
-            displayModeBar: false,
-          });
+          // Pass the shared Plotly config so every chart uses the same ModeBar
+          // and interactivity settings. Do not modify figure.data or figure.layout.
+          plotlyRef.current = Plotly.newPlot(containerRef.current, figure.data, figure.layout, plotlyConfig);
         } catch (err) {
           console.error("PlotlyChart: failed to render figure", err);
         }
@@ -55,9 +55,11 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
     };
   }, [figure]);
 
-  return (
-    <div ref={containerRef} style={{ width: "100%", minHeight: 320, ...style }} />
-  );
+  const containerStyle: React.CSSProperties = style?.height
+    ? { width: "100%", ...style }
+    : { width: "100%", minHeight: 320, ...style };
+
+  return <div ref={containerRef} style={containerStyle} />;
 };
 
 export default PlotlyChart;

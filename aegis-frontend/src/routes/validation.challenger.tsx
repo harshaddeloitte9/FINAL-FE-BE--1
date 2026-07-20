@@ -13,8 +13,7 @@ import {
   MinusCircle,
   Database,
 } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
+import PlotlyChart from "@/components/plotly-chart";
 import { formUpload, ApiError } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
@@ -297,6 +296,51 @@ function ModelReplicationPanel() {
       .map(([feature, drop]) => ({ feature, drop: Number((drop as number).toFixed(4)) }));
   }, [replication]);
 
+  const seedFigure = React.useMemo(() => {
+    if (!seedChartData.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          x: seedChartData.map((d) => d.seed),
+          y: seedChartData.map((d) => d.auc),
+          marker: { color: "oklch(0.55 0.02 240)" },
+          hovertemplate: "%{y:.4f}<extra></extra>",
+          name: "AUC",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 11 }, automargin: true },
+        yaxis: { title: { text: "AUC" }, tickfont: { size: 11 }, range: [0, 1] },
+        height: 224,
+      },
+    };
+  }, [seedChartData]);
+
+  const ablationFigure = React.useMemo(() => {
+    if (!ablationChartData.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          orientation: "h",
+          x: ablationChartData.map((d) => d.drop),
+          y: ablationChartData.map((d) => d.feature),
+          marker: { color: "oklch(0.76 0.18 130)" },
+          hovertemplate: "%{y}: %{x:.4f}<extra></extra>",
+          name: "AUC drop",
+        },
+      ],
+      layout: {
+        margin: { l: 140, r: 20, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 11 }, automargin: true },
+        yaxis: { tickfont: { size: 11 }, automargin: true, autorange: "reversed" },
+        height: 224,
+      },
+    };
+  }, [ablationChartData]);
+
   const metrics = replication?.result?.metrics ?? {};
 
   return (
@@ -568,38 +612,22 @@ function ModelReplicationPanel() {
 
               {/* Seed stability + ablation charts */}
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                {seedChartData.length > 0 && (
+                {seedFigure && (
                   <div>
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Seed stability (R4.6)</h4>
                     <div className="mt-2 h-56">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={seedChartData}>
-                          <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                          <XAxis dataKey="seed" tickLine={false} axisLine={false} fontSize={11} />
-                          <YAxis tickLine={false} axisLine={false} fontSize={11} domain={[0, 1]} />
-                          <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                          <Bar dataKey="auc" fill="oklch(0.55 0.02 240)" radius={[6, 6, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
+                      <PlotlyChart figure={seedFigure} style={{ height: "100%" }} />
                     </div>
                   </div>
                 )}
 
-                {ablationChartData.length > 0 && (
+                {ablationFigure && (
                   <div>
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                       Top feature ablation — AUC drop (R4.5)
                     </h4>
                     <div className="mt-2 h-56">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={ablationChartData} layout="vertical" margin={{ left: 24 }}>
-                          <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                          <XAxis type="number" tickLine={false} axisLine={false} fontSize={11} />
-                          <YAxis type="category" dataKey="feature" tickLine={false} axisLine={false} fontSize={11} width={110} />
-                          <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                          <Bar dataKey="drop" fill="oklch(0.76 0.18 130)" radius={[0, 6, 6, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
+                      <PlotlyChart figure={ablationFigure} style={{ height: "100%" }} />
                     </div>
                   </div>
                 )}

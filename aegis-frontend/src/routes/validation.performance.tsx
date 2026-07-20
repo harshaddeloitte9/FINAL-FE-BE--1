@@ -5,10 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowRight, AlertCircle, Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { rocCurve, prCurve, scoreDistribution } from "@/lib/mock-data";
 import { useDataset } from "@/lib/app-context";
-import {
-  LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar,
-} from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
+import PlotlyChart from "@/components/plotly-chart";
 import { ApiError, formUpload } from "@/lib/api";
 
 export const Route = createFileRoute("/validation/performance")({
@@ -200,6 +197,195 @@ function Performance() {
     ];
   }, [benchmarkComparison]);
 
+  const rocFigure = React.useMemo(() => {
+    const fpr = rocPoints.map((point) => point.fpr);
+    const tpr = rocPoints.map((point) => point.tpr);
+    const diagonal = rocPoints.map((point) => point.fpr);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: fpr,
+          y: tpr,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "TPR %{y:.3f}<br>FPR %{x:.3f}<extra></extra>",
+          name: "ROC",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: diagonal,
+          y: diagonal,
+          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Diagonal",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "FPR", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "TPR", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [rocPoints]);
+
+  const prFigure = React.useMemo(() => {
+    const recall = prPoints.map((point) => point.recall);
+    const precision = prPoints.map((point) => point.precision);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: recall,
+          y: precision,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "Precision %{y:.3f}<br>Recall %{x:.3f}<extra></extra>",
+          name: "PR",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Recall", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Precision", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [prPoints]);
+
+  const calibrationFigure = React.useMemo(() => {
+    const pred = calibrationPoints.map((point) => point.predicted_rate);
+    const actual = calibrationPoints.map((point) => point.actual_rate);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: pred,
+          y: actual,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "Actual %{y:.3f}<br>Pred %{x:.3f}<extra></extra>",
+          name: "Actual",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: pred,
+          y: pred,
+          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Perfect",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Predicted rate", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Observed rate", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [calibrationPoints]);
+
+  const scoreDistributionFigure = React.useMemo(() => {
+    const bins = scoreBins.map((bin) => bin.bin);
+    const good = scoreBins.map((bin) => bin.good ?? 0);
+    const bad = scoreBins.map((bin) => bin.bad ?? 0);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: bins,
+          y: good,
+          name: "Good",
+          marker: { color: "oklch(0.76 0.18 130)" },
+        },
+        {
+          type: "bar",
+          x: bins,
+          y: bad,
+          name: "Bad",
+          marker: { color: "oklch(0.6 0.22 27)" },
+        },
+      ],
+      layout: {
+        barmode: "stack",
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Score bin", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Count", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [scoreBins]);
+
+  const benchmarkComparisonFigure = React.useMemo(() => {
+    const metrics = comparisonChartData.map((row) => row.metric);
+    const champion = comparisonChartData.map((row) => row.champion);
+    const challenger = comparisonChartData.map((row) => row.challenger);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: metrics,
+          y: champion,
+          name: "Champion",
+          marker: { color: "oklch(0.76 0.18 130)" },
+        },
+        {
+          type: "bar",
+          x: metrics,
+          y: challenger,
+          name: "Challenger",
+          marker: { color: "oklch(0.55 0.02 240)" },
+        },
+      ],
+      layout: {
+        barmode: "group",
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Metric", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Value", tickfont: { size: 11 }, showline: false, range: [0, 1] },
+        height: 320,
+      },
+    };
+  }, [comparisonChartData]);
+
+  const benchmarkOverlayFigure = React.useMemo(() => {
+    const fpr = benchmarkOverlayData.map((point) => point.fpr);
+    const champion = benchmarkOverlayData.map((point) => point.champion);
+    const benchmark = benchmarkOverlayData.map((point) => point.benchmark);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: fpr,
+          y: champion,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "Champion TPR %{y:.3f}<br>FPR %{x:.3f}<extra></extra>",
+          name: "Champion",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: fpr,
+          y: benchmark,
+          line: { color: "oklch(0.55 0.02 240)", width: 2.5 },
+          hovertemplate: "Benchmark TPR %{y:.3f}<br>FPR %{x:.3f}<extra></extra>",
+          name: "Benchmark",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "FPR", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "TPR", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [benchmarkOverlayData]);
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -307,28 +493,11 @@ function Performance() {
 
             <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="ROC curve" sub={`AUC ${formatValue(payload.report.roc_curve.auc, 3)}`}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={rocPoints.map((point) => ({ ...point, diagonal: point.fpr }))}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="fpr" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Line type="monotone" dataKey="tpr" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                    <Line type="linear" dataKey="diagonal" stroke="oklch(0.6 0.01 240)" strokeDasharray="4 4" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={rocFigure} style={{ height: "100%" }} />
               </Card>
 
               <Card title="Precision–Recall" sub={`Average precision ${formatValue(payload.report.pr_curve.average_precision, 3)}`}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={prPoints}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="recall" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Line type="monotone" dataKey="precision" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={prFigure} style={{ height: "100%" }} />
               </Card>
 
               <Card title="Confusion matrix" sub="Threshold 0.50">
@@ -361,29 +530,11 @@ function Performance() {
               </Card>
 
               <Card title="Calibration" sub="Predicted vs observed default rate">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={calibrationPoints.map((point) => ({ pred: point.predicted_rate, actual: point.actual_rate, perfect: point.predicted_rate }))}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="pred" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Line type="monotone" dataKey="actual" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                    <Line type="linear" dataKey="perfect" stroke="oklch(0.6 0.01 240)" strokeDasharray="4 4" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={calibrationFigure} style={{ height: "100%" }} />
               </Card>
 
               <Card title="Score distribution" sub={`Hold-out set · KS ${formatValue(payload.report.metrics.ks, 3)}`}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={scoreBins.map((bin) => ({ bin: bin.bin, good: bin.good ?? 0, bad: bin.bad ?? 0 }))}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="bin" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Bar dataKey="good" stackId="a" fill="oklch(0.76 0.18 130)" />
-                    <Bar dataKey="bad" stackId="a" fill="oklch(0.6 0.22 27)" />
-                  </BarChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={scoreDistributionFigure} style={{ height: "100%" }} />
               </Card>
             </section>
           </TabsContent>
@@ -446,29 +597,11 @@ function Performance() {
               </Card>
 
               <Card title="Champion vs Challenger comparison" sub="Metric deltas from the benchmark response">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={comparisonChartData}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="metric" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} domain={[0, 1]} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Bar dataKey="champion" fill="oklch(0.76 0.18 130)" radius={[6, 6, 0, 0]} />
-                    <Bar dataKey="challenger" fill="oklch(0.55 0.02 240)" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={benchmarkComparisonFigure} style={{ height: "100%" }} />
               </Card>
 
               <Card title="ROC overlay chart" sub="Champion vs selected benchmark model">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={benchmarkOverlayData}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                    <XAxis dataKey="fpr" tickLine={false} axisLine={false} fontSize={11} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                    <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                    <Line type="monotone" dataKey="champion" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="benchmark" stroke="oklch(0.55 0.02 240)" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <PlotlyChart figure={benchmarkOverlayFigure} style={{ height: "100%" }} />
               </Card>
             </section>
           </TabsContent>

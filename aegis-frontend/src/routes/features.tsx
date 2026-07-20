@@ -2,7 +2,6 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw, Table as TableIcon, Trash2, Hash, Tag } from "lucide-react";
 import { computeFeatureRemovalProposal } from "@/lib/feature-removal";

@@ -6,15 +6,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  ResponsiveContainer,
-} from "recharts";
+import PlotlyChart from "@/components/plotly-chart";
 
 export const Route = createFileRoute("/training")({
   head: () => ({ meta: [{ title: "Training — Aegis Credit" }] }),
@@ -475,6 +467,33 @@ function Training() {
     });
   }, [splitStats, classLabels]);
 
+  const splitClassFigure = useMemo(() => {
+    if (!splitClassData || splitClassData.length === 0) return null;
+    const x = splitClassData.map((row) => row.split as string);
+
+    const traces = classLabels.map((label, index) => ({
+      type: "bar",
+      name: label === "0" ? "Class 0" : label === "1" ? "Class 1" : label,
+      x,
+      y: splitClassData.map((row) => Number(row[label] ?? 0)),
+      marker: {
+        color: index === 0 ? "#22c55e" : index === 1 ? "#ef4444" : index === 2 ? "#3b82f6" : "#f59e0b",
+      },
+      hovertemplate: "%{x}<br>%{y:.0f}<extra></extra>",
+    }));
+
+    return {
+      data: traces,
+      layout: {
+        barmode: "stack",
+        margin: { t: 10, r: 12, l: 0, b: 0 },
+        xaxis: { title: "", automargin: true, tickfont: { color: "#9ca3af" }, linecolor: "#9ca3af" },
+        yaxis: { title: "", automargin: true, tickfont: { color: "#9ca3af" }, linecolor: "#9ca3af" },
+        legend: { orientation: "h", y: 1.2 },
+      },
+    };
+  }, [splitClassData, classLabels]);
+
   useEffect(() => {
     setTrainingConfig(config);
   }, [config, setTrainingConfig]);
@@ -844,22 +863,9 @@ function Training() {
             <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
               <h2 className="text-base font-semibold mb-4">Class Distribution per Split</h2>
               <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={splitClassData} margin={{ top: 10, right: 12, left: -12, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                    <XAxis dataKey="split" stroke="#9ca3af" />
-                    <YAxis stroke="#9ca3af" />
-                    <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} formatter={(value: any) => value.toLocaleString?.() ?? value} />
-                    {classLabels.map((label, index) => (
-                      <Bar
-                        key={label}
-                        dataKey={label}
-                        stackId="a"
-                        fill={index === 0 ? "#22c55e" : index === 1 ? "#ef4444" : index === 2 ? "#3b82f6" : "#f59e0b"}
-                      />
-                    ))}
-                  </BarChart>
-                </ResponsiveContainer>
+                <div className="h-72">
+                  <PlotlyChart figure={splitClassFigure} style={{ height: "100%", minHeight: "100%" }} />
+                </div>
               </div>
               <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
                 {(() => {

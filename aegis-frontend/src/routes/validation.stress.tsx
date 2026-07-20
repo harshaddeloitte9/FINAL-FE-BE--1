@@ -1,11 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Legend } from "recharts";
+import PlotlyChart from "@/components/plotly-chart";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
 
 export const Route = createFileRoute("/validation/stress")({
   head: () => ({ meta: [{ title: "Stress & Backtesting — Aegis Credit" }] }),
@@ -173,6 +172,40 @@ function Stress() {
     }
   };
 
+  const psiChartData = useMemo(() => {
+    const bins = report?.psi?.bins ?? [];
+    return bins.map((b: any) => ({ bin: b.bin, "Train %": b.train_pct, "Test %": b.test_pct }));
+  }, [report]);
+
+  const psiFigure = useMemo(() => {
+    if (!psiChartData.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          x: psiChartData.map((row) => row.bin),
+          y: psiChartData.map((row) => row["Train %"]),
+          name: "Train %",
+          marker: { color: "oklch(0.6 0.16 260)" },
+        },
+        {
+          type: "bar",
+          x: psiChartData.map((row) => row.bin),
+          y: psiChartData.map((row) => row["Test %"]),
+          name: "Test %",
+          marker: { color: "oklch(0.6 0.18 135)" },
+        },
+      ],
+      layout: {
+        barmode: "group",
+        margin: { l: 40, r: 20, t: 20, b: 60 },
+        xaxis: { tickfont: { size: 9 }, automargin: true, tickangle: -30 },
+        yaxis: { title: { text: "%" }, tickfont: { size: 11 }, automargin: true },
+        height: 256,
+      },
+    };
+  }, [psiChartData]);
+
   const macroChartData = useMemo(() => {
     const scenarios = report?.macro_scenarios?.scenarios ?? [];
     return scenarios.map((s: any) => ({
@@ -182,10 +215,34 @@ function Stress() {
     }));
   }, [report]);
 
-  const psiChartData = useMemo(() => {
-    const bins = report?.psi?.bins ?? [];
-    return bins.map((b: any) => ({ bin: b.bin, "Train %": b.train_pct, "Test %": b.test_pct }));
-  }, [report]);
+  const macroFigure = useMemo(() => {
+    if (!macroChartData.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          x: macroChartData.map((row) => row.name),
+          y: macroChartData.map((row) => row["Base PD"]),
+          name: "Base PD",
+          marker: { color: "oklch(0.6 0.16 260)" },
+        },
+        {
+          type: "bar",
+          x: macroChartData.map((row) => row.name),
+          y: macroChartData.map((row) => row["Scenario PD"]),
+          name: "Scenario PD",
+          marker: { color: "oklch(0.6 0.22 27)" },
+        },
+      ],
+      layout: {
+        barmode: "group",
+        margin: { l: 40, r: 20, t: 20, b: 60 },
+        xaxis: { tickfont: { size: 11 }, automargin: true },
+        yaxis: { title: { text: "%" }, tickfont: { size: 11 }, automargin: true },
+        height: 256,
+      },
+    };
+  }, [macroChartData]);
 
   const backtestChartData = useMemo(() => {
     const periods = report?.backtest?.periods ?? [];
@@ -195,6 +252,36 @@ function Stress() {
       "Avg predicted PD": +(p.avg_pred_pd * 100).toFixed(2),
     }));
   }, [report]);
+
+  const backtestFigure = useMemo(() => {
+    if (!backtestChartData.length) return null;
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: backtestChartData.map((row) => row.period),
+          y: backtestChartData.map((row) => row["Avg predicted PD"]),
+          name: "Avg predicted PD",
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: backtestChartData.map((row) => row.period),
+          y: backtestChartData.map((row) => row["Actual default rate"]),
+          name: "Actual default rate",
+          line: { color: "oklch(0.6 0.22 27)", width: 2.5 },
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 11 }, automargin: true },
+        yaxis: { title: { text: "%" }, tickfont: { size: 11 }, automargin: true },
+        height: 280,
+      },
+    };
+  }, [backtestChartData]);
 
   const summary = report?.summary;
 
@@ -248,15 +335,7 @@ function Stress() {
           <p className="text-xs text-muted-foreground">From Stage 4 ablation. SS1/23 P4.3.</p>
           <div className="mt-4 h-64">
             {report?.sensitivity?.available ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={report.sensitivity.rows.map((r: any) => ({ feature: r.feature, "AUC drop": r.auc_drop }))}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="feature" tickLine={false} axisLine={false} fontSize={10} angle={-30} textAnchor="end" height={60} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Bar dataKey="AUC drop" fill="oklch(0.6 0.18 135)" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <PlotlyChart figure={sensitivityFigure} style={{ height: "100%" }} />
             ) : (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                 Run the stress suite to see ablation results.
@@ -318,18 +397,8 @@ function Stress() {
           <h3 className="text-sm font-semibold">Score stability (PSI) — train vs test</h3>
           <p className="text-xs text-muted-foreground">SS11/13 §10.6. PSI &lt; 0.10 stable, 0.10–0.25 minor shift, &gt; 0.25 major shift.</p>
           <div className="mt-4 h-64">
-            {psiChartData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={psiChartData}>
-                  <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                  <XAxis dataKey="bin" tickLine={false} axisLine={false} fontSize={9} angle={-30} textAnchor="end" height={60} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
-                  <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Bar dataKey="Train %" fill="oklch(0.6 0.16 260)" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Test %" fill="oklch(0.6 0.18 135)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            {psiFigure ? (
+              <PlotlyChart figure={psiFigure} style={{ height: "100%" }} />
             ) : (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                 Run the stress suite to see the score distribution.
@@ -349,18 +418,8 @@ function Stress() {
             : ""}
         </p>
         <div className="mt-4 h-64">
-          {macroChartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={macroChartData}>
-                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                <XAxis dataKey="name" tickLine={false} axisLine={false} fontSize={11} />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
-                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Base PD" fill="oklch(0.6 0.16 260)" radius={[6, 6, 0, 0]} />
-                <Bar dataKey="Scenario PD" fill="oklch(0.6 0.22 27)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          {macroFigure ? (
+            <PlotlyChart figure={macroFigure} style={{ height: "100%" }} />
           ) : (
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
               Run the stress suite to see scenario results.
@@ -410,18 +469,8 @@ function Stress() {
           </div>
         </div>
         <div className="mt-4 h-72">
-          {backtestChartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={backtestChartData}>
-                <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                <XAxis dataKey="period" tickLine={false} axisLine={false} fontSize={11} />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} unit="%" />
-                <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line type="monotone" dataKey="Avg predicted PD" stroke="oklch(0.6 0.18 135)" strokeWidth={2.5} />
-                <Line type="monotone" dataKey="Actual default rate" stroke="oklch(0.6 0.22 27)" strokeWidth={2.5} />
-              </LineChart>
-            </ResponsiveContainer>
+          {backtestFigure ? (
+            <PlotlyChart figure={backtestFigure} style={{ height: "100%" }} />
           ) : (
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">No backtesting data yet.</div>
           )}

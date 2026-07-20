@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { useEffect, useMemo, useState } from "react";
-import { BarChart, Bar, Cell, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
+import PlotlyChart from "@/components/plotly-chart";
 import { AlertCircle, ArrowLeft, ArrowRight, Loader, Download, Printer, BarChart3, Microscope, Search, ClipboardList } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -215,7 +215,134 @@ function Explainability() {
   const sampleCount = sampleShapRows.length > 0
     ? Math.max(sampleShapRows.length, sampleIdx + 1)
     : 0;
+  const importanceFigure = useMemo(() => {
+    const labels = chartRows.map((r) => r.Feature);
+    const values = chartRows.map((r) => r.Importance);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: values,
+          y: labels,
+          orientation: "h",
+          marker: { color: "oklch(0.6 0.18 275)" },
+          hovertemplate: "%{x:.4f}<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 160, r: 30, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 10 }, showline: false },
+        yaxis: { tickfont: { size: 9 }, automargin: true, type: "category", autorange: "reversed" },
+        height: 384,
+      },
+    };
+  }, [chartRows]);
 
+  const shapSummaryFigure = useMemo(() => {
+    const labels = shapSummaryRows.map((r) => r.Feature);
+    const values = shapSummaryRows.map((r) => r.MeanAbsSHAP ?? 0);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: values,
+          y: labels,
+          orientation: "h",
+          marker: { color: "oklch(0.6 0.2 25)" },
+          hovertemplate: "%{x:.5f}<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 160, r: 30, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 10 }, showline: false },
+        yaxis: { tickfont: { size: 9 }, automargin: true, type: "category", autorange: "reversed" },
+        height: 384,
+      },
+    };
+  }, [shapSummaryRows]);
+
+  const sampleShapFigure = useMemo(() => {
+    const rows = [...sampleShapRows].slice(0, 12).reverse();
+    const labels = rows.map((r) => `${r.Feature} = ${formatValue(r.Value)}`);
+    const values = rows.map((r) => (r.SHAP ?? 0));
+    const colors = rows.map((r) => ((r.SHAP ?? 0) < 0 ? "oklch(0.7 0.15 150)" : "oklch(0.6 0.2 25)"));
+    return {
+      data: [
+        {
+          type: "bar",
+          x: values,
+          y: labels,
+          orientation: "h",
+          marker: { color: colors },
+          hovertemplate: "%{x:.5f}<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 220, r: 30, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 10 }, showline: false },
+        yaxis: { tickfont: { size: 9 }, automargin: true, type: "category", autorange: "reversed" },
+        height: 320,
+      },
+    };
+  }, [sampleShapRows]);
+
+  const classDistributionFigure = useMemo(() => {
+    const labels = classDistributionChartData.map((r: any) => r.cls);
+    const values = classDistributionChartData.map((r: any) => r.count);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: labels,
+          y: values,
+          marker: { color: "oklch(0.6 0.18 275)" },
+          hovertemplate: "%{y}<extra></extra>",
+        },
+      ],
+      layout: { margin: { l: 10, r: 20, t: 10, b: 40 }, height: 256 },
+    };
+  }, [classDistributionChartData]);
+
+  const metricsFigure = useMemo(() => {
+    const labels = metricsChartData.map((r: any) => r.metric);
+    const values = metricsChartData.map((r: any) => r.value);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: labels,
+          y: values,
+          marker: { color: "oklch(0.6 0.2 25)" },
+          hovertemplate: "%{y:.4f}<extra></extra>",
+        },
+      ],
+      layout: { margin: { l: 10, r: 20, t: 10, b: 40 }, yaxis: { range: [0, 1] }, height: 256 },
+    };
+  }, [metricsChartData]);
+
+  const importanceTop10Figure = useMemo(() => {
+    const rows = [...importanceRows].slice(0, 10).sort((a, b) => a.Importance - b.Importance);
+    const labels = rows.map((r) => r.Feature);
+    const values = rows.map((r) => r.Importance);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: values,
+          y: labels,
+          orientation: "h",
+          marker: { color: "oklch(0.6 0.18 275)" },
+          hovertemplate: "%{x:.4f}<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 130, r: 30, t: 20, b: 40 },
+        xaxis: { tickfont: { size: 10 }, showline: false },
+        yaxis: { tickfont: { size: 9 }, automargin: true, type: "category", autorange: "reversed" },
+        height: 280,
+      },
+    };
+  }, [importanceRows]);
   const downloadModel = () => {
     if (!modelArtifact) return;
     downloadBlob(base64ToBlob(modelArtifact), "final_credit_risk_model.pkl");
@@ -391,15 +518,7 @@ function Explainability() {
                   />
                 </div>
                 <div className="mt-6 h-96">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartRows} layout="vertical" margin={{ left: 160, right: 30 }}>
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
-                      <YAxis type="category" dataKey="Feature" tickLine={false} axisLine={false} fontSize={9} width={155} />
-                      <Tooltip formatter={(value: number) => value.toFixed(4)} />
-                      <Bar dataKey="Importance" fill="oklch(0.6 0.18 275)" radius={[0, 6, 6, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  <PlotlyChart figure={importanceFigure} />
                 </div>
                 <div className="mt-6 overflow-x-auto">
                   <table className="min-w-full border-collapse text-sm">
@@ -466,15 +585,7 @@ function Explainability() {
                   ✅ SHAP values computed for {shapSummaryRows.length >= 15 ? "15+" : shapSummaryRows.length} features!
                 </div>
                 <div className="mt-4 h-96">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={shapSummaryRows} layout="vertical" margin={{ left: 160, right: 30 }}>
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
-                      <YAxis type="category" dataKey="Feature" tickLine={false} axisLine={false} fontSize={9} width={155} />
-                      <Tooltip formatter={(value: number) => value.toFixed(5)} />
-                      <Bar dataKey="MeanAbsSHAP" fill="oklch(0.6 0.2 25)" radius={[0, 6, 6, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  <PlotlyChart figure={shapSummaryFigure} />
                 </div>
               </div>
             )}
@@ -517,26 +628,7 @@ function Explainability() {
 
                 {sampleShapRows.length > 0 && (
                   <div className="mt-6 h-80">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={[...sampleShapRows].slice(0, 12).reverse().map((r) => ({
-                          Label: `${r.Feature} = ${formatValue(r.Value)}`,
-                          SHAP: r.SHAP ?? 0,
-                        }))}
-                        layout="vertical"
-                        margin={{ left: 220, right: 30 }}
-                      >
-                        <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                        <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
-                        <YAxis type="category" dataKey="Label" tickLine={false} axisLine={false} fontSize={9} width={215} />
-                        <Tooltip formatter={(value: number) => value.toFixed(5)} />
-                        <Bar dataKey="SHAP" radius={[0, 6, 6, 0]}>
-                          {[...sampleShapRows].slice(0, 12).reverse().map((r, i) => (
-                            <Cell key={i} fill={(r.SHAP ?? 0) < 0 ? "oklch(0.7 0.15 150)" : "oklch(0.6 0.2 25)"} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <PlotlyChart figure={sampleShapFigure} />
                   </div>
                 )}
 
@@ -617,13 +709,7 @@ function Explainability() {
                     <p className="mt-2 text-xs text-muted-foreground">Imbalance ratio: {profile.target_summary.imbalance_ratio}:1</p>
                   )}
                   <div className="mt-4 h-64 w-full max-w-xl">
-                    <BarChart width={520} height={250} data={classDistributionChartData} margin={{ left: 10, right: 20 }}>
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" vertical={false} />
-                      <XAxis dataKey="cls" tickLine={false} axisLine={false} fontSize={11} />
-                      <YAxis tickLine={false} axisLine={false} fontSize={10} />
-                      <Tooltip />
-                      <Bar dataKey="count" fill="oklch(0.6 0.18 275)" radius={[6, 6, 0, 0]} />
-                    </BarChart>
+                    <PlotlyChart figure={classDistributionFigure} style={{ minHeight: 256 }} />
                   </div>
                 </div>
               )}
@@ -757,13 +843,7 @@ function Explainability() {
               </div>
               {metricsChartData.length > 0 && (
                 <div className="mt-4 h-64 w-full max-w-xl">
-                  <BarChart width={520} height={250} data={metricsChartData} margin={{ left: 10, right: 20 }}>
-                    <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="metric" tickLine={false} axisLine={false} fontSize={10} />
-                    <YAxis tickLine={false} axisLine={false} fontSize={10} domain={[0, 1]} />
-                    <Tooltip formatter={(value: number) => value.toFixed(4)} />
-                    <Bar dataKey="value" fill="oklch(0.6 0.2 25)" radius={[6, 6, 0, 0]} />
-                  </BarChart>
+                  <PlotlyChart figure={metricsFigure} style={{ minHeight: 256 }} />
                 </div>
               )}
               {metrics.threshold_used !== undefined && (
@@ -816,19 +896,7 @@ function Explainability() {
                     ))}
                   </ol>
                   <div className="mt-4 h-72 w-full max-w-xl">
-                    <BarChart
-                      width={560}
-                      height={280}
-                      layout="vertical"
-                      data={[...importanceRows].slice(0, 10).sort((a, b) => a.Importance - b.Importance)}
-                      margin={{ left: 130, right: 30 }}
-                    >
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={10} />
-                      <YAxis type="category" dataKey="Feature" tickLine={false} axisLine={false} fontSize={9} width={125} />
-                      <Tooltip formatter={(value: number) => value.toFixed(4)} />
-                      <Bar dataKey="Importance" fill="oklch(0.6 0.18 275)" radius={[0, 6, 6, 0]} />
-                    </BarChart>
+                    <PlotlyChart figure={importanceTop10Figure} style={{ minHeight: 280 }} />
                   </div>
                 </div>
               )}

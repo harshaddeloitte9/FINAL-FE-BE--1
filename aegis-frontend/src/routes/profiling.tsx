@@ -2,16 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
-import {
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  PieChart,
-  Pie,
-  Cell,
-} from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
+import PlotlyChart from "@/components/plotly-chart";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -208,6 +199,29 @@ function Profiling() {
     if (!classDistribution) return [];
     return Object.entries(classDistribution).map(([name, value]) => ({ name, value: Number(value) }));
   }, [classDistribution]);
+
+  const classDistributionFigure = useMemo(() => {
+    if (!classChartData || classChartData.length === 0) return null;
+    return {
+      data: [
+        {
+          type: "pie",
+          labels: classChartData.map((entry) => entry.name),
+          values: classChartData.map((entry) => entry.value),
+          hole: 0.45,
+          marker: {
+            colors: classChartData.map((_, index) => CLASS_DISTRIBUTION_COLORS[index % CLASS_DISTRIBUTION_COLORS.length]),
+          },
+          textinfo: "percent",
+          hovertemplate: "%{label}: %{value:,}<br>%{percent}<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { t: 10, r: 10, b: 10, l: 10 },
+        legend: { orientation: "h", y: -0.15 },
+      },
+    };
+  }, [classChartData]);
 
   const sortedFlags = useMemo(
     () => [...agent2Flags].sort((a: any, b: any) => severityRank(a.severity) - severityRank(b.severity)),
@@ -465,16 +479,7 @@ function Profiling() {
                   })}
                 </div>
                 <div className="h-72">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={classChartData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={110} paddingAngle={2}>
-                        {classChartData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={CLASS_DISTRIBUTION_COLORS[index % CLASS_DISTRIBUTION_COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => [value.toLocaleString(), "Count"]} />
-                    </PieChart>
-                  </ResponsiveContainer>
+                  <PlotlyChart figure={classDistributionFigure} style={{ height: "100%", minHeight: "100%" }} />
                 </div>
               </div>
             ) : (

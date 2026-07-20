@@ -6,8 +6,8 @@ import {
   CheckCircle2, Info,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
+import PlotlyChart from "@/components/plotly-chart";
+
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
@@ -257,6 +257,40 @@ function Preprocessing() {
     return Array.from(new Set(preprocess.class_distribution_chart.map((item: any) => String(item.class))));
   }, [preprocess?.class_distribution_chart]);
 
+  const classDistributionFigure = useMemo(() => {
+    if (!classDistributionData || classDistributionData.length === 0) return null;
+    const x = classDistributionData.map((d: any) => d.split ?? "");
+
+    const traces = [
+      {
+        type: "bar",
+        name: "Class 0",
+        x,
+        y: classDistributionData.map((row: any) => Number(row["0"] ?? 0)),
+        marker: { color: "#65A30D" },
+        hovertemplate: "%{x}<br>%{y:.1%}<extra></extra>",
+      },
+      {
+        type: "bar",
+        name: "Class 1",
+        x,
+        y: classDistributionData.map((row: any) => Number(row["1"] ?? 0)),
+        marker: { color: "#84CC16" },
+        hovertemplate: "%{x}<br>%{y:.1%}<extra></extra>",
+      },
+    ];
+
+    const layout: any = {
+      barmode: "stack",
+      margin: { t: 10, r: 20, l: 60, b: 60 },
+      xaxis: { title: "", automargin: true },
+      yaxis: { title: "", tickformat: ".0%", automargin: true, range: [0, 1] },
+      legend: { orientation: "h", y: 1.12 },
+    };
+
+    return { data: traces, layout };
+  }, [classDistributionData]);
+
 
   // ── Missing-value treatment proposal (every column classify_missing_treatment
   //    found — i.e. every column that actually has missing values) ──
@@ -411,20 +445,9 @@ function Preprocessing() {
                 </div>
               </div>
               <div className="mt-5 h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={classDistributionData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                    <CartesianGrid stroke="rgba(15,23,42,0.06)" strokeDasharray="3 3" />
-                    <XAxis dataKey="split" tickLine={false} axisLine={false} fontSize={12} />
-                    <YAxis tickFormatter={(value) => `${Math.round(value * 100)}%`} tickLine={false} axisLine={false} fontSize={12} />
-                    <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid rgba(15,23,42,0.06)', backgroundColor: '#ffffff' }} formatter={(value: number) => `${(value * 100).toFixed(1)}%`} />
-                    <Legend verticalAlign="top" height={36} />
-                    {classKeys.map((label, idx) => {
-                      const palette = ["#65A30D", "#84CC16", "#94a3b8"];
-                      const fill = palette[idx % palette.length];
-                      return <Bar key={label} dataKey={label} stackId="a" fill={fill} radius={[6, 6, 0, 0]} />;
-                    })}
-                  </BarChart>
-                </ResponsiveContainer>
+                {classDistributionFigure ? (
+                  <PlotlyChart figure={classDistributionFigure} style={{ height: "100%", minHeight: "100%" }} />
+                ) : null}
               </div>
             </div>
           )}

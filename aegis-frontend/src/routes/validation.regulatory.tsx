@@ -5,8 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowRight, Loader2, Search } from "lucide-react";
 import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceLine, Cell } from "recharts";
-import { ChartContainer as ResponsiveContainer } from "@/components/chart-container";
+import PlotlyChart from "@/components/plotly-chart";
 
 export const Route = createFileRoute("/validation/regulatory")({
   head: () => ({ meta: [{ title: "Stage 7 — Regulatory Review — Aegis Credit" }] }),
@@ -258,6 +257,66 @@ function Regulatory() {
   const biasAucRows = (biasData?.rows ?? []).filter((r) => r.AUC !== null) as Array<BiasRow & { AUC: number }>;
   const biasAucMean = biasAucRows.length ? biasAucRows.reduce((s, r) => s + r.AUC, 0) / biasAucRows.length : 0;
 
+  const featureImportanceFigure = useMemo(() => {
+    if (!featureImportance.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          orientation: "h",
+          x: featureImportance.map((row) => row.Importance),
+          y: featureImportance.map((row) => row.Feature),
+          marker: { color: "oklch(0.6 0.18 280)" },
+          hovertemplate: "%{y}: %{x:.4f}<extra></extra>",
+          name: "Importance",
+        },
+      ],
+      layout: {
+        margin: { l: 140, r: 20, t: 20, b: 40 },
+        xaxis: { title: { text: "Importance" }, tickfont: { size: 11 }, automargin: true },
+        yaxis: { tickfont: { size: 11 }, automargin: true, autorange: "reversed" },
+        height: 420,
+      },
+    };
+  }, [featureImportance]);
+
+  const biasAucFigure = useMemo(() => {
+    if (!biasAucRows.length) return null;
+    return {
+      data: [
+        {
+          type: "bar",
+          x: biasAucRows.map((row) => row.AUC),
+          y: biasAucRows.map((row) => row.Group),
+          orientation: "h",
+          marker: {
+            color: biasAucRows.map((row) =>
+              Math.abs(row.AUC - biasAucMean) > 0.05 ? "oklch(0.6 0.22 27)" : "oklch(0.76 0.18 130)",
+            ),
+          },
+          hovertemplate: "%{y}: %{x:.4f}<extra></extra>",
+          name: "AUC",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: Array(biasAucRows.length).fill(biasAucMean),
+          y: biasAucRows.map((row) => row.Group),
+          line: { color: "oklch(0.6 0.18 280)", dash: "dash" },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Mean AUC",
+        },
+      ],
+      layout: {
+        margin: { l: 140, r: 20, t: 20, b: 40 },
+        xaxis: { title: { text: "AUC" }, tickfont: { size: 11 }, automargin: true, range: [0, 1] },
+        yaxis: { tickfont: { size: 11 }, automargin: true, autorange: "reversed" },
+        height: 320,
+      },
+    };
+  }, [biasAucRows, biasAucMean]);
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -308,24 +367,9 @@ function Regulatory() {
                 Reuses the replicated model's feature importances computed in Stage 4 — no re-training here.
               </p>
 
-              {stage4Available ? (
+              {featureImportanceFigure ? (
                 <div className="mt-4 h-[420px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={featureImportance} layout="vertical" margin={{ left: 24 }}>
-                      <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                      <XAxis type="number" tickLine={false} axisLine={false} fontSize={11} />
-                      <YAxis
-                        type="category"
-                        dataKey="Feature"
-                        tickLine={false}
-                        axisLine={false}
-                        fontSize={11}
-                        width={160}
-                      />
-                      <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                      <Bar dataKey="Importance" fill="oklch(0.6 0.18 280)" radius={[0, 6, 6, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  <PlotlyChart figure={featureImportanceFigure} style={{ height: "100%" }} />
                 </div>
               ) : (
                 <div className="mt-4 rounded-xl border border-dashed border-border bg-background p-8 text-center text-sm text-muted-foreground">
@@ -413,34 +457,9 @@ function Regulatory() {
                         </table>
                       </div>
 
-                      {biasAucRows.length >= 2 ? (
+                      {biasAucFigure ? (
                         <div className="mt-4 h-64">
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={biasAucRows}>
-                              <CartesianGrid stroke="oklch(0.92 0.005 240)" strokeDasharray="3 3" />
-                              <XAxis dataKey="Group" tickLine={false} axisLine={false} fontSize={11} />
-                              <YAxis domain={[0, 1]} tickLine={false} axisLine={false} fontSize={11} />
-                              <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid oklch(0.92 0.005 240)" }} />
-                              <ReferenceLine
-                                y={biasAucMean}
-                                stroke="oklch(0.6 0.18 280)"
-                                strokeDasharray="4 4"
-                                label={{ value: "Mean AUC", fontSize: 10, position: "insideTopRight" }}
-                              />
-                              <Bar dataKey="AUC" radius={[6, 6, 0, 0]}>
-                                {biasAucRows.map((r) => (
-                                  <Cell
-                                    key={r.Group}
-                                    fill={
-                                      Math.abs(r.AUC - biasAucMean) > 0.05
-                                        ? "oklch(0.6 0.22 27)"
-                                        : "oklch(0.76 0.18 130)"
-                                    }
-                                  />
-                                ))}
-                              </Bar>
-                            </BarChart>
-                          </ResponsiveContainer>
+                          <PlotlyChart figure={biasAucFigure} style={{ height: "100%" }} />
                         </div>
                       ) : null}
                     </>
