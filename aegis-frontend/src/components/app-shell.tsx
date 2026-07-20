@@ -21,8 +21,10 @@ import {
   Activity,
   ClipboardCheck,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
+
+const LAST_WORKSPACE_KEY = "aegis_last_workspace";
 
 type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean };
 
@@ -46,8 +48,6 @@ const developmentNav: NavItem[] = [
   { to: "/explainability", label: "Explainability", icon: Sparkles },
 ];
 
-const settingsNavItem: NavItem = { to: "/settings", label: "Settings", icon: Settings };
-
 const validationNav: NavItem[] = [
   { to: "/validation/intake", label: "Intake & Governance", icon: FileText, exact: true },
   { to: "/validation/data-quality", label: "Data Validation", icon: Database },
@@ -64,6 +64,11 @@ const developmentPaths = [
   "/pd",
 ];
 
+// Strict resolution from the URL alone — "/settings" isn't part of either
+// workspace's path list, so this correctly returns "landing" for it. The
+// component below layers last-known-workspace memory on top of this so
+// Settings (and any other neutral page) shows whichever workspace the user
+// was actually in, instead of always falling back to landing.
 function resolveWorkspace(pathname: string): "landing" | "development" | "validation" {
   if (pathname === "/") return "landing";
   if (pathname.startsWith("/validation")) return "validation";
@@ -126,7 +131,26 @@ function NavLinkItem({
 export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const workspace = resolveWorkspace(pathname);
+  const strictWorkspace = resolveWorkspace(pathname);
+
+  // Remember whichever real workspace (development/validation) the user was
+  // last in, so neutral pages like /settings — which aren't part of either
+  // workspace's own path list — can show that workspace's sidebar/toggle
+  // instead of always falling back to the landing page's static CTAs.
+  const [lastWorkspace, setLastWorkspace] = useState<"development" | "validation">(() => {
+    if (typeof window === "undefined") return "development";
+    return window.localStorage.getItem(LAST_WORKSPACE_KEY) === "validation" ? "validation" : "development";
+  });
+
+  useEffect(() => {
+    if (strictWorkspace === "development" || strictWorkspace === "validation") {
+      setLastWorkspace(strictWorkspace);
+      window.localStorage.setItem(LAST_WORKSPACE_KEY, strictWorkspace);
+    }
+  }, [strictWorkspace]);
+
+  const isNeutralPage = pathname === "/settings";
+  const workspace = isNeutralPage ? lastWorkspace : strictWorkspace;
 
   const isLanding = workspace === "landing";
   // Hide the shared model tabs on the Data Upload page per UX request
@@ -202,14 +226,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             </ul>
           </nav>
 
-          {workspace === "development" && (
-            <div className="border-t border-sidebar-border px-3 pb-3 pt-3">
-              <ul>
-                <NavLinkItem item={settingsNavItem} pathname={pathname} collapsed={collapsed} />
-              </ul>
-            </div>
-          )}
-
           <div className="border-t border-sidebar-border p-3">
             <button
               onClick={() => setCollapsed((c) => !c)}
@@ -263,6 +279,16 @@ export function AppShell({ children }: { children: ReactNode }) {
                 Validate
               </Link>
             )}
+            <Link
+              to="/settings"
+              aria-label="Settings"
+              className={cn(
+                "inline-flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground",
+                pathname === "/settings" && "border-primary/40 text-primary",
+              )}
+            >
+              <Settings className="h-4 w-4" />
+            </Link>
             <button className="relative inline-flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground">
               <Bell className="h-4 w-4" />
               <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-destructive" />

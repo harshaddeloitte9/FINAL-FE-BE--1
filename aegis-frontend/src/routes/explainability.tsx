@@ -92,6 +92,21 @@ function Explainability() {
   const trainingConfig = trainingResult?.training_config ?? {};
   const hasEngine = Boolean(modelArtifact && file);
 
+  // Declared early (used by useMemo hooks below, which must not reference
+  // consts declared later in the same function — that's a temporal-dead-zone
+  // ReferenceError, not just a lint nit).
+  const metrics = trainingResult?.evaluation_metrics ?? {};
+  const metricsChartData = [
+    { metric: "Accuracy", value: metrics.accuracy },
+    { metric: "Precision", value: metrics.precision },
+    { metric: "Recall", value: metrics.recall },
+    { metric: "F1", value: metrics.f1 },
+    { metric: "ROC-AUC", value: metrics.roc_auc },
+    { metric: "PR-AUC", value: metrics.pr_auc },
+  ].filter((row) => typeof row.value === "number");
+  const classDistribution: Record<string, number> = profile?.class_distribution ?? {};
+  const classDistributionChartData = Object.entries(classDistribution).map(([cls, count]) => ({ cls, count }));
+
   const targetColumn = profile?.target_col ??
     (Array.isArray(profile?.target_candidates) && profile.target_candidates.length > 0
       ? profile.target_candidates[0]
@@ -382,7 +397,6 @@ function Explainability() {
   // computed elsewhere in the pipeline; nothing here re-derives analysis. ──
   const trainingConfig2 = trainingResult?.training_config ?? {};
   const trainingInfo = trainingResult?.training_info ?? {};
-  const metrics = trainingResult?.evaluation_metrics ?? {};
   const classificationReport = metrics.classification_report ?? {};
   const feSummary = featureEngineeringResult?.feature_engineering_summary ?? {};
   const feAdded = Array.isArray(feSummary.added) ? feSummary.added : [];
@@ -398,16 +412,6 @@ function Explainability() {
   const splitStats = preprocessingResult?.split_stats ?? {};
   const hyperparams = hyperparameterSummary(trainingResult);
   const gini = computeGini(metrics.roc_auc);
-  const classDistribution: Record<string, number> = profile?.class_distribution ?? {};
-  const classDistributionChartData = Object.entries(classDistribution).map(([cls, count]) => ({ cls, count }));
-  const metricsChartData = [
-    { metric: "Accuracy", value: metrics.accuracy },
-    { metric: "Precision", value: metrics.precision },
-    { metric: "Recall", value: metrics.recall },
-    { metric: "F1", value: metrics.f1 },
-    { metric: "ROC-AUC", value: metrics.roc_auc },
-    { metric: "PR-AUC", value: metrics.pr_auc },
-  ].filter((row) => typeof row.value === "number");
   const reportGeneratedAt = new Date().toLocaleString();
 
   const downloadReport = () => window.print();
