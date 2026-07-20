@@ -303,7 +303,7 @@ function DataUpload() {
               <TrendingUp className="h-5 w-5 text-muted-foreground" />
               <div>
                 <h4 className="text-sm font-semibold">Macroeconomic data</h4>
-                <p className="text-xs text-muted-foreground">Fetched automatically from FRED and aligned by observation date — no entity key needed.</p>
+                <p className="text-xs text-muted-foreground">Economic data is pulled in automatically — no setup needed from you.</p>
               </div>
             </div>
             <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">

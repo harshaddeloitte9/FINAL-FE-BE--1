@@ -390,7 +390,7 @@ function Performance() {
     <div className="space-y-8">
       <PageHeader
         title="Stage 5 — Performance Testing"
-        description="Comprehensive performance evaluation on the independent validation hold-out set before stress testing and regulatory review."
+        description="A full performance check on data the model has never seen, before stress testing and regulatory review."
       />
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
@@ -440,7 +440,7 @@ function Performance() {
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
             Run Stage 5 analysis
           </button>
-          <span className="text-sm text-muted-foreground">Uses the new backend performance endpoint for ROC, PR, calibration, and confusion outputs.</span>
+          <span className="text-sm text-muted-foreground">Runs the full performance check — accuracy, precision/recall trade-off, calibration, and prediction breakdown.</span>
         </div>
 
         {error ? (

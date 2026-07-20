@@ -163,7 +163,7 @@ function Profiling() {
   if (!profile) {
     return (
       <div className="space-y-8">
-        <PageHeader title="Data Profiling" description="Schema, quality, balance and correlation diagnostics for the active dataset." />
+        <PageHeader title="Data Profiling" description="Structure, quality, balance, and relationships in your dataset." />
         <div className="rounded-xl border border-border bg-card p-6 text-center">
           <h3 className="text-lg font-semibold">No dataset available</h3>
           <p className="mt-2 text-sm text-muted-foreground">Upload a dataset on the Data Upload page to run profiling and populate these diagnostics.</p>
@@ -263,7 +263,7 @@ function Profiling() {
 
   return (
     <div className="space-y-8">
-      <PageHeader title="Data Profiling" description="Schema, quality, balance and correlation diagnostics for the active dataset." />
+      <PageHeader title="Data Profiling" description="Structure, quality, balance, and relationships in your dataset." />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

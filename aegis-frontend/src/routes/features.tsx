@@ -534,18 +534,18 @@ function Features() {
           <h2 className="text-base font-semibold">Macroeconomic Features (FRED)</h2>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          Fetches FRED macro data (GDP, unemployment, Fed funds rate) aligned to the calendar month of loan
-          origination — never a default or charge-off date. This reflects the macro environment at underwriting,
-          which is what IFRS 9's point-in-time PD methodology conditions on. Attached before the analysis below
-          runs, so these go through the same IV/WOE, MI and binning as any other feature.
+          Pulls in economic data (GDP, unemployment, interest rates) matched to the month each loan started —
+          never a default or charge-off date, which would leak future information into the model. This reflects
+          conditions at the time the loan was made, in line with IFRS 9 requirements. It's added before the
+          analysis below runs, so it's treated just like any other feature.
         </p>
 
         {macroColumns.length > 0 ? (
           <div className="mt-4 space-y-3">
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-              ✅ FRED macro features attached: {macroColumns.join(", ")}
-              {macroDateColUsed && <> (aligned to the calendar month of <code className="font-mono">{macroDateColUsed}</code>)</>} —
-              they'll run through IV/WOE below like any other numeric feature.
+              ✅ Economic data attached: {macroColumns.join(", ")}
+              {macroDateColUsed && <> (matched to the month of <code className="font-mono">{macroDateColUsed}</code>)</>} —
+              it'll be treated just like any other feature in the analysis below.
             </div>
             <button
               type="button"

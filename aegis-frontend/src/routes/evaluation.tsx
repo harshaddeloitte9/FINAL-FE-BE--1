@@ -330,7 +330,7 @@ function Evaluation() {
       <div className="space-y-8">
         <PageHeader
           title="Evaluation"
-          description="Interactive performance diagnostics on the hold-out test set."
+          description="Explore how the model performs on data it never saw during training."
         />
         <div className="rounded-xl border border-border bg-card p-6 text-center">
           <h3 className="text-lg font-semibold">No trained model available</h3>
@@ -347,7 +347,7 @@ function Evaluation() {
     <div className="space-y-8">
       <PageHeader
         title="Evaluation"
-        description="Interactive performance diagnostics on the hold-out test set."
+        description="Explore how the model performs on data it never saw during training."
         actions={
           <div className="flex flex-wrap gap-2">
             {evaluationMetrics && (
@@ -392,7 +392,7 @@ function Evaluation() {
                     <Info className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
                     <p className="text-xs text-blue-900">
                       Threshold <strong>{threshold.toFixed(2)}</strong> was chosen automatically — it's the cut-off
-                      that maximizes F1 ({(thresholdSelection.f1 * 100).toFixed(1)}%) on this hold-out set, out of
+                      that maximizes F1 ({(thresholdSelection.f1 * 100).toFixed(1)}%) on this test data, out of
                       99 candidate thresholds swept from 0.01 to 0.99. At this cut-off: precision{" "}
                       {(thresholdSelection.precision * 100).toFixed(1)}%, recall {(thresholdSelection.recall * 100).toFixed(1)}%.
                     </p>

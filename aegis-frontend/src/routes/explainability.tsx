@@ -552,7 +552,7 @@ function Explainability() {
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <h2 className="text-base font-semibold">🔬 SHAP Values</h2>
             <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-              SHAP (SHapley Additive exPlanations) shows each feature's contribution to each prediction using real feature names.
+              This shows how much each factor pushed an individual prediction up or down, using your actual column names.
             </div>
 
             <div className="mt-4 max-w-md">
