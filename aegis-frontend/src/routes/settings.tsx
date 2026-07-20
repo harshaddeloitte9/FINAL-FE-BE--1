@@ -62,12 +62,15 @@ function Settings() {
                   0.50, any prediction ≥ 0.50 is classified as "will default." Lowering it flags more borrowers as
                   risky (catches more real defaults, but more false alarms); raising it is stricter (fewer false
                   alarms, but may miss some real defaults). This affects precision, recall, and other metrics shown
-                  in Model Evaluation.
+                  in Model Evaluation. Scoped to Model Development only — Model Validation stages calibrate their
+                  own threshold independently and ignore this setting.
                 </PopoverContent>
               </Popover>
             </div>
             <div className="text-sm text-muted-foreground">
-              PD cut-off used to classify a prediction as default vs non-default when computing evaluation metrics.
+              PD cut-off used to classify a prediction as default vs non-default when training or evaluating a
+              model in Model Development. Model Validation stages (Replication, Performance Testing, Stress
+              Testing) calibrate their own threshold independently and are not affected by this setting.
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -85,7 +88,7 @@ function Settings() {
             </span>
           </div>
           <p className="text-xs text-muted-foreground">
-            Applied the next time a model is trained. Saved to this browser.
+            Applied the next time a model is trained or evaluated in Model Development. Saved to this browser.
           </p>
         </div>
 
