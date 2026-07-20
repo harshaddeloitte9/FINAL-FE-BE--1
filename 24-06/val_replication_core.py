@@ -17,10 +17,10 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, roc_curve
 
 from utils import detect_column_types, detect_target_candidates, detect_task_type
-from preprocessing import prepare_data, rebuild_preprocessor_for
+from preprocessing_new import prepare_data, rebuild_preprocessor_for
 from feature_engineering import analyze_for_feature_engineering, apply_feature_engineering
-from train import split_data, compute_split_stats, train_model
-from evaluate import compute_binary_metrics
+from train_new import split_data, compute_split_stats, train_model
+from evaluate_new import compute_binary_metrics
 from model_selector import CLASSIFICATION_MODELS
 from explainability import extract_feature_importance
 
@@ -234,7 +234,6 @@ def _fit_core(
         target_col=target_col,
         prep_report=prep_report_fe,
         model=model_inst,
-        use_smote=False,
         use_cv=True,
         cv_folds=cv_folds,
         use_hyperopt=False,
@@ -249,7 +248,11 @@ def _fit_core(
 
     metrics = compute_binary_metrics(
         y_test.values, y_pred, y_proba_2d,
-        threshold=0.5,
+        # None auto-selects the F1-maximizing threshold, same as production
+        # training/evaluation (see main.py's _build_metrics_and_eval_data) —
+        # a hardcoded 0.5 cut-off here would make replicated accuracy/
+        # precision/recall/F1 diverge from what was actually reported.
+        threshold=None,
     )
     try:
         metrics["roc_auc"] = round(float(roc_auc_score(y_test.values, y_proba)), 4)
@@ -369,7 +372,6 @@ def run_replication(
                     target_col=target_col,
                     prep_report=prep_report_s,
                     model=m_s,
-                    use_smote=False,
                     use_cv=False,
                     task_type=task_type,
                 )
@@ -398,7 +400,6 @@ def run_replication(
                     target_col=target_col,
                     prep_report=prep_report_abl,
                     model=m_abl,
-                    use_smote=False,
                     use_cv=False,
                     task_type=task_type,
                 )
