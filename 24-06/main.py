@@ -80,7 +80,10 @@ except ImportError:
     _legacy_fe = importlib.util.module_from_spec(_legacy_fe_spec)
     _legacy_fe_spec.loader.exec_module(_legacy_fe)
     resolve_ead_configuration = _legacy_fe.resolve_ead_configuration
-from model_selector import recommend_models, get_model_instance, get_hyperparameter_grid, CLASSIFICATION_MODELS
+from model_selector import (
+    recommend_model, compute_dataset_characteristics, characteristics_from_summary,
+    get_model_instance, get_hyperparameter_grid, CLASSIFICATION_MODELS,
+)
 from train_new import split_data, compute_split_stats, train_model
 import evaluate_new as eval_engine
 import fred_client
@@ -2123,7 +2126,9 @@ async def recommend_models_endpoint(
     class_imbalance_ratio: Optional[float] = Form(None),
     task_type: Optional[str] = Form(None),
     synthetic_samples: Optional[int] = Form(None),
+    explainability_priority: float = Form(0.5),
 ) -> Dict[str, Any]:
+    fe_summary = None
     if file is not None or csv_text or synthetic_samples:
         df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
         if target_col is None or target_col not in df.columns:
@@ -2149,31 +2154,41 @@ async def recommend_models_endpoint(
             X_train_engineered = X_train.copy()
             fe_summary = None
 
-        n_samples = X_train_engineered.shape[0]
-        n_features = X_train_engineered.shape[1]
-        if task_type == "binary":
-            vc = y_train.value_counts()
-            class_imbalance_ratio = float(vc.max() / vc.min()) if vc.min() > 0 else 5.0
+        # Dataset characteristics feed the weighted recommendation engine —
+        # measured on the actual (post-FE) training data, not just its shape.
+        characteristics = compute_dataset_characteristics(
+            X_train_engineered, y_train, col_types, task_type,
+            explainability_priority=explainability_priority,
+        )
+        n_samples = characteristics["_raw"]["n_samples"]
+        n_features = characteristics["_raw"]["n_features"]
+        class_imbalance_ratio = characteristics["_raw"]["imbalance_ratio"]
     else:
         if n_samples is None or n_features is None or task_type is None:
             raise HTTPException(status_code=400, detail="Either dataset or numeric summary values are required")
         if class_imbalance_ratio is None:
             class_imbalance_ratio = 1.0
-    recs = recommend_models(
-        n_samples=n_samples,
-        n_features=n_features,
-        class_imbalance_ratio=class_imbalance_ratio,
-        task_type=task_type,
-    )
+        # No dataset in hand — fall back to a summary-only characteristic set
+        # (missingness/categorical share/multicollinearity/non-linearity default
+        # to neutral since we can't measure them without the data).
+        characteristics = characteristics_from_summary(
+            n_samples=n_samples, n_features=n_features, class_imbalance_ratio=class_imbalance_ratio,
+            explainability_priority=explainability_priority,
+        )
+
+    result = recommend_model(characteristics, task_type=task_type)
+
     return {
-        "recommendations": recs,
+        "recommended_model": result["recommended_model"],
+        "all_models": result["all_models"],
+        "characteristics": {k: v for k, v in characteristics.items() if k != "_raw"} | {"raw": characteristics.get("_raw", {})},
         "training": {
             "train_n": int(n_samples),
             "train_features": int(n_features),
             "imbalance_ratio": float(class_imbalance_ratio),
         },
         "task_type": task_type,
-        "feature_engineering_summary": fe_summary if 'fe_summary' in locals() else None,
+        "feature_engineering_summary": fe_summary,
     }
 
         
