@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, Globe, RefreshCw, Table as TableIcon, Trash2, Hash, Tag } from "lucide-react";
+import { AlertCircle, Loader, ArrowLeft, ArrowRight, Download, RefreshCw, Table as TableIcon, Trash2, Hash, Tag } from "lucide-react";
 import { computeFeatureRemovalProposal } from "@/lib/feature-removal";
 
 export const Route = createFileRoute("/features")({
@@ -50,14 +50,9 @@ interface FeatureEngineeringResponse {
   }>;
 }
 
-interface MacroDateCandidate {
-  column: string;
-  is_preferred: boolean;
-}
-
 function Features() {
   const navigate = useNavigate();
-  const { file, profile, setUploadResult, featureEngineeringResult, setFeatureEngineeringResult, preprocessingResult } = useDataset();
+  const { file, profile, featureEngineeringResult, setFeatureEngineeringResult, preprocessingResult } = useDataset();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Seed from the shared context so returning to this page (e.g. via Back from
@@ -68,43 +63,7 @@ function Features() {
   const [vifSortKey, setVifSortKey] = useState<"feature" | "value">("value");
   const [vifSortAsc, setVifSortAsc] = useState(false);
 
-  // ── Macroeconomic Features (FRED) ──────────────────────────────────────────
-  // Fetched once (per date column choice) and, once attached, carried forward
-  // as csv_text (instead of the original file) into every /data/feature-
-  // engineering call below, so macro columns run through the same IV/WOE, MI,
-  // binning and correlation analysis as any other numeric feature.
-  const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
-  const [macroDefaultDateCol, setMacroDefaultDateCol] = useState<string | null>(null);
-  const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
-  const [macroColumns, setMacroColumns] = useState<string[]>([]);
-  const [macroDateColUsed, setMacroDateColUsed] = useState<string | null>(null);
-  const [datasetCsvText, setDatasetCsvText] = useState<string | null>(null);
-  const [macroLoading, setMacroLoading] = useState(false);
-  const [macroError, setMacroError] = useState<string | null>(null);
-
-  // Guards against out-of-order responses: runFeatureEngineering() is called
-  // both on mount (no macro yet) and again right after a FRED fetch resolves
-  // (datasetCsvText changes). /data/feature-engineering does non-trivial work
-  // (IV/WOE, MI, VIF, interaction search) so its latency varies — without this,
-  // if the mount request happens to resolve AFTER the macro-triggered one, its
-  // stale (macro-less) result silently overwrites the correct one, even though
-  // the "FRED features attached" banner (driven by separate state) still shows
-  // success. Only the response matching the most recently issued request id
-  // is ever applied.
   const feRequestIdRef = useRef(0);
-
-  // The FRED fetch always attaches macro_* columns onto THIS pristine file,
-  // never onto whatever ds.file currently is — once a fetch succeeds, ds.file
-  // itself becomes the macro-augmented version (see fetchMacroFeatures), so
-  // without this a second fetch (e.g. after picking a different date column)
-  // would attach macro columns on top of an already-augmented file and
-  // produce duplicate macro_gdp/macro_unemployment/macro_interest_rate columns.
-  const originalFileRef = useRef<File | null>(null);
-  useEffect(() => {
-    if (file && !originalFileRef.current) {
-      originalFileRef.current = file;
-    }
-  }, [file]);
 
   // ── Feature Removal — propose-confirm ──────────────────────────────────────
   const [removeChecked, setRemoveChecked] = useState<Record<string, boolean>>({});
@@ -133,11 +92,7 @@ function Features() {
       setError(null);
 
       const form = new FormData();
-      if (datasetCsvText) {
-        form.append("csv_text", datasetCsvText);
-      } else {
-        form.append("file", file);
-      }
+      form.append("file", file);
       form.append("target_col", targetCol);
       const remove = overrideConfirmedRemove ?? confirmedRemoveCols;
       if (remove !== null && remove !== undefined) {
@@ -146,7 +101,7 @@ function Features() {
 
       const result = await formUpload<FeatureEngineeringResponse>("/data/feature-engineering", form);
       if (requestId !== feRequestIdRef.current) {
-        // A newer request (e.g. triggered by a FRED macro fetch) was issued
+        // A newer request (e.g. triggered by a removal re-run) was issued
         // while this one was in flight — drop this stale response instead of
         // overwriting the newer result.
         return;
@@ -167,32 +122,11 @@ function Features() {
     }
   };
 
-  // Fetch the date-column candidates for macro alignment once the dataset is
-  // available — lightweight, doesn't block the initial analysis below.
-  useEffect(() => {
-    if (!file) return;
-    (async () => {
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await formUpload<{ candidates: MacroDateCandidate[]; default_date_col: string | null }>(
-          "/data/macro/date-columns",
-          form,
-        );
-        setMacroCandidates(res.candidates ?? []);
-        setMacroDefaultDateCol(res.default_date_col ?? null);
-        setSelectedMacroDateCol(res.default_date_col ?? (res.candidates?.[0]?.column ?? ""));
-      } catch {
-        // Non-fatal — the macro section just won't have a default selection.
-      }
-    })();
-  }, [file]);
-
   // Consumed once: if we mounted with a cached result already in context (e.g.
   // navigating back from Training and forward again), skip the very next
   // auto-run and reuse it instead of silently recomputing feature engineering
-  // from scratch. Any later change to file/profile/datasetCsvText (a genuinely
-  // new dataset or macro fetch) still triggers a real recompute.
+  // from scratch. Any later change to file/profile still triggers a real
+  // recompute.
   const skipInitialAutoRun = useRef(engineeringResult !== null);
 
   useEffect(() => {
@@ -206,53 +140,7 @@ function Features() {
     }
     runFeatureEngineering();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file, profile, datasetCsvText]);
-
-  const fetchMacroFeatures = async () => {
-    const baseFile = originalFileRef.current ?? file;
-    if (!baseFile || !selectedMacroDateCol) return;
-    try {
-      setMacroLoading(true);
-      setMacroError(null);
-      const form = new FormData();
-      form.append("file", baseFile);
-      form.append("date_col", selectedMacroDateCol);
-      const res = await formUpload<{
-        macro_columns: string[];
-        date_col_used: string;
-        csv_with_macro: string;
-      }>("/data/macro/fetch", form);
-      setMacroColumns(res.macro_columns ?? []);
-      setMacroDateColUsed(res.date_col_used ?? selectedMacroDateCol);
-      setDatasetCsvText(res.csv_with_macro);
-
-      // Carry the macro-augmented dataset forward as the working file so
-      // every later stage (preprocessing, training, explainability) — which
-      // read ds.file from context, not this page's local datasetCsvText —
-      // sees the same macro columns instead of silently falling back to the
-      // original upload.
-      const macroBlob = new Blob([res.csv_with_macro], { type: "text/csv" });
-      const macroFile = new File([macroBlob], baseFile.name, { type: "text/csv" });
-      setUploadResult(macroFile, profile);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to fetch FRED macro features";
-      setMacroError(message);
-    } finally {
-      setMacroLoading(false);
-    }
-  };
-
-  const handleReFetchMacro = () => {
-    setMacroColumns([]);
-    setMacroDateColUsed(null);
-    setDatasetCsvText(null);
-    setMacroError(null);
-    // Revert ds.file to the pristine (pre-macro) dataset so the next fetch
-    // attaches macro columns fresh instead of stacking onto the last result.
-    if (originalFileRef.current) {
-      setUploadResult(originalFileRef.current, profile);
-    }
-  };
+  }, [file, profile]);
 
   const plan = engineeringResult?.feature_engineering_plan ?? {};
   const summary = engineeringResult?.feature_engineering_summary ?? {};
@@ -528,75 +416,6 @@ function Features() {
         </div>
       )}
 
-      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="flex items-center gap-2">
-          <Globe className="h-4 w-4 text-primary" />
-          <h2 className="text-base font-semibold">Macroeconomic Features (FRED)</h2>
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          Pulls in economic data (GDP, unemployment, interest rates) matched to the month each loan started —
-          never a default or charge-off date, which would leak future information into the model. This reflects
-          conditions at the time the loan was made, in line with IFRS 9 requirements. It's added before the
-          analysis below runs, so it's treated just like any other feature.
-        </p>
-
-        {macroColumns.length > 0 ? (
-          <div className="mt-4 space-y-3">
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-              ✅ Economic data attached: {macroColumns.join(", ")}
-              {macroDateColUsed && <> (matched to the month of <code className="font-mono">{macroDateColUsed}</code>)</>} —
-              it'll be treated just like any other feature in the analysis below.
-            </div>
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
-              onClick={handleReFetchMacro}
-            >
-              <RefreshCw className="h-4 w-4" />
-              Re-fetch / change macro features
-            </button>
-          </div>
-        ) : (
-          <div className="mt-4 space-y-3">
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Loan origination date column (macro features are aligned to this, by calendar month)
-              </label>
-              <select
-                className="mt-2 w-full max-w-md rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                value={selectedMacroDateCol}
-                onChange={(e) => setSelectedMacroDateCol(e.target.value)}
-              >
-                <option value="">— none —</option>
-                {macroCandidates.map(({ column, is_preferred }) => (
-                  <option key={column} value={column}>
-                    {is_preferred ? `⭐ ${column} (origination/loan date)` : column}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              type="button"
-              disabled={!selectedMacroDateCol || macroLoading}
-              className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={fetchMacroFeatures}
-            >
-              {macroLoading ? <Loader className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
-              Fetch FRED macro features
-            </button>
-            {!selectedMacroDateCol && (
-              <p className="text-xs text-muted-foreground">
-                Select the loan origination date column and click Fetch to attach FRED macro features (GDP,
-                unemployment, Fed funds rate) aligned to that month.
-              </p>
-            )}
-            {macroError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{macroError}</div>
-            )}
-          </div>
-        )}
-      </section>
-
       <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
         {originalFeatures !== null && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
@@ -745,7 +564,6 @@ function Features() {
                     <th className="border-b border-border px-3 py-2">Type</th>
                     <th className="border-b border-border px-3 py-2">IV</th>
                     <th className="border-b border-border px-3 py-2">Gini</th>
-                    <th className="border-b border-border px-3 py-2">Source</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -759,7 +577,6 @@ function Features() {
                         <td className="border-b border-border px-3 py-2 text-xs">{f.interaction_type ?? f.type ?? "—"}</td>
                         <td className="border-b border-border px-3 py-2 text-xs">{f.score !== undefined ? f.score.toFixed(4) : "—"}</td>
                         <td className="border-b border-border px-3 py-2 text-xs">{f.gini !== undefined && f.gini !== null ? f.gini.toFixed(4) : "—"}</td>
-                        <td className="border-b border-border px-3 py-2 text-xs capitalize">{f.source ?? "ranked"}</td>
                       </tr>
                     ))}
                 </tbody>

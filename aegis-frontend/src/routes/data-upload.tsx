@@ -1,8 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
-  ArrowRight, CheckCircle2, Database, Download, FileSpreadsheet, Info, Landmark, Link2, ShieldCheck, Table2, TrendingUp, Upload,
+  ArrowRight, CheckCircle2, Database, Download, FileSpreadsheet, Globe, Info, Landmark, Link2, Loader, RefreshCw, ShieldCheck, Table2, TrendingUp, Upload,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,11 @@ type PrimaryKeyInfo = {
 };
 
 type ConfirmedJoin = { right_table: string; left_key: string; right_key: string };
+
+type MacroDateCandidate = {
+  column: string;
+  is_preferred: boolean;
+};
 
 async function readCsvHeader(file: File): Promise<string[]> {
   const text = await file.slice(0, 8192).text();
@@ -75,7 +80,19 @@ function DataUpload() {
 
   const [loanTable, setLoanTable] = useState<string>("");
   const [collateralTable, setCollateralTable] = useState<string>("");
-  const [fetchMacro, setFetchMacro] = useState(true);
+
+  // ── Macroeconomic data (FRED) — opt-in only ────────────────────────────────
+  const [macroEnabled, setMacroEnabled] = useState(false);
+  const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
+  const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
+  const [macroColumns, setMacroColumns] = useState<string[]>([]);
+  const [macroDateColUsed, setMacroDateColUsed] = useState<string | null>(null);
+  const [macroLoading, setMacroLoading] = useState(false);
+  const [macroError, setMacroError] = useState<string | null>(null);
+  // The macro fetch replaces customerFile with an augmented version — keep the
+  // pristine original around so "re-fetch with a different date column" never
+  // stacks a second set of macro_* columns onto an already-augmented file.
+  const originalCustomerFileRef = useRef<File | null>(null);
 
   const [candidates, setCandidates] = useState<JoinCandidate[]>([]);
   const [primaryKeys, setPrimaryKeys] = useState<PrimaryKeyInfo[]>([]);
@@ -96,12 +113,81 @@ function DataUpload() {
     if (!f) return;
     setCustomerFile(f);
     setReport(null);
+    originalCustomerFileRef.current = f;
+    setMacroColumns([]);
+    setMacroDateColUsed(null);
+    setMacroError(null);
     try {
       setCustomerColumns(await readCsvHeader(f));
     } catch {
       setCustomerColumns([]);
     }
     if (dbTables) void discoverRelationships(f, dbFile, loanTable, collateralTable);
+  };
+
+  // Fetch date-column candidates once macro data is switched on and a
+  // customer file is available — lightweight, only runs when needed.
+  useEffect(() => {
+    if (!macroEnabled || !customerFile) return;
+    (async () => {
+      try {
+        const form = new FormData();
+        form.append("file", customerFile);
+        const res = await formUpload<{ candidates: MacroDateCandidate[]; default_date_col: string | null }>(
+          "/data/macro/date-columns",
+          form,
+        );
+        setMacroCandidates(res.candidates ?? []);
+        setSelectedMacroDateCol(res.default_date_col ?? (res.candidates?.[0]?.column ?? ""));
+      } catch {
+        // Non-fatal — the macro section just won't have a default selection.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [macroEnabled, customerFile]);
+
+  const fetchMacroFeatures = async () => {
+    const baseFile = originalCustomerFileRef.current ?? customerFile;
+    if (!baseFile || !selectedMacroDateCol) return;
+    try {
+      setMacroLoading(true);
+      setMacroError(null);
+      const form = new FormData();
+      form.append("file", baseFile);
+      form.append("date_col", selectedMacroDateCol);
+      const res = await formUpload<{
+        macro_columns: string[];
+        date_col_used: string;
+        csv_with_macro: string;
+      }>("/data/macro/fetch", form);
+      setMacroColumns(res.macro_columns ?? []);
+      setMacroDateColUsed(res.date_col_used ?? selectedMacroDateCol);
+
+      // Carry the macro-augmented dataset forward as the working customer
+      // file, so it flows into the join/integration step below with the
+      // macro columns already attached.
+      const macroBlob = new Blob([res.csv_with_macro], { type: "text/csv" });
+      const macroFile = new File([macroBlob], baseFile.name, { type: "text/csv" });
+      setCustomerFile(macroFile);
+      setCustomerColumns(await readCsvHeader(macroFile));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to fetch macroeconomic data";
+      setMacroError(message);
+    } finally {
+      setMacroLoading(false);
+    }
+  };
+
+  const handleReFetchMacro = () => {
+    setMacroColumns([]);
+    setMacroDateColUsed(null);
+    setMacroError(null);
+    // Revert to the pristine (pre-macro) customer file so the next fetch
+    // attaches macro columns fresh instead of stacking onto the last result.
+    if (originalCustomerFileRef.current) {
+      setCustomerFile(originalCustomerFileRef.current);
+      void readCsvHeader(originalCustomerFileRef.current).then(setCustomerColumns).catch(() => setCustomerColumns([]));
+    }
   };
 
   const onDbFileChosen = async (f: File | null) => {
@@ -186,9 +272,10 @@ function DataUpload() {
       if (loanTable) form.append("loan_table", loanTable);
       if (collateralTable) form.append("collateral_table", collateralTable);
       form.append("join_specs_json", JSON.stringify(joinSpecs));
-      form.append("fetch_macro", String(fetchMacro));
-      // No fred_api_key sent — the backend reads FRED_API_KEY from its own
-      // environment (.env), so the user is never prompted for a key here.
+      // Macro columns (if any) are already attached to customerFile by
+      // fetchMacroFeatures above, so no fetch_macro/date-column params are
+      // sent here — integration just carries them through like any other
+      // customer-file column.
 
       const resp = await formUpload<any>("/data/integration/run", form);
       setReport(resp);
@@ -296,25 +383,71 @@ function DataUpload() {
           ) : null}
         </div>
 
-        {/* Macro data */}
+        {/* Macro data — opt-in only */}
         <div className="rounded-xl border border-border bg-card p-5 shadow-elegant md:col-span-2">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <TrendingUp className="h-5 w-5 text-muted-foreground" />
               <div>
                 <h4 className="text-sm font-semibold">Macroeconomic data</h4>
-                <p className="text-xs text-muted-foreground">Economic data is pulled in automatically — no setup needed from you.</p>
+                <p className="text-xs text-muted-foreground">Fetches macroeconomic indicators (interest rates, unemployment, inflation, etc.) from FRED and matches them to each record by date.</p>
               </div>
             </div>
             <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">
-              <input type="checkbox" checked={fetchMacro} onChange={(e) => setFetchMacro(e.target.checked)} className="h-4 w-4 accent-primary" />
-              Fetch from FRED
+              <input type="checkbox" checked={macroEnabled} onChange={(e) => setMacroEnabled(e.target.checked)} className="h-4 w-4 accent-primary" />
+              Include macro data
             </label>
           </div>
-          {fetchMacro ? (
-            <p className="mt-3 text-xs text-muted-foreground">
-              Series are aligned to each record's origination date automatically.
-            </p>
+
+          {macroEnabled && customerFile ? (
+            macroColumns.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                  Macro data attached: {macroColumns.join(", ")}
+                  {macroDateColUsed && <> (matched to the month of <code className="font-mono">{macroDateColUsed}</code>)</>}
+                </div>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition hover:border-primary hover:bg-primary-soft"
+                  onClick={handleReFetchMacro}
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Re-fetch / change date column
+                </button>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Loan origination date column
+                  </label>
+                  <select
+                    className="mt-2 w-full max-w-md rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                    value={selectedMacroDateCol}
+                    onChange={(e) => setSelectedMacroDateCol(e.target.value)}
+                  >
+                    <option value="">— none —</option>
+                    {macroCandidates.map(({ column, is_preferred }) => (
+                      <option key={column} value={column}>
+                        {is_preferred ? `⭐ ${column} (origination/loan date)` : column}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  disabled={!selectedMacroDateCol || macroLoading}
+                  className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={fetchMacroFeatures}
+                >
+                  {macroLoading ? <Loader className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+                  Fetch FRED macro features
+                </button>
+                {macroError && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{macroError}</div>
+                )}
+              </div>
+            )
           ) : null}
         </div>
       </div>
