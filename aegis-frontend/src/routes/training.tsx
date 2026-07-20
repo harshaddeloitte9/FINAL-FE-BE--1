@@ -45,11 +45,9 @@ interface ComparisonResult {
 // ── Merged in from models.tsx (Model Selection step, now folded into Training) ──
 interface ModelRecommendation {
   name: string;
-  score: number;
   description: string;
-  why: string;
-  best_for?: string[];
   icon?: string;
+  reasons?: string[]; // only populated for the backend-recommended model
 }
 
 interface ModelCard extends ModelRecommendation {
@@ -146,6 +144,7 @@ function Training() {
   const [recommendationTaskType, setRecommendationTaskType] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [recommendedModel, setRecommendedModel] = useState<ModelRecommendation | null>(null);
   const fetchRef = useRef(false);
 
   const datasetSummary = useMemo(() => {
@@ -213,26 +212,33 @@ function Training() {
           setRecommendationTaskType(response.task_type);
         }
 
-        const recs = response?.recommendations ?? response?.recommendations_list ?? response?.data ?? null;
-        if (recs && Array.isArray(recs)) {
-          const transformed = recs.map((rec: any) => ({
-            name: rec.name,
-            score: typeof rec.score === "number" ? rec.score : 5,
-            description: rec.description ?? "",
-            why: rec.why ?? rec.description ?? "",
-            best_for: rec.best_for ?? [],
-            icon: rec.icon,
+        const recommended = response?.recommended_model ?? null;
+        const allModels = response?.all_models ?? null;
+
+        if (recommended && Array.isArray(allModels)) {
+          const transformed: ModelCard[] = allModels.map((m: any) => ({
+            name: m.name,
+            description: m.description ?? "",
+            icon: m.icon,
+            reasons: m.name === recommended.name ? (recommended.reasons ?? []) : [],
           }));
 
           setRecommendations(transformed);
+          setRecommendedModel({
+            name: recommended.name,
+            description: recommended.description ?? "",
+            icon: recommended.icon,
+            reasons: recommended.reasons ?? [],
+          });
 
           const currentModelName = selectedModel?.name;
           const hasCurrentSelection = currentModelName
             ? transformed.some((m) => m.name === currentModelName)
             : false;
 
-          if (!hasCurrentSelection && transformed.length > 0) {
-            setSelectedModel(transformed[0]);
+          if (!hasCurrentSelection) {
+            const preselect = transformed.find((m) => m.name === recommended.name) ?? transformed[0];
+            if (preselect) setSelectedModel(preselect);
           }
 
           const validCompareModels = (compareModels ?? []).filter((name) =>
@@ -245,7 +251,7 @@ function Training() {
             setCompareModels(validCompareModels);
           }
         } else {
-          setModelsError("No recommendations returned by backend.");
+          setModelsError("No recommendation returned by backend.");
         }
       } catch (err: any) {
         console.error("Training: failed to load model recommendations", err);
@@ -262,10 +268,6 @@ function Training() {
       isMounted = false;
     };
   }, [file, profile, recommendations, selectedModel, compareModels, setRecommendations, setSelectedModel, setCompareModels]);
-
-  const handleSelectModel = useCallback((model: ModelCard) => {
-    setSelectedModel(model);
-  }, [setSelectedModel]);
 
   const toggleModelToCompare = useCallback((modelName: string) => {
     const current = compareModels ?? [];
@@ -566,58 +568,40 @@ function Training() {
       {transformedModels.length > 0 && (
         <>
           <section>
-            <h2 className="mb-4 text-base font-semibold">Recommended Models</h2>
+            <h2 className="mb-4 text-base font-semibold">Recommended Model</h2>
             <p className="mb-4 text-sm text-muted-foreground">
-              These candidates are ranked by suitability and can be compared on the same split after training.
+              Chosen automatically from your dataset's characteristics (size, missingness, class imbalance,
+              feature mix, correlation, and non-linearity). You can still compare or switch to any other model below.
             </p>
-            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
-              {transformedModels.map((m, index) => {
-                const rankBadge = `Rank ${index + 1}`;
-                return (
-                  <button
-                    key={m.name}
-                    type="button"
-                    onClick={() => handleSelectModel(m)}
-                    className={`relative flex flex-col rounded-2xl border p-6 shadow-elegant text-left transition ${
-                      m.selected ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/50"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm uppercase tracking-wider text-muted-foreground">{rankBadge}</span>
-                          <h3 className="text-base font-semibold">{m.name}</h3>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-2xl font-semibold tabular-nums">{m.score}/10</div>
-                        <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Score</div>
-                      </div>
-                    </div>
+            {recommendedModel && (
+              <div className="rounded-2xl border border-primary bg-primary/5 p-6 shadow-elegant">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    {recommendedModel.icon ? <span className="text-xl">{recommendedModel.icon}</span> : null}
+                    <h3 className="text-lg font-semibold">{recommendedModel.name}</h3>
+                  </div>
+                  <div className="inline-flex w-fit items-center gap-1 rounded-full bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">
+                    <CheckCircle2 className="h-3 w-3" /> Recommended
+                  </div>
+                </div>
 
-                    <p className="mt-4 text-sm text-muted-foreground">{m.description}</p>
+                <p className="mt-3 text-sm text-muted-foreground">{recommendedModel.description}</p>
 
-                    <dl className="mt-4 space-y-3 text-sm">
-                      <div>
-                        <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Why recommended</dt>
-                        <dd className="mt-1 text-foreground/90">{m.why || m.description}</dd>
-                      </div>
-                      {m.best_for?.length ? (
-                        <div>
-                          <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">Best for</dt>
-                          <dd className="mt-1 text-foreground/90">{m.best_for.join(" · ")}</dd>
-                        </div>
-                      ) : null}
-                    </dl>
-                    {m.selected && (
-                      <div className="mt-4 inline-flex w-fit items-center gap-1 rounded-full bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">
-                        <CheckCircle2 className="h-3 w-3" /> Selected to train
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+                {recommendedModel.reasons?.length ? (
+                  <div className="mt-4">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Why this model, for this dataset</div>
+                    <ul className="mt-2 space-y-1.5 text-sm text-foreground/90">
+                      {recommendedModel.reasons.map((reason, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="text-primary">•</span>
+                          <span>{reason}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            )}
           </section>
 
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
@@ -632,12 +616,13 @@ function Training() {
             >
               {transformedModels.map((model) => (
                 <option key={model.name} value={model.name}>
-                  {model.name}
+                  {model.name}{recommendedModel?.name === model.name ? " (recommended)" : ""}
                 </option>
               ))}
             </select>
             <p className="mt-2 text-sm text-muted-foreground">
-              The top-ranked model is pre-selected. You can change this.
+              The recommended model is pre-selected. You can override it and train any other model directly,
+              or compare a few side by side below.
             </p>
           </section>
 
