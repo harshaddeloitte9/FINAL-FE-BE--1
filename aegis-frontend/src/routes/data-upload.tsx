@@ -76,7 +76,6 @@ function DataUpload() {
   const [loanTable, setLoanTable] = useState<string>("");
   const [collateralTable, setCollateralTable] = useState<string>("");
   const [fetchMacro, setFetchMacro] = useState(true);
-  const [fredApiKey, setFredApiKey] = useState("");
 
   const [candidates, setCandidates] = useState<JoinCandidate[]>([]);
   const [primaryKeys, setPrimaryKeys] = useState<PrimaryKeyInfo[]>([]);
@@ -188,7 +187,8 @@ function DataUpload() {
       if (collateralTable) form.append("collateral_table", collateralTable);
       form.append("join_specs_json", JSON.stringify(joinSpecs));
       form.append("fetch_macro", String(fetchMacro));
-      if (fetchMacro && fredApiKey.trim()) form.append("fred_api_key", fredApiKey.trim());
+      // No fred_api_key sent — the backend reads FRED_API_KEY from its own
+      // environment (.env), so the user is never prompted for a key here.
 
       const resp = await formUpload<any>("/data/integration/run", form);
       setReport(resp);
@@ -312,25 +312,9 @@ function DataUpload() {
             </label>
           </div>
           {fetchMacro ? (
-            <div className="mt-3">
-              <label className="block text-xs font-medium text-foreground">
-                FRED API key
-                <input
-                  type="password"
-                  value={fredApiKey}
-                  onChange={(e) => setFredApiKey(e.target.value)}
-                  placeholder="Enter your FRED API key"
-                  autoComplete="off"
-                  className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
-                />
-              </label>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Series are aligned to each record's origination date automatically. Get a free key at{" "}
-                <a href="https://fred.stlouisfed.org/docs/api/api_key.html" target="_blank" rel="noreferrer" className="underline">
-                  fred.stlouisfed.org
-                </a>.
-              </p>
-            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Series are aligned to each record's origination date automatically.
+            </p>
           ) : null}
         </div>
       </div>

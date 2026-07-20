@@ -39,6 +39,12 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # reads a local .env file (if present) into os.environ, e.g. FRED_API_KEY
+except Exception:  # pragma: no cover
+    pass
+
 
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -69,14 +75,22 @@ class FREDError(RuntimeError):
 class FREDClient:
     def __init__(
         self,
-        api_key: str,
+        api_key: Optional[str] = None,
         series: Optional[Dict[str, str]] = None,
         timeout: int = 30,
         cache_dir: Optional[str] = None,
     ):
-        if not api_key:
-            raise FREDError("A FRED API key is required.")
-        self.api_key = api_key
+        # Falls back to the FRED_API_KEY environment variable (loaded from a
+        # local .env via load_dotenv() above) so callers never need to pass
+        # or prompt the user for a key — it's read once, automatically, for
+        # anyone who clones the repo and sets their own .env.
+        resolved_key = api_key or os.getenv("FRED_API_KEY")
+        if not resolved_key:
+            raise FREDError(
+                "A FRED API key is required. Set FRED_API_KEY in a local .env file "
+                "(see .env.example) or pass api_key explicitly."
+            )
+        self.api_key = resolved_key
         self.series = dict(series or DEFAULT_SERIES)
         self.timeout = timeout
         self.cache_dir = Path(cache_dir) if cache_dir else None
