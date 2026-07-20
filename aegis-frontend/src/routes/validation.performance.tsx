@@ -2,7 +2,7 @@ import React from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ArrowRight, AlertCircle, Loader2, PlayCircle, UploadCloud } from "lucide-react";
+import { ArrowRight, AlertCircle, Loader2, PlayCircle } from "lucide-react";
 import { rocCurve, prCurve, scoreDistribution } from "@/lib/mock-data";
 import { useDataset } from "@/lib/app-context";
 import PlotlyChart from "@/components/plotly-chart";
@@ -23,6 +23,7 @@ type PerformanceResponse = {
     score_distribution: { bins: Array<Record<string, any>> };
     calibration_chart: { points: Array<Record<string, any>> };
     train_test_auc_gap: { gap?: number | null; status?: string | null; cv_mean_auc?: number | null; test_auc?: number | null };
+    threshold_selection?: { threshold: number; metric: string; f1?: number; precision?: number; recall?: number } | null;
     metric_checks?: Array<Record<string, any>>;
     compliance_findings?: Array<Record<string, any>>;
     benchmark?: Record<string, any>;
@@ -58,7 +59,6 @@ function formatValue(value: unknown, digits = 3) {
 
 function Performance() {
   const ds = useDataset();
-  const [localFile, setLocalFile] = React.useState<File | null>(null);
   const [targetCol, setTargetCol] = React.useState(
     () => ds.profile?.target_col || ds.trainingResult?.evaluation_data?.target_col || "default",
   );
@@ -76,16 +76,15 @@ function Performance() {
     (ds.validationStage5Result as PerformanceResponse | null) ?? null,
   );
 
-  const datasetName = localFile?.name ?? ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
-  const datasetReady = Boolean(localFile || ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
+  const datasetName = ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
+  const datasetReady = Boolean(ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
 
   // By the time a reviewer reaches Stage 5, the working dataset often only
   // exists as profile.csv_text (not a literal File object) — carried forward
   // through preprocessing/FE/macro-fetch as text, same as Stage 4's activeFile
   // pattern. Without this reconstruction, the auto-run below silently no-ops
-  // whenever ds.file is null, leaving the page stuck on the bare input form.
+  // whenever ds.file is null, leaving the page stuck with no data.
   const datasetFile = React.useMemo<File | null>(() => {
-    if (localFile) return localFile;
     if (ds.file) return ds.file;
     const csvText = typeof ds.profile?.csv_text === "string" ? ds.profile.csv_text : "";
     if (!csvText.trim()) return null;
@@ -94,7 +93,7 @@ function Performance() {
       ? resolvedName
       : `${resolvedName}.csv`;
     return new File([csvText], safeName, { type: "text/csv" });
-  }, [localFile, ds.file, ds.profile?.csv_text, ds.profile?.dataset_name]);
+  }, [ds.file, ds.profile?.csv_text, ds.profile?.dataset_name]);
 
   const handleRun = React.useCallback(async (fileOverride?: File | null) => {
     const fileToUse = fileOverride ?? datasetFile;
@@ -167,6 +166,7 @@ function Performance() {
   const scoreBins = payload?.report?.score_distribution?.bins ?? [];
   const calibrationPoints = payload?.report?.calibration_chart?.points ?? [];
   const confusionMatrix = payload?.report?.confusion_matrix;
+  const thresholdSelection = payload?.report?.threshold_selection;
   const benchmarkResponse = payload?.report?.benchmark;
   const benchmarkComparison = benchmarkResponse?.comparison?.champion_vs_challenger;
 
@@ -393,63 +393,19 @@ function Performance() {
         description="A full performance check on data the model has never seen, before stress testing and regulatory review."
       />
 
-      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-        <div className="grid gap-4 md:grid-cols-3">
-          <label className="space-y-2 text-sm">
-            <span className="font-medium">Dataset</span>
-            <div className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background px-3 py-2 text-sm text-muted-foreground">
-              <UploadCloud className="h-4 w-4" />
-              <span className="truncate">{datasetName}</span>
-            </div>
-            <input
-              type="file"
-              accept=".csv,.xlsx,.xls"
-              className="block w-full text-sm text-muted-foreground"
-              onChange={(e) => setLocalFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
+      {loading ? (
+        <section className="flex items-center gap-2 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground shadow-elegant">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Running Stage 5 performance analysis on the shared dataset…
+        </section>
+      ) : null}
 
-          <label className="space-y-2 text-sm">
-            <span className="font-medium">Target column</span>
-            <input
-              value={targetCol}
-              onChange={(e) => setTargetCol(e.target.value)}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2"
-              placeholder="e.g. default"
-            />
-          </label>
-
-          <label className="space-y-2 text-sm">
-            <span className="font-medium">Model name</span>
-            <input
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2"
-              placeholder="e.g. Logistic Regression"
-            />
-          </label>
+      {error ? (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{error}</span>
         </div>
-
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => handleRun()}
-            disabled={!datasetFile || loading}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
-            Run Stage 5 analysis
-          </button>
-          <span className="text-sm text-muted-foreground">Runs the full performance check — accuracy, precision/recall trade-off, calibration, and prediction breakdown.</span>
-        </div>
-
-        {error ? (
-          <div className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
-          </div>
-        ) : null}
-      </section>
+      ) : null}
 
       <section className="rounded-xl border border-border bg-background p-4 text-sm text-muted-foreground">
         {datasetReady ? (
@@ -461,7 +417,7 @@ function Performance() {
 
       {!payload && !loading ? (
         <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground shadow-elegant">
-          Run the analysis to populate the Stage 5 performance report.
+          Waiting on a dataset from Stage 1/Stage 2 to run the Stage 5 performance report.
         </div>
       ) : null}
 
@@ -500,32 +456,53 @@ function Performance() {
                 <PlotlyChart figure={prFigure} style={{ height: "100%" }} />
               </Card>
 
-              <Card title="Confusion matrix" sub="Threshold 0.50">
-                <div className="grid h-full grid-cols-2 gap-3">
-                  {confusionMatrix?.matrix?.length
-                    ? confusionMatrix.matrix.flatMap((row, rowIndex) =>
-                        row.map((value, colIndex) => {
-                          const label = confusionMatrix.labels?.[colIndex] ?? colIndex;
-                          const tone = rowIndex === 1 && colIndex === 1 ? "primary" : rowIndex === 0 && colIndex === 1 ? "warning" : "destructive";
-                          return (
-                            <div
-                              key={`${rowIndex}-${colIndex}`}
-                              className={
-                                "flex flex-col justify-between rounded-xl border p-4 " +
-                                (tone === "primary"
-                                  ? "border-primary/30 bg-primary-soft"
-                                  : tone === "warning"
-                                    ? "border-warning/40 bg-warning/15"
-                                    : "border-destructive/30 bg-destructive/10")
-                              }
-                            >
-                              <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</span>
-                              <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
-                            </div>
-                          );
-                        }),
-                      )
-                    : null}
+              <Card
+                title="Confusion matrix"
+                sub={
+                  thresholdSelection
+                    ? `Threshold ${formatValue(thresholdSelection.threshold, 2)} (auto-calibrated for max F1)`
+                    : "Threshold —"
+                }
+              >
+                <div className="flex h-full flex-col">
+                  <div className="mb-1 text-center text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Predicted
+                  </div>
+                  <div className="flex flex-1 items-stretch gap-2">
+                    <div className="flex items-center">
+                      <span className="w-4 origin-center -rotate-90 whitespace-nowrap text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                        Actual
+                      </span>
+                    </div>
+                    <div className="grid flex-1 grid-cols-2 gap-3">
+                      {confusionMatrix?.matrix?.length
+                        ? confusionMatrix.matrix.flatMap((row, rowIndex) =>
+                            row.map((value, colIndex) => {
+                              const label = confusionMatrix.labels?.[colIndex] ?? colIndex;
+                              const tone = rowIndex === 1 && colIndex === 1 ? "primary" : rowIndex === 0 && colIndex === 1 ? "warning" : "destructive";
+                              return (
+                                <div
+                                  key={`${rowIndex}-${colIndex}`}
+                                  className={
+                                    "flex flex-col justify-between rounded-xl border p-4 " +
+                                    (tone === "primary"
+                                      ? "border-primary/30 bg-primary-soft"
+                                      : tone === "warning"
+                                        ? "border-warning/40 bg-warning/15"
+                                        : "border-destructive/30 bg-destructive/10")
+                                  }
+                                >
+                                  <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                                    Predicted {label} · Actual {confusionMatrix.labels?.[rowIndex] ?? rowIndex}
+                                  </span>
+                                  <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
+                                </div>
+                              );
+                            }),
+                          )
+                        : null}
+                    </div>
+                  </div>
                 </div>
               </Card>
 

@@ -28,7 +28,7 @@ type ThresholdCheck = {
 
 type Stage7Response = {
   checks: ThresholdCheck[];
-  summary: { total: number; pass: number; warn: number; fail: number };
+  summary: { total: number; pass: number; warn: number; fail: number; na?: number };
 };
 
 type BiasRow = { Group: string; Count: number; "Default Rate": number; "Avg Predicted PD": number; AUC: number | null };
@@ -71,7 +71,7 @@ function statusStyle(status: string | undefined) {
   return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
 }
 
-function SummaryTile({ label, value, tone }: { label: string; value: number; tone: "neutral" | "pass" | "warn" | "fail" }) {
+function SummaryTile({ label, value, tone }: { label: string; value: number; tone: "neutral" | "pass" | "warn" | "fail" | "na" }) {
   const classes =
     tone === "pass"
       ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
@@ -79,6 +79,8 @@ function SummaryTile({ label, value, tone }: { label: string; value: number; ton
       ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300"
       : tone === "fail"
       ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
+      : tone === "na"
+      ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
       : "border-border bg-background text-foreground";
 
   return (
@@ -338,11 +340,12 @@ function Regulatory() {
           <TabsContent value="compliance" className="space-y-6 pt-4">
             <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
               <h3 className="text-sm font-semibold">Regulatory Compliance Results (7.1–7.10)</h3>
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
                 <SummaryTile label="Total Checks" value={summary.total} tone="neutral" />
                 <SummaryTile label="PASS" value={summary.pass} tone="pass" />
                 <SummaryTile label="WARN" value={summary.warn} tone="warn" />
                 <SummaryTile label="FAIL" value={summary.fail} tone="fail" />
+                <SummaryTile label="N/A" value={summary.na ?? 0} tone="na" />
               </div>
               <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-muted">
                 <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />

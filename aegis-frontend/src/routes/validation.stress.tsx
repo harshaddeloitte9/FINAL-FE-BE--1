@@ -36,6 +36,7 @@ const TONE_CLASSES: Record<string, string> = {
   warn: "border-amber-500/40 bg-amber-500/10 text-amber-400",
   fail: "border-red-500/40 bg-red-500/10 text-red-400",
   pending: "border-slate-500/40 bg-slate-500/10 text-slate-400",
+  na: "border-indigo-500/30 bg-indigo-500/5 text-indigo-400",
 };
 
 const TONE_ICON: Record<string, string> = {
@@ -43,6 +44,7 @@ const TONE_ICON: Record<string, string> = {
   warn: "🟡",
   fail: "🔴",
   pending: "⏳",
+  na: "⏳",
 };
 
 function CheckCard({ check }: { check: { id: string; title: string; status: string; observed: string; threshold: string; source: string } }) {
@@ -314,12 +316,13 @@ function Stress() {
       </section>
 
       {summary ? (
-        <section className="grid grid-cols-1 gap-3 md:grid-cols-4">
+        <section className="grid grid-cols-1 gap-3 md:grid-cols-5">
           {[
-            ["Checks", (summary.pass ?? 0) + (summary.warn ?? 0) + (summary.fail ?? 0) + (summary.pending ?? 0), undefined],
+            ["Checks", (summary.pass ?? 0) + (summary.warn ?? 0) + (summary.fail ?? 0) + (summary.pending ?? 0) + (summary.na ?? 0), undefined],
             ["PASS", summary.pass, "pass"],
             ["WARN", summary.warn, "warn"],
             ["FAIL", summary.fail, "fail"],
+            ["N/A", summary.na, "na"],
           ].map(([label, value, tone]) => (
             <div key={label as string} className={`rounded-xl border p-4 ${tone ? TONE_CLASSES[tone as string] : "border-border bg-card"}`}>
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>

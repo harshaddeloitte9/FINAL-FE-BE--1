@@ -41,7 +41,7 @@ type RagRule = {
 type Stage3Response = {
   thresholdChecks: ThresholdCheck[];
   ragRules: RagRule[];
-  summary: { total: number; pass: number; warn: number; fail: number };
+  summary: { total: number; pass: number; warn: number; fail: number; pending?: number; na?: number };
   regulatoryAlignment: {
     verdict: "PASS" | "CONDITIONAL" | "FAIL" | string;
     counts: { pass: number; warn: number; fail: number; pending: number };
@@ -319,14 +319,16 @@ function ComplianceDonut({ pass, warn, fail, size = 88 }: { pass: number; warn: 
   );
 }
 
-function CountCard({ label, value, tone }: { label: string; value: number; tone: "pass" | "warn" | "fail" }) {
+function CountCard({ label, value, tone }: { label: string; value: number; tone: "pass" | "warn" | "fail" | "na" }) {
   const color =
     tone === "pass"
       ? "text-emerald-600 dark:text-emerald-400"
       : tone === "warn"
       ? "text-amber-600 dark:text-amber-400"
+      : tone === "na"
+      ? "text-indigo-600 dark:text-indigo-400"
       : "text-red-600 dark:text-red-400";
-  const title = tone === "pass" ? "Pass" : tone === "warn" ? "Warn" : "Fail";
+  const title = tone === "pass" ? "Pass" : tone === "warn" ? "Warn" : tone === "na" ? "N/A" : "Fail";
   return (
     <div className="rounded-xl border border-border bg-background p-4">
       <div className="text-xs text-muted-foreground">{title}</div>
@@ -338,10 +340,10 @@ function CountCard({ label, value, tone }: { label: string; value: number; tone:
 function ComplianceSummaryRow({
   summary,
 }: {
-  summary: { total: number; pass: number; warn: number; fail: number };
+  summary: { total: number; pass: number; warn: number; fail: number; pending?: number; na?: number };
 }) {
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
       <div className="flex items-center gap-4 rounded-xl border border-border bg-background p-4">
         <ComplianceDonut pass={summary.pass} warn={summary.warn} fail={summary.fail} />
         <div className="min-w-0">
@@ -354,6 +356,7 @@ function ComplianceSummaryRow({
       <CountCard label="Pass" value={summary.pass} tone="pass" />
       <CountCard label="Warn" value={summary.warn} tone="warn" />
       <CountCard label="Fail" value={summary.fail} tone="fail" />
+      <CountCard label="N/A" value={summary.na ?? 0} tone="na" />
     </div>
   );
 }

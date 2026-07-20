@@ -489,6 +489,11 @@ def run_stress_suite(rep_result: dict, val_df: Optional[pd.DataFrame], freq_key:
     checks = [c for c in [sensitivity.get("check"), backtest.get("check"), psi.get("check")] if c]
     dir_fail = sum(1 for r in directional if r["status"] == "FAIL")
     dir_warn = sum(1 for r in directional if r["status"] == "WARN")
+    # SKIP (no driver column detected) and ERROR (exception) results are
+    # directional-test outcomes that can't be scored PASS/WARN/FAIL — they
+    # get their own "na" bucket rather than being dropped from every counter,
+    # so the summary tile's total always equals pass+warn+fail+pending+na.
+    dir_na = sum(1 for r in directional if r["status"] in ("SKIP", "ERROR"))
 
     return {
         "available": True,
@@ -504,6 +509,7 @@ def run_stress_suite(rep_result: dict, val_df: Optional[pd.DataFrame], freq_key:
             "warn": sum(1 for c in checks if c["status"] == "WARN") + dir_warn,
             "fail": sum(1 for c in checks if c["status"] == "FAIL") + dir_fail,
             "pending": sum(1 for c in checks if c["status"] == "PENDING"),
+            "na": dir_na,
         },
     }
 

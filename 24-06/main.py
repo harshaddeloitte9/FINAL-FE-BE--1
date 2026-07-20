@@ -2777,9 +2777,16 @@ async def validation_performance(
     if y_true_arr is not None and y_proba_arr is not None:
         score_distribution = compute_score_distribution(y_true_arr, y_proba_arr, n_bins=40)
 
+    # Auto-calibrate the operating threshold the same way /models/evaluate
+    # does (select_best_threshold, maximizes F1) instead of a fixed 0.5
+    # cut-off, so the confusion matrix and its displayed threshold always
+    # line up with the threshold actually used to build it.
+    threshold_selection = None
     cm = []
     if y_true_arr is not None and y_proba_arr is not None:
-        y_pred = (y_proba_arr >= 0.5).astype(int)
+        threshold_selection = eval_engine.select_best_threshold(y_true_arr, y_proba_arr, metric="f1")
+        resolved_threshold = threshold_selection["threshold"]
+        y_pred = (y_proba_arr >= resolved_threshold).astype(int)
         cm_matrix = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).tolist()
         cm = {"labels": [0, 1], "matrix": cm_matrix}
 
@@ -2899,6 +2906,7 @@ async def validation_performance(
             "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc")},
             "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc")},
             "confusion_matrix": cm,
+            "threshold_selection": threshold_selection,
             "score_distribution": {"bins": score_distribution},
             "calibration_chart": {"points": calibration_points},
             "train_test_auc_gap": {
@@ -3397,6 +3405,10 @@ def _group_stage2(report: dict, rag_results: Optional[List[dict]] = None) -> dic
         "warn": sum(1 for f in combined if f.get("status") == "WARN"),
         "fail": sum(1 for f in combined if f.get("status") == "FAIL"),
         "pending": sum(1 for f in combined if f.get("status") == "PENDING"),
+        # Anything outside PASS/WARN/FAIL/PENDING (e.g. an unrecognized or
+        # missing status) is bucketed here so summary.total always equals
+        # the sum of every exposed bucket instead of silently over-counting.
+        "na": sum(1 for f in combined if f.get("status") not in ("PASS", "WARN", "FAIL", "PENDING")),
     }
     stage2_high_fails = [f for f in combined if f.get("status") == "FAIL" and str(f.get("severity", "")).upper() == "HIGH"]
     if len(stage2_high_fails) == 0 and stage2_counts["fail"] == 0 and stage2_counts["pending"] == 0:
@@ -3442,6 +3454,8 @@ def _group_stage2(report: dict, rag_results: Optional[List[dict]] = None) -> dic
             "pass": stage2_counts["pass"],
             "warn": stage2_counts["warn"],
             "fail": stage2_counts["fail"],
+            "pending": stage2_counts["pending"],
+            "na": stage2_counts["na"],
         },
         "regulatoryAlignment": regulatory,
         "raw_findings": raw_findings,
@@ -3512,6 +3526,8 @@ def _group_stage3(report: dict, rag_results: Optional[List[dict]] = None, df=Non
         "warn": sum(1 for f in combined if f.get("status") == "WARN"),
         "fail": sum(1 for f in combined if f.get("status") == "FAIL"),
         "pending": sum(1 for f in combined if f.get("status") == "PENDING"),
+        # See _group_stage2's identical "na" bucket for the reasoning.
+        "na": sum(1 for f in combined if f.get("status") not in ("PASS", "WARN", "FAIL", "PENDING")),
     }
     stage3_high_fails = [f for f in combined if f.get("status") == "FAIL" and str(f.get("severity", "")).upper() == "HIGH"]
     if len(stage3_high_fails) == 0 and stage3_counts["fail"] == 0 and stage3_counts["pending"] == 0:
@@ -3557,6 +3573,8 @@ def _group_stage3(report: dict, rag_results: Optional[List[dict]] = None, df=Non
             "pass": stage3_counts["pass"],
             "warn": stage3_counts["warn"],
             "fail": stage3_counts["fail"],
+            "pending": stage3_counts["pending"],
+            "na": stage3_counts["na"],
         },
         "regulatoryAlignment": regulatory,
         "featureRelevance": feature_relevance,
@@ -3750,6 +3768,10 @@ async def validation_stage7_run(
         "pass": sum(1 for c in checks if c.get("status") == "PASS"),
         "warn": sum(1 for c in checks if c.get("status") == "WARN"),
         "fail": sum(1 for c in checks if c.get("status") == "FAIL"),
+        # Anything _normalize_threshold_check doesn't map to PASS/WARN/FAIL
+        # lands here so total always equals pass+warn+fail+na (see the
+        # identical bucket in _group_stage2/_group_stage3).
+        "na": sum(1 for c in checks if c.get("status") not in ("PASS", "WARN", "FAIL")),
     }
 
     return {"checks": checks, "summary": summary}
