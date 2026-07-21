@@ -1,8 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Info } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useDataset } from "@/lib/app-context";
 import { getPreferredTheme, setStoredTheme, type Theme } from "@/lib/theme";
 
@@ -14,7 +12,7 @@ export const Route = createFileRoute("/settings")({
 const REGULATORY_FRAMEWORKS = ["SS1/23", "SS11/13", "IFRS 9", "IFRS 7"];
 
 function Settings() {
-  const { decisionThreshold, setDecisionThreshold, resetSession } = useDataset();
+  const { resetSession } = useDataset();
   const [theme, setTheme] = useState<Theme>(() => getPreferredTheme());
   const [resetConfirming, setResetConfirming] = useState(false);
   const [resetDone, setResetDone] = useState(false);
@@ -41,57 +39,6 @@ function Settings() {
       <PageHeader title="Settings" description="Workspace preferences for this browser." />
 
       <div className="divide-y divide-border rounded-2xl border border-border bg-card shadow-elegant">
-        {/* Decision threshold */}
-        <div className="flex flex-col gap-3 px-6 py-5">
-          <div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm font-semibold">Decision threshold</span>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="What is the decision threshold?"
-                    className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
-                  >
-                    <Info className="h-4 w-4" />
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent className="w-80 text-sm leading-relaxed">
-                  The model outputs a probability (e.g. 0.37, 0.82), not a direct yes/no. This threshold is the
-                  cutoff used to turn that probability into a default / non-default classification. Example: at
-                  0.50, any prediction ≥ 0.50 is classified as "will default." Lowering it flags more borrowers as
-                  risky (catches more real defaults, but more false alarms); raising it is stricter (fewer false
-                  alarms, but may miss some real defaults). This affects precision, recall, and other metrics shown
-                  in Model Evaluation. Scoped to Model Development only — Model Validation stages calibrate their
-                  own threshold independently and ignore this setting.
-                </PopoverContent>
-              </Popover>
-            </div>
-            <div className="text-sm text-muted-foreground">
-              PD cut-off used to classify a prediction as default vs non-default when training or evaluating a
-              model in Model Development. Model Validation stages (Replication, Performance Testing, Stress
-              Testing) calibrate their own threshold independently and are not affected by this setting.
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0.1}
-              max={0.9}
-              step={0.05}
-              value={decisionThreshold}
-              onChange={(e) => setDecisionThreshold(Number(e.target.value))}
-              className="h-2 w-full max-w-md accent-primary"
-            />
-            <span className="w-14 shrink-0 rounded-lg border border-border bg-background px-2 py-1 text-center text-sm font-semibold tabular-nums">
-              {decisionThreshold.toFixed(2)}
-            </span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Applied the next time a model is trained or evaluated in Model Development. Saved to this browser.
-          </p>
-        </div>
-
         {/* Dark mode */}
         <div className="flex flex-col gap-1 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
           <div>

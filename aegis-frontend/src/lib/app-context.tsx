@@ -84,14 +84,9 @@ type DatasetState = {
   setValidationStage7Result: (result: Record<string, any> | null) => void;
   setValidationStage7BiasResult: (result: Record<string, any> | null) => void;
   setValidationStage8Result: (result: Record<string, any> | null) => void;
-  // PD classification cut-off used when computing evaluation metrics — the
-  // frontend equivalent of the old Streamlit app's sidebar "Decision
-  // Threshold (Eval Step)" slider (app.py: st.session_state.decision_threshold).
-  decisionThreshold: number;
-  setDecisionThreshold: (value: number) => void;
   // Clears all uploaded/derived dataset + validation state (and the
   // localStorage blob it's persisted to) without touching app-level
-  // preferences like decisionThreshold or theme.
+  // preferences like theme.
   resetSession: () => void;
 };
 
@@ -120,7 +115,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [validationStage7Result, setValidationStage7ResultState] = React.useState<Record<string, any> | null>(null);
   const [validationStage7BiasResult, setValidationStage7BiasResultState] = React.useState<Record<string, any> | null>(null);
   const [validationStage8Result, setValidationStage8ResultState] = React.useState<Record<string, any> | null>(null);
-  const [decisionThreshold, setDecisionThresholdState] = React.useState(0.5);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
   React.useEffect(() => {
@@ -143,7 +137,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
         compareModels?: string[] | null;
         selectedModel?: ModelRecommendation | null;
         selectedComparisonModel?: string | null;
-        decisionThreshold?: number;
       };
 
       if (parsed.trainingConfig) {
@@ -163,9 +156,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       }
       if (parsed.selectedComparisonModel) {
         setSelectedComparisonModelState(parsed.selectedComparisonModel);
-      }
-      if (typeof parsed.decisionThreshold === "number") {
-        setDecisionThresholdState(parsed.decisionThreshold);
       }
     } catch {
       // Ignore invalid stored state
@@ -192,7 +182,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       compareModels,
       selectedModel,
       selectedComparisonModel,
-      decisionThreshold,
     };
 
     try {
@@ -202,7 +191,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       // fine in memory for this session, it just won't survive a refresh.
       console.warn("Failed to persist dataset state to localStorage:", err);
     }
-  }, [trainingConfig, trainingResult, comparisonResults, compareModels, selectedModel, selectedComparisonModel, decisionThreshold, isHydrated]);
+  }, [trainingConfig, trainingResult, comparisonResults, compareModels, selectedModel, selectedComparisonModel, isHydrated]);
 
   const setUploadResult = React.useCallback((f: File | null, p: DatasetProfile | null) => {
     setFile(f);
@@ -298,10 +287,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setValidationStage8ResultState(result);
   }, []);
 
-  const setDecisionThreshold = React.useCallback((val: number) => {
-    setDecisionThresholdState(val);
-  }, []);
-
   const resetSession = React.useCallback(() => {
     setFile(null);
     setProfile(null);
@@ -358,8 +343,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationStage7Result,
       validationStage7BiasResult,
       validationStage8Result,
-      decisionThreshold,
-      setDecisionThreshold,
       resetSession,
       setUploadResult,
       setProfile: setProfileState,
@@ -407,8 +390,6 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       validationStage7Result,
       validationStage7BiasResult,
       validationStage8Result,
-      decisionThreshold,
-      setDecisionThreshold,
       resetSession,
       setUploadResult,
       setRecommendations,
