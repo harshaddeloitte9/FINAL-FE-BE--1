@@ -119,6 +119,20 @@ function Training() {
   const [modelComparison, setModelComparison] = useState<boolean>(false);
   const [modelsToCompare, setModelsToCompare] = useState<string[]>(compareModels ?? []);
 
+  // ── Decision threshold: auto (F1-maximizing, computed by the backend) by
+  // default, with an optional manual override via the slider below. When
+  // `useAutoThreshold` is true, no `threshold` field is sent to /models/train
+  // at all — main.py's _build_evaluation_data() treats a missing/None
+  // threshold as "auto-select the F1-maximizing cut-off" and every chart
+  // (confusion matrix, threshold curve, evaluation metrics) is built
+  // against that resolved value. Flipping the toggle off pins the exact
+  // value the slider shows instead. ──
+  const [useAutoThreshold, setUseAutoThreshold] = useState(true);
+  const [manualThreshold, setManualThreshold] = useState<number>(
+    typeof decisionThreshold === "number" ? decisionThreshold : 0.5,
+  );
+  const [resolvedThreshold, setResolvedThreshold] = useState<number | null>(null);
+
   // ── Flow mode: user picks one of two paths before training ─────────────
   // 'choose'  → initial fork, nothing configured yet
   // 'compare' → lightweight side-by-side comparison across candidate models
@@ -306,10 +320,13 @@ function Training() {
     if (Object.keys(config.manual_params).length > 0) {
       trainForm.append("manual_params", JSON.stringify(config.manual_params));
     }
-    // PD classification cut-off from Settings — passed explicitly so
-    // evaluation metrics use the reviewer's chosen threshold instead of
-    // always auto-selecting the F1-maximizing one.
-    trainForm.append("threshold", String(decisionThreshold));
+    // PD classification cut-off. Omitted entirely when "Auto" is on, so the
+    // backend (main.py's _build_evaluation_data, threshold=None) auto-selects
+    // the F1-maximizing threshold. Only send an explicit value when the
+    // reviewer has overridden it via the slider below.
+    if (!useAutoThreshold) {
+      trainForm.append("threshold", String(manualThreshold));
+    }
 
     const trainResponse = await formUpload("/models/train", trainForm);
     if (!trainResponse?.training_info || !trainResponse?.split_stats || !trainResponse?.model_artifact) {
@@ -349,6 +366,9 @@ function Training() {
       setTaskType(result.task_type);
       setTrainingModelName(result.model_name);
       setTrainingConfigResult(result.training_config ?? null);
+      setResolvedThreshold(
+        typeof result.evaluation_data?.threshold === "number" ? result.evaluation_data.threshold : null,
+      );
       setComparisonResults([{ model_name: result.model_name, ...result.evaluation_metrics, training_time_s: result.training_info.training_time_s }]);
       setTrainingResult({
         task_type: result.task_type,
@@ -969,6 +989,60 @@ function Training() {
             </div>
           )}
         </div>
+      </section>
+
+      {/* Decision Threshold */}
+      <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+        <h2 className="text-base font-semibold mb-4">Decision Threshold</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="text-sm font-medium">Auto-select (maximize F1)</label>
+            <p className="text-xs text-muted-foreground mt-1">
+              Lets the backend pick the PD cut-off that maximizes F1 on the hold-out set.
+              Turn off to pin a specific value instead.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={useAutoThreshold}
+            onChange={(e) => setUseAutoThreshold(e.target.checked)}
+            className="w-5 h-5"
+          />
+        </div>
+
+        {!useAutoThreshold && (
+          <div className="mt-5">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm font-medium">Manual threshold</label>
+              <span className="text-sm font-mono tabular-nums">{manualThreshold.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={manualThreshold}
+              onChange={(e) => setManualThreshold(parseFloat(e.target.value))}
+              className="w-full accent-primary"
+            />
+            <div className="flex justify-between text-xs text-muted-foreground mt-1">
+              <span>0.00</span>
+              <span>0.50</span>
+              <span>1.00</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Predictions with PD ≥ {manualThreshold.toFixed(2)} are classified as default. Lower values
+              catch more defaults (higher recall, more false positives); higher values do the opposite.
+            </p>
+          </div>
+        )}
+
+        {resolvedThreshold !== null && (
+          <p className="text-xs text-muted-foreground mt-4 pt-4 border-t border-border">
+            Last training run used a threshold of <strong>{resolvedThreshold.toFixed(4)}</strong>
+            {useAutoThreshold ? " (auto-selected to maximize F1)" : " (manual override)"}.
+          </p>
+        )}
       </section>
 
       {/* Manual Hyperparameter Controls */}
