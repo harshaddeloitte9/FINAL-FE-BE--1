@@ -26,7 +26,6 @@ module does NOT disable TLS verification.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional, List, Tuple
@@ -38,13 +37,6 @@ try:
     import requests
 except Exception:  # pragma: no cover
     requests = None
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()  # reads a local .env file (if present) into os.environ, e.g. FRED_API_KEY
-except Exception:  # pragma: no cover
-    pass
-
 
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -80,17 +72,16 @@ class FREDClient:
         timeout: int = 30,
         cache_dir: Optional[str] = None,
     ):
-        # Falls back to the FRED_API_KEY environment variable (loaded from a
-        # local .env via load_dotenv() above) so callers never need to pass
-        # or prompt the user for a key — it's read once, automatically, for
-        # anyone who clones the repo and sets their own .env.
-        resolved_key = api_key or os.getenv("FRED_API_KEY")
-        if not resolved_key:
+        # The API key must be supplied explicitly by the caller (per-request,
+        # from the UI) — there is deliberately no environment-variable or
+        # .env fallback here, so no FRED key is ever stored anywhere on the
+        # server between requests.
+        if not api_key or not api_key.strip():
             raise FREDError(
-                "A FRED API key is required. Set FRED_API_KEY in a local .env file "
-                "(see .env.example) or pass api_key explicitly."
+                "A FRED API key is required. Pass api_key explicitly — this client "
+                "no longer reads FRED_API_KEY from the environment."
             )
-        self.api_key = resolved_key
+        self.api_key = api_key.strip()
         self.series = dict(series or DEFAULT_SERIES)
         self.timeout = timeout
         self.cache_dir = Path(cache_dir) if cache_dir else None
