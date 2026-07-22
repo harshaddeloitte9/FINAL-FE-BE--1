@@ -24,7 +24,19 @@ type ThresholdCheck = {
   observed: string;
   threshold: string;
   detail: string;
+  check_type?: string;
 };
+
+// check_type "data"/"cross_reference" checks (e.g. VIF > 10, missing data
+// < 20%, duplicate rate < 1%) compute a number against an industry-standard
+// statistical convention — the regulation cited requires that kind of check
+// to exist and be documented, not that specific cutoff value. check_type
+// "doc"/"manual" checks (methodology justification, bias documentation,
+// etc.) genuinely reference regulatory language, so their citation stays
+// combined with the threshold as before.
+function isQuantitativeConventionCheck(checkType: string | undefined): boolean {
+  return checkType === "data" || checkType === "cross_reference";
+}
 
 type RagRule = {
   rule_id: string;
@@ -817,6 +829,7 @@ function ThresholdTile({
 
 function ThresholdDetailPanel({ check, profileSource }: { check: ThresholdCheck; profileSource: any }) {
   const s = statusStyle(check.status);
+  const isConvention = isQuantitativeConventionCheck(check.check_type);
   return (
     <div className={`mt-4 rounded-xl border ${s.border} ${s.bg} p-5`}>
       <div className="flex items-start justify-between gap-3">
@@ -825,9 +838,15 @@ function ThresholdDetailPanel({ check, profileSource }: { check: ThresholdCheck;
         </h4>
         <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {check.source} — {check.principle}
-      </p>
+      {isConvention ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Regulatory basis: {check.source} {check.principle} — requires this to be assessed/documented
+        </p>
+      ) : (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {check.source} — {check.principle}
+        </p>
+      )}
       <dl className="mt-3 space-y-1.5 text-sm">
         <div>
           <dt className="inline font-semibold text-foreground">Observed </dt>
@@ -835,7 +854,10 @@ function ThresholdDetailPanel({ check, profileSource }: { check: ThresholdCheck;
         </div>
         <div>
           <dt className="inline font-semibold text-foreground">Threshold </dt>
-          <dd className="inline text-foreground/90">{check.threshold}</dd>
+          <dd className="inline text-foreground/90">
+            {check.threshold}
+            {isConvention ? <span className="text-muted-foreground"> — industry-standard convention</span> : null}
+          </dd>
         </div>
       </dl>
       <p className="mt-3 text-sm text-muted-foreground">{check.detail}</p>

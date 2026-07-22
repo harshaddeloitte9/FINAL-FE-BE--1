@@ -511,6 +511,10 @@ def run_bias_check(
                 "observed": f"AUC gap across groups: {auc_gap:.4f} (max: {max(auc_vals):.4f}, min: {min(auc_vals):.4f})",
                 "threshold": "AUC gap across protected groups < 0.05",
                 "detail": "Large AUC gap indicates model performs differently for different groups — potential discrimination risk",
+                # A statistical convention (not literal regulatory text) —
+                # SS1/23 P1.3 requires bias to be assessed, not this specific
+                # 0.05 cutoff. See _normalize_threshold_check in main.py.
+                "check_type": "data",
             }
         else:
             out["check"] = {
@@ -523,6 +527,7 @@ def run_bias_check(
                 "observed": "Fewer than 2 groups with >= 10 records — AUC gap not computable",
                 "threshold": "AUC gap across protected groups < 0.05",
                 "detail": "",
+                "check_type": "data",
             }
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"

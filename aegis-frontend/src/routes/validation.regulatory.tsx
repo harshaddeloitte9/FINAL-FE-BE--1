@@ -25,6 +25,7 @@ type ThresholdCheck = {
   observed: string;
   threshold: string;
   detail: string;
+  check_type?: string;
 };
 
 type Stage7Response = {
@@ -44,7 +45,18 @@ type BiasCheckResult = {
   observed: string;
   threshold: string;
   detail: string;
+  check_type?: string;
 };
+
+// check_type "data"/"cross_reference" checks compute a number against an
+// industry-standard statistical convention (e.g. the Fair Lending bias
+// check's "AUC gap < 0.05") — the cited regulation requires that kind of
+// check to exist, not that specific cutoff. The 7.1-7.10 regulatory checks
+// are check_type "doc" (genuinely quoting/requiring regulatory text) and
+// keep their existing combined citation.
+function isQuantitativeConventionCheck(checkType: string | undefined): boolean {
+  return checkType === "data" || checkType === "cross_reference";
+}
 
 type BiasResponse = {
   success: boolean;
@@ -75,6 +87,7 @@ function statusStyle(status: string | undefined) {
 function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
   const s = statusStyle(check.status);
   const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "bg-muted text-foreground";
+  const isConvention = isQuantitativeConventionCheck(check.check_type);
   return (
     <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
       <div className="flex items-start justify-between gap-3">
@@ -86,13 +99,22 @@ function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
         </div>
         <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
       </div>
-      <div className="mt-2 text-xs text-muted-foreground">
-        📋 {check.source} — {check.principle}
-      </div>
+      {isConvention ? (
+        <div className="mt-2 text-xs text-muted-foreground">
+          📋 Regulatory basis: {check.source} {check.principle} — requires this to be assessed/documented
+        </div>
+      ) : (
+        <div className="mt-2 text-xs text-muted-foreground">
+          📋 {check.source} — {check.principle}
+        </div>
+      )}
       <div className="mt-2 text-sm text-foreground">
         📊 Observed: <code className="text-foreground/90">{check.observed}</code>
       </div>
-      <div className="mt-1 text-xs text-muted-foreground">📐 Threshold: {check.threshold}</div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        📐 Threshold: {check.threshold}
+        {isConvention ? " — industry-standard convention" : ""}
+      </div>
       {check.detail ? <div className="mt-2 text-sm text-muted-foreground">💡 {check.detail}</div> : null}
     </div>
   );
@@ -457,6 +479,7 @@ function Regulatory() {
                           observed: biasData.check.observed,
                           threshold: biasData.check.threshold,
                           detail: biasData.check.detail,
+                          check_type: biasData.check.check_type,
                         }}
                       />
                     </div>

@@ -48,6 +48,11 @@ const TONE_ICON: Record<string, string> = {
   na: "⏳",
 };
 
+// Every check rendered through this card (sensitivity AUC drop, PSI, backtest
+// gap) is a quantitative statistical check — the cited regulation requires
+// this kind of check to be performed, not the specific numeric cutoff, which
+// is an industry-standard convention. Split the two so the citation isn't
+// misread as the source of the number itself.
 function CheckCard({ check }: { check: { id: string; title: string; status: string; observed: string; threshold: string; source: string } }) {
   const tone = statusTone(check.status);
   return (
@@ -56,9 +61,8 @@ function CheckCard({ check }: { check: { id: string; title: string; status: stri
         {TONE_ICON[tone]} [{check.id}] {check.title}
       </div>
       <div className="mt-1 text-xs text-muted-foreground">{check.observed}</div>
-      <div className="mt-1 text-[11px] text-muted-foreground/80">
-        {check.threshold} — {check.source}
-      </div>
+      <div className="mt-1 text-[11px] text-muted-foreground/80">Regulatory basis: {check.source} — requires this to be assessed/documented</div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground/80">Threshold: {check.threshold} — industry-standard convention</div>
     </div>
   );
 }

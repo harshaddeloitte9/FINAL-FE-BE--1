@@ -3472,7 +3472,15 @@ def _group_stage2(report: dict, rag_results: Optional[List[dict]] = None) -> dic
 
 def _normalize_threshold_check(f: dict) -> dict:
     """Normalize a check_conceptual_soundness() finding into the
-    'Recommended Threshold Checks' card schema (mirrors app.py's left column)."""
+    'Recommended Threshold Checks' card schema (mirrors app.py's left column).
+
+    check_type is passed through so the frontend can tell a quantitative
+    check (check_type "data"/"cross_reference" — e.g. VIF > 10, missing data
+    < 20%) from a documentation check (check_type "doc" — e.g. methodology
+    justification, bias documentation). Only the former's numeric threshold
+    is an industry-statistical convention rather than regulatory text, so
+    only those get the "Regulatory basis" / "Threshold" split label.
+    """
     return {
         "check_id": f.get("check_id", ""),
         "title": f.get("title", ""),
@@ -3483,6 +3491,7 @@ def _normalize_threshold_check(f: dict) -> dict:
         "observed": f.get("observed", ""),
         "threshold": f.get("threshold", ""),
         "detail": f.get("detail", ""),
+        "check_type": f.get("check_type", ""),
     }
 
 
