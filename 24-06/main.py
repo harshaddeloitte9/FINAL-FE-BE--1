@@ -20,9 +20,6 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Union
 
-from dotenv import load_dotenv
-load_dotenv()  # reads a local .env file (if present) into os.environ, e.g. FRED_API_KEY
-
 BACKEND_DIR = Path(__file__).resolve().parent
 SOURCE_OF_TRUTH_DIR = Path(__file__).resolve().parent.parent / "Credit-Risk-Poc-main"
 for path in [BACKEND_DIR, SOURCE_OF_TRUTH_DIR]:
@@ -1405,7 +1402,7 @@ async def integration_run(
             raise HTTPException(status_code=400, detail=str(exc))
 
         if fetch_macro:
-            api_key = (fred_api_key or "").strip() or os.environ.get("FRED_API_KEY")
+            api_key = (fred_api_key or "").strip()
             if not api_key:
                 integrator.report.warnings.append("No FRED API key was provided — macro data was not fetched.")
             else:
@@ -2064,7 +2061,8 @@ async def macro_fetch(
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
     synthetic_samples: Optional[int] = Form(None),
-    date_col: str = Form(...),
+    date_col: Optional[str] = Form(None),
+    fred_api_key: str = Form(...),
 ) -> Dict[str, Any]:
     """
     Fetch FRED macro features (GDP, unemployment, Fed funds rate) aligned to
@@ -2074,25 +2072,34 @@ async def macro_fetch(
     `csv_text` into /data/preprocess and /data/feature-engineering, plus the
     new macro column names for display.
 
-    The FRED API key is read from the FRED_API_KEY environment variable —
-    never hardcoded (the old app had a live key committed in source; this
-    endpoint deliberately does not repeat that).
+    The FRED API key is supplied by the caller on every request (entered in
+    the UI) — it is never read from an environment variable or stored
+    anywhere on the server between requests.
+
+    `date_col` is optional: when omitted, the loan-origination date column is
+    auto-detected via fred_client.detect_macro_date_col (same heuristic used
+    to populate /data/macro/date-columns's default_date_col), so the caller
+    doesn't need to resolve it up front.
     """
-    api_key = os.environ.get("FRED_API_KEY")
+    api_key = (fred_api_key or "").strip()
     if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="FRED_API_KEY environment variable is not set on the server.",
-        )
+        raise HTTPException(status_code=400, detail="A FRED API key is required.")
 
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
-    if date_col not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Date column '{date_col}' not found")
+
+    resolved_date_col = date_col or fred_client.detect_macro_date_col(df)
+    if not resolved_date_col:
+        raise HTTPException(
+            status_code=400,
+            detail="No origination/observation date column could be auto-detected in this dataset.",
+        )
+    if resolved_date_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Date column '{resolved_date_col}' not found")
 
     try:
         client = fred_client.FREDClient(api_key=api_key, cache_dir=".fred_cache")
         df_with_macro, macro_cols = fred_client.attach_macro_features(
-            df, fred_client=client, date_col=date_col,
+            df, fred_client=client, date_col=resolved_date_col,
         )
     except fred_client.FREDError as exc:
         raise HTTPException(status_code=502, detail=f"FRED fetch failed: {exc}")
@@ -2102,7 +2109,7 @@ async def macro_fetch(
 
     return {
         "macro_columns": macro_cols,
-        "date_col_used": date_col,
+        "date_col_used": resolved_date_col,
         "csv_with_macro": df_with_macro.to_csv(index=False),
         "preview": _serialize_dataframe(df_with_macro, max_rows=5)["preview"],
         "shape": list(df_with_macro.shape),

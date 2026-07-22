@@ -74,6 +74,7 @@ function Training() {
     setComparisonResults,
     setSelectedComparisonModel,
     preprocessingResult,
+    decisionThreshold,
   } = useDataset();
 
   // ── Split config: owned by Preprocessing (Step 3). Training only reads it. ──
@@ -127,7 +128,9 @@ function Training() {
   // against that resolved value. Flipping the toggle off pins the exact
   // value the slider shows instead. ──
   const [useAutoThreshold, setUseAutoThreshold] = useState(true);
-  const [manualThreshold, setManualThreshold] = useState<number>(0.5);
+  const [manualThreshold, setManualThreshold] = useState<number>(
+    typeof decisionThreshold === "number" ? decisionThreshold : 0.5,
+  );
   const [resolvedThreshold, setResolvedThreshold] = useState<number | null>(null);
 
   // ── Flow mode: user picks one of two paths before training ─────────────

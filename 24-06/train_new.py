@@ -29,10 +29,16 @@ FIX v5 (Out-of-Time validation added — ported from Credit-Risk-Poc-main):
 FIX v6 (Automatic class weighting; SMOTE option removed):
   - Credit-risk targets are heavily imbalanced (e.g. ~10% default rate), and
     the pipeline had a `use_smote` flag that did nothing — no resampling was
-    ever wired up. Left on a default 0.5 threshold, models trained on raw
-    imbalanced data with no weighting learn to mostly predict the majority
-    class, producing near-zero precision/recall/F1 despite reasonable
-    ROC-AUC.
+    ever wired up. Without weighting, models trained on raw imbalanced data
+    learn to mostly predict the majority class, producing near-zero
+    precision/recall/F1 despite reasonable ROC-AUC.
+  - Note: this file only fits the pipeline and returns predicted
+    probabilities — it never applies a decision threshold. The operating
+    threshold (F1-maximizing by default, or a reviewer-supplied override) is
+    resolved entirely downstream, in main.py/eval_engine's
+    _build_evaluation_data() / select_best_threshold(). Keep it that way:
+    thresholding here would duplicate that logic and risk drifting out of
+    sync with what the evaluation charts report.
   - `use_smote` has been removed. It's replaced with automatic, always-on
     class weighting: `train_model()` computes balanced sample weights
     (sklearn's `compute_sample_weight("balanced", y_dev)`) from the
