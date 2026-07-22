@@ -92,9 +92,6 @@ function ModelReplicationPanel() {
   const [modelName, setModelName] = React.useState("");
   const [testSize, setTestSize] = React.useState(0.15);
   const [valSize, setValSize] = React.useState(0.15);
-  const [randomSeed, setRandomSeed] = React.useState(42);
-  const [cvFolds, setCvFolds] = React.useState(5);
-  const [seedsText, setSeedsText] = React.useState("42,43,44,45,46");
   const [reported, setReported] = React.useState<Record<string, string>>({});
   const [availableModels, setAvailableModels] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -186,8 +183,6 @@ function ModelReplicationPanel() {
     if (trainingConfig) {
       if (typeof trainingConfig.test_size === "number") setTestSize(trainingConfig.test_size);
       if (typeof trainingConfig.val_size === "number") setValSize(trainingConfig.val_size);
-      if (typeof trainingConfig.random_seed === "number") setRandomSeed(trainingConfig.random_seed);
-      if (typeof trainingConfig.cv_folds === "number") setCvFolds(trainingConfig.cv_folds);
     }
 
     const sourceMetrics = validationMddMetrics ?? (trainingResult?.evaluation_metrics as Record<string, any> | undefined);
@@ -238,11 +233,8 @@ function ModelReplicationPanel() {
       form.append("model_name", modelName.trim());
       form.append("algorithm", algorithmName);
       form.append("target_col", targetCol.trim());
-      form.append("seeds", seedsText.trim() || "42,43,44,45,46");
       form.append("test_size", String(testSize));
       form.append("val_size", String(valSize));
-      form.append("random_seed", String(randomSeed));
-      form.append("cv_folds", String(cvFolds));
       if (mddFile) form.append("mdd_file", mddFile);
 
       const reportedPayload = Object.fromEntries(
@@ -276,15 +268,11 @@ function ModelReplicationPanel() {
 
   const seedChartData = React.useMemo(() => {
     if (!replication?.result?.seed_aucs?.length) return [];
-    const seedIds = seedsText
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
     return replication.result.seed_aucs.map((auc, i) => ({
-      seed: seedIds[i] ?? `#${i + 1}`,
+      seed: `#${i + 1}`,
       auc,
     }));
-  }, [replication, seedsText]);
+  }, [replication]);
 
   const ablationChartData = React.useMemo(() => {
     const abl = replication?.result?.ablation;
@@ -433,28 +421,6 @@ function ModelReplicationPanel() {
         </div>
 
         <div>
-          <label className="text-xs font-medium text-muted-foreground">Random seed</label>
-          <input
-            type="number"
-            value={randomSeed}
-            onChange={(e) => setRandomSeed(Number(e.target.value))}
-            className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-          />
-        </div>
-
-        <div>
-          <label className="text-xs font-medium text-muted-foreground">CV folds</label>
-          <input
-            type="number"
-            min={2}
-            max={10}
-            value={cvFolds}
-            onChange={(e) => setCvFolds(Number(e.target.value))}
-            className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-          />
-        </div>
-
-        <div>
           <label className="text-xs font-medium text-muted-foreground">Test size</label>
           <input
             type="number"
@@ -476,15 +442,6 @@ function ModelReplicationPanel() {
             max={0.4}
             value={valSize}
             onChange={(e) => setValSize(Number(e.target.value))}
-            className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-          />
-        </div>
-
-        <div className="sm:col-span-2">
-          <label className="text-xs font-medium text-muted-foreground">Seed stability seeds (comma-separated)</label>
-          <input
-            value={seedsText}
-            onChange={(e) => setSeedsText(e.target.value)}
             className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
           />
         </div>
