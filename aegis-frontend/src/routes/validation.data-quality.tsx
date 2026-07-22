@@ -49,6 +49,7 @@ type Stage2Response = {
     regulatory_references: string[];
     high_severity_fails: unknown[];
   };
+  llm_pending?: boolean;
 };
 
 function buildValidationCsv(thresholdChecks: ThresholdCheck[], ragRules: RagRule[]) {
@@ -137,6 +138,10 @@ function DataQuality() {
   const [checksLoading, setChecksLoading] = useState(true);
   const [checksError, setChecksError] = useState<string | null>(null);
   const [data, setData] = useState<Stage2Response | null>(null);
+  // Separate from checksLoading: quantitative checks + PENDING RAG stubs
+  // come back fast; this tracks the slower follow-up LLM call so it never
+  // blocks the rest of the page.
+  const [llmLoading, setLlmLoading] = useState(false);
 
   useEffect(() => {
     if (!datasetLoaded) {
@@ -164,14 +169,40 @@ function DataQuality() {
       .then((resp) => {
         if (!active) return;
         setData(resp);
+        setChecksLoading(false);
+
+        if (resp.llm_pending) {
+          setLlmLoading(true);
+          const llmForm = new FormData();
+          llmForm.append("intake_json", JSON.stringify(validationIntakeData ?? {}));
+          if (validationMddText) {
+            const mddBlob = new Blob([validationMddText], { type: "text/plain" });
+            llmForm.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
+          }
+
+          void formUpload<{ llm_results: RagRule[] }>("/validation/stage2/llm-check", llmForm)
+            .then((llmResp) => {
+              if (!active) return;
+              setData((prev) => {
+                if (!prev) return prev;
+                const byId = new Map(llmResp.llm_results.map((r) => [r.rule_id, r]));
+                const mergedRules = prev.ragRules.map((r) => byId.get(r.rule_id) ?? r);
+                return { ...prev, ragRules: mergedRules };
+              });
+            })
+            .catch((err) => {
+              console.error("Stage2 LLM check error", err);
+            })
+            .finally(() => {
+              if (!active) return;
+              setLlmLoading(false);
+            });
+        }
       })
       .catch((err) => {
         console.error("Stage2 fetch error", err);
         if (!active) return;
         setChecksError(err?.message ?? String(err));
-      })
-      .finally(() => {
-        if (!active) return;
         setChecksLoading(false);
       });
 
@@ -247,7 +278,14 @@ function DataQuality() {
 
             <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                  {llmLoading && (
+                    <span className="flex items-center gap-1 text-xs font-medium text-violet-500">
+                      <Clock className="h-3 w-3 animate-pulse" /> AI reviewing documentation…
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-muted-foreground">
                   Regulatory rules fetched from knowledge store (IFRS 9, SS11/13, SS1/23)
                 </div>

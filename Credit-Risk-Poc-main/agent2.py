@@ -17,6 +17,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from llm_providers import LLMProviderError, complete_with_fallback
+
+# Prompt template for the LLM-based conceptual-validation check. Kept out of
+# application code — see check_documents_with_llm() below.
+_LLM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "conceptual_validation_prompt.txt"
+
 
 class Agent2:
     def __init__(self, rules_path: str = "rag_store/val_mdd_rules.json"):
@@ -172,6 +178,328 @@ class Agent2:
             })
 
         return results
+
+    # ── LLM-based conceptual-validation cross-check ───────────────────────────
+    # Replaces keyword-search (check_mdd_keywords, above) as the conceptual /
+    # qualitative-rule check: instead of counting keyword hits, an LLM reads
+    # the document(s) and judges whether each rule's intent is actually
+    # satisfied. check_mdd_keywords is left in place, unchanged, for any
+    # other caller that still relies on it.
+
+    def check_documents_with_llm(
+        self,
+        docs: dict[str, str],
+        stage: str | None = None,
+        only_rule_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        LLM-based conceptual/qualitative rule check.
+
+        docs: {"MDD": mdd_text, ...} — document name -> full text.
+        stage: optional stage filter, same semantics as check_mdd_keywords.
+        only_rule_ids: optional allow-list of rule ids to check.
+
+        Provider: Deloitte Agent (primary), automatically falling back to
+        Ollama on any connection error, timeout, or HTTP failure — see
+        llm_providers.py. Prompt template lives at
+        prompts/conceptual_validation_prompt.txt.
+
+        Returns findings in the same shape as check_for_validation /
+        check_mdd_keywords (shaped for the app.py render loop), plus two
+        extra fields the UI already understands: `check_source`
+        ("llm" normally, "llm_error" if both providers failed) and
+        `reasoning`.
+        """
+        candidate_rules: list[dict] = []
+        for rule in self.rules:
+            # Machine-testable rules stay on check_for_validation — never
+            # routed to the LLM.
+            if rule.get("checkable_against_data", False):
+                continue
+            if stage is not None:
+                rule_stage = rule.get("stage", "")
+                if rule_stage not in (stage, self._map_stage(stage)):
+                    continue
+            rule_id = rule.get("id", rule.get("check", "?"))
+            if only_rule_ids and str(rule_id) not in only_rule_ids:
+                continue
+            candidate_rules.append(rule)
+
+        if not candidate_rules:
+            return []
+
+        doc_text = "\n\n".join(f"### {name}\n{text}" for name, text in docs.items() if text)
+
+        if not doc_text:
+            # No document uploaded yet — surface every candidate rule as
+            # PENDING so the "RAG Agent Rules" column still lists them
+            # (mirrors check_mdd_keywords' behaviour with empty mdd_text).
+            return [
+                self._llm_finding(rule, status="PENDING", observed="No document uploaded yet.",
+                                   reasoning="", check_source="llm")
+                for rule in candidate_rules
+            ]
+
+        # Batch rules into smaller groups instead of one prompt for every
+        # rule in the stage. A stage like Conceptual Soundness can have more
+        # qualitative rules than Data Validation; cramming them all into one
+        # prompt makes the response slower and more likely to be truncated
+        # (which surfaces as an empty/invalid JSON response). Smaller
+        # batches mean smaller, faster completions, and a failure in one
+        # batch doesn't wipe out the rules in the others.
+        results: list[dict] = []
+        for i in range(0, len(candidate_rules), self._LLM_BATCH_SIZE):
+            batch = candidate_rules[i:i + self._LLM_BATCH_SIZE]
+            try:
+                prompt = self._build_llm_prompt(batch, doc_text)
+                completion, provider_used = complete_with_fallback(prompt)
+                verdicts_by_id, verdicts_by_index, verdicts_in_order = self._parse_llm_verdicts(completion)
+            except (LLMProviderError, ValueError) as exc:
+                # Both providers failed for this batch, the response was
+                # empty, or it wasn't valid JSON — fail safe with a WARN for
+                # just this batch's rules rather than dropping them, and
+                # keep the underlying error message distinct (see
+                # _parse_llm_verdicts) so a genuine timeout reads
+                # differently from a malformed-response error.
+                for rule in batch:
+                    results.append(self._llm_finding(
+                        rule, status="WARN", observed=f"LLM check unavailable: {exc}",
+                        reasoning="", check_source="llm_error",
+                    ))
+                continue
+
+            # Sanity check BEFORE per-rule matching: if the number of
+            # verdicts doesn't match the number of rules we sent — and this
+            # holds even at batch size 1 — the response almost certainly
+            # isn't tracking this request at all (e.g. the provider is
+            # ignoring/echoing a stale prompt, a cached response, or a
+            # canned demo payload unrelated to `prompt`). Per-rule id/index
+            # matching below can't distinguish that from an ordinary
+            # dropped-item case, and silently produces a confusing
+            # "none matching" message per rule. Surface it once, clearly,
+            # with the provider name and raw response so the actual
+            # contract problem (see llm_providers.py note on
+            # DeloitteAgentProvider.complete()) is visible instead of
+            # masked as an id-matching failure.
+            if len(verdicts_in_order) != len(batch):
+                diag = (
+                    f"LLM ({provider_used}) returned {len(verdicts_in_order)} verdict(s) for a "
+                    f"{len(batch)}-rule request — count mismatch suggests the response isn't "
+                    f"tracking this prompt (stale/cached/unrelated response from the provider), "
+                    f"not a dropped item. Raw response: {completion[:400]!r}"
+                )
+                for rule in batch:
+                    results.append(self._llm_finding(
+                        rule, status="WARN", observed=diag,
+                        reasoning="", check_source="llm_error",
+                    ))
+                continue
+
+            for idx, rule in enumerate(batch):
+                rule_id = str(rule.get("id", rule.get("check", "?")))
+                # Three layers, most to least reliable:
+                #  1. rule_id — works when the model echoes it back correctly.
+                #  2. explicit "index" field — survives a renamed/garbled
+                #     rule_id AND a dropped item elsewhere in the batch,
+                #     since it isn't affected by earlier entries going
+                #     missing the way plain response order is.
+                #  3. response order — only safe when the count matches the
+                #     batch exactly (no dropped/extra items), since a single
+                #     missing item would otherwise shift every rule after it.
+                #     (Verified above the counts match before we get here.)
+                verdict = verdicts_by_id.get(rule_id)
+                if verdict is None:
+                    verdict = verdicts_by_index.get(idx)
+                if verdict is None:
+                    verdict = verdicts_in_order[idx]
+                if verdict is None:
+                    # Still no match — surface what the model actually sent
+                    # back, including which provider answered, so a real
+                    # mismatch is diagnosable from the UI.
+                    got_ids = [str(v.get("rule_id", v.get("id", "?"))) for v in verdicts_in_order]
+                    diag = (
+                        f"LLM ({provider_used}) returned {len(verdicts_in_order)} verdict(s) for this "
+                        f"{len(batch)}-rule batch, none matching rule_id '{rule_id}' or index {idx}. "
+                        f"IDs seen: {got_ids[:8]}"
+                    )
+                    results.append(self._llm_finding(
+                        rule, status="WARN", observed=diag,
+                        reasoning="", check_source="llm_error",
+                    ))
+                    continue
+
+                status = str(verdict.get("status", "WARN")).upper()
+                if status not in ("PASS", "WARN", "FAIL"):
+                    status = "WARN"
+                evidence = str(verdict.get("evidence") or "").strip()
+                if not evidence:
+                    evidence = "Not found" if status == "FAIL" else "LLM gave a verdict but no supporting evidence text."
+                results.append(self._llm_finding(
+                    rule, status=status, observed=evidence,
+                    reasoning=verdict.get("reasoning", ""), check_source="llm",
+                ))
+        return results
+
+    # Rules per LLM call. Smaller batches -> faster, more reliable
+    # completions (less likely for the model to drop or garble an item) at
+    # the cost of more round-trips; tune if you have very large rule sets
+    # or a slow provider.
+    _LLM_BATCH_SIZE = 1
+
+    @staticmethod
+    def _llm_finding(rule: dict, status: str, observed: str, reasoning: str, check_source: str) -> dict:
+        return {
+            "check_id":       rule.get("id", rule.get("check", "?")),
+            "title":          rule.get("rule", rule.get("flag", "")),
+            "severity":       rule.get("severity", "medium"),
+            "status":         status,
+            "source":         rule.get("source", ""),
+            "principle":      rule.get("principle", ""),
+            "observed":       observed,
+            "observed_value": observed,
+            "threshold":      "LLM conceptual review",
+            "detail":         rule.get("suggestion", ""),
+            "check_source":   check_source,
+            "reasoning":      reasoning,
+        }
+
+    @staticmethod
+    def _build_llm_prompt(rules: list[dict], doc_text: str) -> str:
+        template = _LLM_PROMPT_PATH.read_text(encoding="utf-8")
+        rules_payload = [
+            {
+                "index":            i,
+                "rule_id":          str(r.get("id", r.get("check", "?"))),
+                "statement":        r.get("rule", r.get("flag", "")),
+                "principle":        r.get("principle", ""),
+                "mdd_section_hint": r.get("mdd_section_hint", ""),
+            }
+            for i, r in enumerate(rules)
+        ]
+        return (
+            template
+            .replace("{{RULE_COUNT}}", str(len(rules)))
+            .replace("{{RULE_INDEXES}}", ", ".join(str(i) for i in range(len(rules))))
+            .replace("{{RULES_JSON}}", json.dumps(rules_payload, indent=2))
+            .replace("{{DOCUMENT_TEXT}}", doc_text)
+        )
+
+    @staticmethod
+    def _parse_llm_verdicts(completion: str) -> tuple[dict, dict, list]:
+        """Parse the LLM's JSON response into ({rule_id: verdict}, {index: verdict}, [verdict, ...]).
+
+        The `index` map is keyed by the 0-based "index" field the prompt
+        asks each item to echo back (see _build_llm_prompt). It's the most
+        reliable way to line a verdict back up with its rule: unlike
+        `rule_id` (an opaque string models sometimes drop, renumber, or
+        reformat) or plain response order (which breaks the moment the
+        model skips one item mid-batch), an explicit index survives both a
+        renamed/missing rule_id AND a dropped item elsewhere in the batch.
+
+        The ordered list is a last-resort fallback for callers when neither
+        rule_id nor index matching finds anything and the counts line up.
+
+        Raises ValueError with a message that distinguishes an empty
+        response (provider answered but produced nothing — usually means
+        the request was cut off, so raising the relevant timeout env var
+        is the fix) from a malformed/non-JSON response (a real parsing
+        problem, not a timing one).
+
+        Tolerant of several common deviations from the requested shape,
+        since models don't always follow instructions exactly:
+          - a JSON object wrapping the array under a key, e.g.
+            {"results": [...]} / {"verdicts": [...]} instead of a bare array.
+          - items using "id" instead of "rule_id".
+          - a flat map straight from rule_id to a status string, e.g.
+            {"V01": "PASS", "V02": "FAIL"} instead of {"V01": {"status": ...}}.
+          - a bare list of status strings in rule order, e.g. ["PASS", "FAIL"].
+        """
+        text = completion.strip()
+        if not text:
+            raise ValueError(
+                "LLM returned an empty response — this usually means the "
+                "request was cut off before the model finished (raise "
+                "DELOITTE_TIMEOUT_SECONDS / OLLAMA_TIMEOUT_SECONDS), rather "
+                "than a genuine rule-evaluation failure."
+            )
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"LLM response was not valid JSON ({exc}); got: {text[:200]!r}") from exc
+
+        def as_verdict(value: Any) -> dict | None:
+            """Normalize one response entry into a {status, evidence, reasoning}-shaped dict."""
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                # Bare status string, e.g. "PASS" — no evidence/reasoning given.
+                return {"status": value}
+            return None
+
+        if isinstance(data, dict) and not any(isinstance(v, (dict, str)) for v in data.values()):
+            # Looks like {"results": [...]} rather than {rule_id: verdict} —
+            # unwrap the first list-valued key we find.
+            for value in data.values():
+                if isinstance(value, list):
+                    data = value
+                    break
+
+        if isinstance(data, dict) and "status" in data:
+            # A single verdict object returned bare instead of wrapped in a
+            # list — e.g. the model only answered one rule of a multi-rule
+            # batch and skipped the "[ ]" wrapper. Without this check the
+            # branch below would misread THIS object's own fields
+            # (index/rule_id/status/evidence/reasoning) as if each were a
+            # separate rule_id -> verdict entry in a flat map, producing
+            # several bogus verdicts with no real rule_id. Detected by
+            # "status" being a top-level key: a genuine rule_id -> verdict
+            # map would use rule_ids as keys, not "status" itself.
+            data = [data]
+
+        def index_of(item: Any) -> int | None:
+            if not isinstance(item, dict):
+                return None
+            idx = item.get("index")
+            try:
+                return int(idx) if idx is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        if isinstance(data, list):
+            items = []
+            by_id = {}
+            by_index = {}
+            for item in data:
+                verdict = as_verdict(item)
+                if verdict is None:
+                    continue
+                items.append(verdict)
+                if isinstance(item, dict):
+                    rid = item.get("rule_id", item.get("id", item.get("ruleId")))
+                    if rid is not None:
+                        by_id[str(rid)] = verdict
+                    idx = index_of(item)
+                    if idx is not None:
+                        by_index[idx] = verdict
+            return by_id, by_index, items
+        if isinstance(data, dict):
+            # Flat map: rule_id -> verdict (object) or rule_id -> "STATUS" string.
+            by_id = {}
+            by_index = {}
+            items = []
+            for k, v in data.items():
+                verdict = as_verdict(v)
+                if verdict is None:
+                    continue
+                by_id[str(k)] = verdict
+                idx = index_of(v)
+                if idx is not None:
+                    by_index[idx] = verdict
+                items.append(verdict)
+            return by_id, by_index, items
+        return {}, {}, []
 
     # ── Attestation checklist (manual reviewer sign-off) ─────────────────────
 

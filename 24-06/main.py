@@ -3641,17 +3641,24 @@ async def validation_stage2_run(
         except Exception:
             pass
 
-        # Always call check_mdd_keywords, even with empty MDD text — the
-        # function itself returns every keyword rule as status PENDING when
-        # there's no text yet, so gating this call on mdd_text would mean
-        # the RAG Agent Rules column stays empty until an MDD is uploaded.
+        # Conceptual/qualitative rules are judged by the LLM-based agent, but
+        # that call (Deloitte Agent / Ollama fallback) can take several
+        # seconds to tens of seconds — too slow to block this endpoint's
+        # response. So this endpoint always asks check_documents_with_llm
+        # for the fast, no-network PENDING stub (pass {} regardless of
+        # mdd_text) so quantitative results render immediately; the actual
+        # LLM verdicts are fetched afterward by the frontend via
+        # /validation/stage2/llm-check (see mapped["llm_pending"] below).
         try:
-            rag_results.extend(source_agent.check_mdd_keywords(mdd_text, stage="data_validation"))
+            rag_results.extend(source_agent.check_documents_with_llm({}, stage="data_validation"))
         except Exception:
             pass
 
     mapped = _group_stage2(report, rag_results=rag_results)
     mapped["llm_ran"] = False
+    # True when there's MDD text for the frontend to send to
+    # /validation/stage2/llm-check as a fast follow-up call.
+    mapped["llm_pending"] = bool(mdd_text)
     mapped["timestamp"] = pd.Timestamp.now().isoformat()
 
     return mapped
@@ -3726,15 +3733,25 @@ async def validation_stage3_run(
         except Exception:
             pass
 
-        if mdd_text:
-            try:
-                rag_results.extend(source_agent.check_mdd_keywords(mdd_text, stage="conceptual_soundness"))
-            except Exception:
-                pass
+        # Conceptual/qualitative rules are judged by the LLM-based agent, but
+        # that call can take several seconds to tens of seconds — too slow
+        # to block this endpoint's response. So this endpoint always asks
+        # check_documents_with_llm for the fast, no-network PENDING stub
+        # (pass {} regardless of mdd_text) so quantitative results render
+        # immediately; the actual LLM verdicts are fetched afterward by the
+        # frontend via /validation/stage3/llm-check (see
+        # mapped["llm_pending"] below).
+        try:
+            rag_results.extend(source_agent.check_documents_with_llm({}, stage="conceptual_soundness"))
+        except Exception:
+            pass
 
     mapped = _group_stage3(report, rag_results=rag_results, df=df, model_file=model_file, intake=intake, mdd_text=mdd_text)
     # add top-level metadata
     mapped["llm_ran"] = False
+    # True when there's MDD text for the frontend to send to
+    # /validation/stage3/llm-check as a fast follow-up call.
+    mapped["llm_pending"] = bool(mdd_text)
     mapped["timestamp"] = pd.Timestamp.now().isoformat()
 
     return mapped
@@ -4012,6 +4029,52 @@ async def validation_stage8_findings(
         "stated_auc": stated_auc,
         "replicated_auc": rep_auc,
     }
+
+
+@app.post("/validation/stage2/llm-check")
+async def validation_stage2_llm(
+    intake_json: Optional[str] = Form(None),
+    mdd_file: Optional[UploadFile] = File(None),
+    only_rule_ids: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """Run the LLM-based conceptual check for Stage 2 documentation items.
+
+    Mirrors /validation/stage3/llm-check exactly, one stage over. Called by
+    the frontend as a fast follow-up to /validation/stage2/run (which
+    returns PENDING stubs for these rules so the page isn't blocked on the
+    LLM call — see that endpoint's mapped["llm_pending"] flag).
+    """
+    agent = _load_source_agent2()
+
+    intake = {}
+    if intake_json:
+        try:
+            intake = json.loads(intake_json)
+        except Exception:
+            intake = {}
+
+    mdd_text = ""
+    if mdd_file is not None:
+        try:
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
+        except Exception:
+            mdd_text = ""
+
+    if agent is None:
+        raise HTTPException(status_code=500, detail="Agent2 RAG component unavailable")
+
+    docs = {"MDD": mdd_text} if mdd_text else {}
+
+    only_ids = None
+    if only_rule_ids:
+        only_ids = [s.strip() for s in only_rule_ids.split(",") if s.strip()]
+
+    try:
+        llm_results = agent.check_documents_with_llm(docs, stage="data_validation", only_rule_ids=only_ids)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM deep-check failed: {e}")
+
+    return {"llm_results": [_normalize_rag_rule(r) for r in llm_results]}
 
 
 @app.post("/validation/stage3/llm-check")

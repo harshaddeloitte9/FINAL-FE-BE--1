@@ -50,6 +50,7 @@ type Stage3Response = {
     high_severity_fails: unknown[];
   };
   featureRelevance?: { importance_df?: unknown[]; top_drivers?: unknown[] };
+  llm_pending?: boolean;
 };
 
 // Component renders entirely from backend response; no local mock data kept.
@@ -71,6 +72,11 @@ function Conceptual() {
   const [loading, setLoading] = useState(!validationStage3Result);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<Stage3Response | null>((validationStage3Result as Stage3Response | null) ?? null);
+  // Separate from `loading`: the quantitative threshold checks and PENDING
+  // RAG rule stubs come back fast from /validation/stage3/run; this tracks
+  // the slower follow-up LLM call that fills in the real RAG verdicts, so
+  // it never blocks the rest of the page from rendering.
+  const [llmLoading, setLlmLoading] = useState(false);
 
   const datasetLoaded = Boolean(file || profile?.csv_text || profile?.dataset_name);
   const skipInitialAutoRun = useRef(validationStage3Result !== null && validationStage3Result !== undefined);
@@ -120,14 +126,46 @@ function Conceptual() {
         if (!active) return;
         setData(resp);
         setValidationStage3Result(resp as unknown as Record<string, any>);
+        setLoading(false);
+
+        // Quantitative results are already in `resp`. If there's an MDD to
+        // review, kick off the slower LLM conceptual check as a separate,
+        // non-blocking call and merge its verdicts into ragRules by
+        // rule_id as soon as they land, replacing the PENDING stubs.
+        if (resp.llm_pending) {
+          setLlmLoading(true);
+          const llmForm = new FormData();
+          llmForm.append("intake_json", JSON.stringify(intakePayload));
+          if (validationMddText) {
+            const mddBlob = new Blob([validationMddText], { type: "text/plain" });
+            llmForm.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
+          }
+
+          void formUpload<{ llm_results: RagRule[] }>("/validation/stage3/llm-check", llmForm)
+            .then((llmResp) => {
+              if (!active) return;
+              setData((prev) => {
+                if (!prev) return prev;
+                const byId = new Map(llmResp.llm_results.map((r) => [r.rule_id, r]));
+                const mergedRules = prev.ragRules.map((r) => byId.get(r.rule_id) ?? r);
+                const merged = { ...prev, ragRules: mergedRules };
+                setValidationStage3Result(merged as unknown as Record<string, any>);
+                return merged;
+              });
+            })
+            .catch((err) => {
+              console.error("Stage3 LLM check error", err);
+            })
+            .finally(() => {
+              if (!active) return;
+              setLlmLoading(false);
+            });
+        }
       })
       .catch((err) => {
         console.error("Stage3 fetch error", err);
         if (!active) return;
         setError(err?.message ?? String(err));
-      })
-      .finally(() => {
-        if (!active) return;
         setLoading(false);
       });
 
@@ -181,7 +219,14 @@ function Conceptual() {
 
             <div className="min-w-0">
               <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                  {llmLoading && (
+                    <span className="flex items-center gap-1 text-xs font-medium text-violet-500">
+                      <Clock className="h-3 w-3 animate-pulse" /> AI reviewing documentation…
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-muted-foreground">
                   Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)
                 </div>
