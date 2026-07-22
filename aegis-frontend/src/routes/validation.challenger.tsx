@@ -100,7 +100,7 @@ function ModelReplicationPanel() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Seed from shared context so returning to this page (e.g. via Back from
-  // Stage 5) shows the already-computed R4.1-R4.8 checks and model ranking
+  // Stage 4) shows the already-computed R4.1-R4.8 checks and model ranking
   // instead of forcing a full rerun — replication/flags previously lived
   // only in this local state and were lost on every remount.
   const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
@@ -648,7 +648,7 @@ function Challenger() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 4 — Model Replication"
+        title="Stage 3 — Model Replication"
         description="Independently reproduce the developer's submitted model and outputs, and verify results against the R4.1-R4.8 replication checks."
       />
 
@@ -659,7 +659,7 @@ function Challenger() {
           to="/validation/performance"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
-          Continue to Stage 5
+          Continue to Stage 4
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

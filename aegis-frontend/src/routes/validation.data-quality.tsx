@@ -1,12 +1,14 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CheckSummaryTiles, deriveCheckTotal } from "@/components/check-summary";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
 import { ArrowRight, AlertTriangle, AlertCircle, Clock, Check } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export const Route = createFileRoute("/validation/data-quality")({
-  head: () => ({ meta: [{ title: "Data Validation — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 2 — Data Validation & Conceptual Soundness — Aegis Credit" }] }),
   component: DataQuality,
 });
 
@@ -38,7 +40,11 @@ type RagRule = {
   reasoning?: string;
 };
 
-type Stage2Response = {
+// Shared shape for both /validation/stage2/run and /validation/stage3/run —
+// the two sub-tabs below (Data Validation, Conceptual Soundness) are
+// otherwise-identical RAG + threshold-check panels against different backend
+// stages, so one response type covers both.
+type StageCheckResponse = {
   thresholdChecks: ThresholdCheck[];
   ragRules: RagRule[];
   summary: { total: number; pass: number; warn: number; fail: number; pending?: number; na?: number };
@@ -49,6 +55,7 @@ type Stage2Response = {
     regulatory_references: string[];
     high_severity_fails: unknown[];
   };
+  featureRelevance?: { importance_df?: unknown[]; top_drivers?: unknown[] };
   llm_pending?: boolean;
 };
 
@@ -73,6 +80,7 @@ function DataQuality() {
   const {
     file,
     profile,
+    trainingResult,
     validationIntakeData,
     validationMddText,
     validationMddMetrics,
@@ -80,12 +88,16 @@ function DataQuality() {
     validationResults: sharedValidationResults,
     setValidationProfile,
     setValidationResults,
+    validationStage3Result,
+    setValidationStage3Result,
   } = useDataset();
 
   const datasetLoaded = Boolean(file || profile?.csv_text || profile?.dataset_name);
 
   // ── Profile (charts: missing values, distribution, leakage) — unrelated to
-  // the RAG check pipeline, kept as its own call against /data/profile. ──
+  // the RAG check pipeline, kept as its own call against /data/profile. Shared
+  // by both sub-tabs below (both threshold-detail panels use it for the
+  // missing-values chart). ──
   const [validationProfile, setValidationProfileState] = useState<any | null>(sharedValidationProfile ?? null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -133,11 +145,11 @@ function DataQuality() {
     }
   }, [sharedValidationProfile, validationProfile]);
 
-  // ── RAG threshold checks + rules — real backend pipeline, same pattern as
-  // Stage 3 Conceptual Soundness (/validation/stage3/run). ──
+  // ── Sub-tab 1: Data Validation — RAG threshold checks + rules against
+  // /validation/stage2/run (checks 2.1-2.10). ──
   const [checksLoading, setChecksLoading] = useState(true);
   const [checksError, setChecksError] = useState<string | null>(null);
-  const [data, setData] = useState<Stage2Response | null>(null);
+  const [data, setData] = useState<StageCheckResponse | null>(null);
   // Separate from checksLoading: quantitative checks + PENDING RAG stubs
   // come back fast; this tracks the slower follow-up LLM call so it never
   // blocks the rest of the page.
@@ -165,7 +177,7 @@ function DataQuality() {
       form.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
     }
 
-    void formUpload<Stage2Response>("/validation/stage2/run", form)
+    void formUpload<StageCheckResponse>("/validation/stage2/run", form)
       .then((resp) => {
         if (!active) return;
         setData(resp);
@@ -227,130 +239,336 @@ function DataQuality() {
     URL.revokeObjectURL(url);
   };
 
+  // ── Sub-tab 2: Conceptual Soundness — RAG threshold checks + rules against
+  // /validation/stage3/run (checks 3.1-3.x). Independent loading/error/data
+  // state from Data Validation above, so one tab never blocks the other. ──
+  const [conceptualLoading, setConceptualLoading] = useState(!validationStage3Result);
+  const [conceptualError, setConceptualError] = useState<string | null>(null);
+  const [conceptualData, setConceptualData] = useState<StageCheckResponse | null>(
+    (validationStage3Result as StageCheckResponse | null) ?? null,
+  );
+  const [conceptualLlmLoading, setConceptualLlmLoading] = useState(false);
+
+  const skipInitialConceptualAutoRun = useRef(validationStage3Result !== null && validationStage3Result !== undefined);
+
+  useEffect(() => {
+    if (!datasetLoaded) {
+      setConceptualLoading(false);
+      return;
+    }
+    if (skipInitialConceptualAutoRun.current) {
+      skipInitialConceptualAutoRun.current = false;
+      setConceptualLoading(false);
+      return;
+    }
+
+    let active = true;
+    setConceptualLoading(true);
+    setConceptualError(null);
+
+    const form = new FormData();
+    // Mirrors the Data Validation tab: use the real working dataset from
+    // context rather than posting an empty intake, which is why the RAG
+    // Agent Rules column previously came back empty — check_for_validation
+    // needs dataset metrics and check_mdd_keywords needs the MDD text to
+    // match against, neither of which were ever being sent.
+    if (file) {
+      form.append("file", file);
+    } else if (profile?.csv_text) {
+      form.append("csv_text", profile.csv_text);
+    }
+    // check_conceptual_soundness() reads intake_json.methodology (check 3.1),
+    // but the Intake form has no dedicated methodology field — the actual
+    // algorithm choice lives on Training's trainingResult. Fill it in here
+    // when the Intake form didn't already provide one.
+    const intakePayload: Record<string, any> = { ...(validationIntakeData ?? {}) };
+    if (!intakePayload.methodology && trainingResult?.model_name) {
+      intakePayload.methodology = trainingResult.model_name;
+    }
+    form.append("intake_json", JSON.stringify(intakePayload));
+    if (validationMddText) {
+      const mddBlob = new Blob([validationMddText], { type: "text/plain" });
+      form.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
+    }
+
+    void formUpload<StageCheckResponse>("/validation/stage3/run", form)
+      .then((resp) => {
+        if (!active) return;
+        setConceptualData(resp);
+        setValidationStage3Result(resp as unknown as Record<string, any>);
+        setConceptualLoading(false);
+
+        // Quantitative results are already in `resp`. If there's an MDD to
+        // review, kick off the slower LLM conceptual check as a separate,
+        // non-blocking call and merge its verdicts into ragRules by
+        // rule_id as soon as they land, replacing the PENDING stubs.
+        if (resp.llm_pending) {
+          setConceptualLlmLoading(true);
+          const llmForm = new FormData();
+          llmForm.append("intake_json", JSON.stringify(intakePayload));
+          if (validationMddText) {
+            const mddBlob = new Blob([validationMddText], { type: "text/plain" });
+            llmForm.append("mdd_file", new File([mddBlob], "mdd.txt", { type: "text/plain" }));
+          }
+
+          void formUpload<{ llm_results: RagRule[] }>("/validation/stage3/llm-check", llmForm)
+            .then((llmResp) => {
+              if (!active) return;
+              setConceptualData((prev) => {
+                if (!prev) return prev;
+                const byId = new Map(llmResp.llm_results.map((r) => [r.rule_id, r]));
+                const mergedRules = prev.ragRules.map((r) => byId.get(r.rule_id) ?? r);
+                const merged = { ...prev, ragRules: mergedRules };
+                setValidationStage3Result(merged as unknown as Record<string, any>);
+                return merged;
+              });
+            })
+            .catch((err) => {
+              console.error("Stage3 LLM check error", err);
+            })
+            .finally(() => {
+              if (!active) return;
+              setConceptualLlmLoading(false);
+            });
+        }
+      })
+      .catch((err) => {
+        console.error("Stage3 fetch error", err);
+        if (!active) return;
+        setConceptualError(err?.message ?? String(err));
+        setConceptualLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetLoaded, file, profile?.csv_text]);
+
+  const conceptualSummary = conceptualData?.summary ?? { total: 0, pass: 0, warn: 0, fail: 0 };
+
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 2 — Data Validation"
-        description="Is the dataset complete, representative, and free of quality issues that would undermine model development?"
+        title="Stage 2 — Data Validation & Conceptual Soundness"
+        description="Is the dataset complete and representative, and are the chosen features, methodology, and assumptions appropriate for the stated business objective and regulatory context?"
       />
 
       {!datasetLoaded ? (
         <div className="rounded-xl border border-border bg-card p-6 text-center">
           <h3 className="text-lg font-semibold">No dataset available</h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            Upload a dataset and complete Intake before data validation checks can run.
+            Upload a dataset and complete Intake before these checks can run.
           </p>
         </div>
-      ) : checksLoading ? (
-        <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Data Validation...</div>
-      ) : checksError ? (
-        <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 2: {checksError}</div>
       ) : (
-        <>
-          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-semibold">Data Validation Results</h3>
-              <button
-                type="button"
-                onClick={downloadValidationReport}
-                className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted"
-              >
-                Download CSV
-              </button>
-            </div>
-            <ComplianceSummaryRow summary={summary} />
-          </section>
+        <Tabs defaultValue="data-validation" className="w-full">
+          <TabsList>
+            <TabsTrigger value="data-validation">Data Validation</TabsTrigger>
+            <TabsTrigger value="conceptual">Conceptual Soundness</TabsTrigger>
+          </TabsList>
 
-          <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
-            <div className="min-w-0">
-              <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="text-sm font-bold text-primary">📐 Threshold checks</div>
-                <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
-              </div>
-              {data?.thresholdChecks && data.thresholdChecks.length > 0 ? (
-                <ThresholdPanel checks={data.thresholdChecks} profileSource={validationProfile ?? profile} />
-              ) : (
-                <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
-                  No threshold checks were returned for this stage.
-                </div>
-              )}
-            </div>
+          <TabsContent value="data-validation" className="space-y-8 pt-4">
+            {checksLoading ? (
+              <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Data Validation...</div>
+            ) : checksError ? (
+              <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 2: {checksError}</div>
+            ) : (
+              <>
+                <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+                  <div className="mb-4 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold">Data Validation Results</h3>
+                    <button
+                      type="button"
+                      onClick={downloadValidationReport}
+                      className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted"
+                    >
+                      Download CSV
+                    </button>
+                  </div>
+                  <ComplianceSummaryRow summary={summary} />
+                </section>
 
-            <div className="min-w-0">
-              <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
-                  {llmLoading && (
-                    <span className="flex items-center gap-1 text-xs font-medium text-violet-500">
-                      <Clock className="h-3 w-3 animate-pulse" /> AI reviewing documentation…
+                <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
+                  <div className="min-w-0">
+                    <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                      <div className="text-sm font-bold text-primary">📐 Threshold checks</div>
+                      <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
+                    </div>
+                    {data?.thresholdChecks && data.thresholdChecks.length > 0 ? (
+                      <ThresholdPanel checks={data.thresholdChecks} profileSource={validationProfile ?? profile} />
+                    ) : (
+                      <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                        No threshold checks were returned for this stage.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                        {llmLoading && (
+                          <span className="flex items-center gap-1 text-xs font-medium text-violet-500">
+                            <Clock className="h-3 w-3 animate-pulse" /> AI reviewing documentation…
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Regulatory rules fetched from knowledge store (IFRS 9, SS11/13, SS1/23)
+                      </div>
+                    </div>
+                    {data?.ragRules && data.ragRules.length > 0 ? (
+                      <RagRulesPanel rules={data.ragRules} />
+                    ) : (
+                      <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                        No RAG agent flags generated for this stage.
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className={`rounded-xl border p-6 ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).border} ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).bg}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
+                    <span className={`text-xs font-bold uppercase tracking-wide ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).text}`}>
+                      {regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).icon} {data?.regulatoryAlignment?.verdict ?? "—"}
                     </span>
+                  </div>
+                  <p className="mt-2 text-sm">
+                    Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/
+                    {data?.regulatoryAlignment?.counts?.fail ?? 0}
+                  </p>
+                  {data?.regulatoryAlignment?.remediation_summary && (
+                    <p className="mt-3 text-sm text-muted-foreground">{data.regulatoryAlignment.remediation_summary}</p>
                   )}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  Regulatory rules fetched from knowledge store (IFRS 9, SS11/13, SS1/23)
-                </div>
-              </div>
-              {data?.ragRules && data.ragRules.length > 0 ? (
-                <RagRulesPanel rules={data.ragRules} />
-              ) : (
-                <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
-                  No RAG agent flags generated for this stage.
-                </div>
-              )}
-            </div>
-          </section>
+                  {data?.regulatoryAlignment?.regulatory_references?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {data.regulatoryAlignment.regulatory_references.map((ref: string) => (
+                        <span
+                          key={ref}
+                          className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80"
+                        >
+                          {ref}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {data?.regulatoryAlignment?.high_severity_fails?.length ? (
+                    <div className="mt-3 text-sm text-destructive">
+                      High severity fails: {data.regulatoryAlignment.high_severity_fails.length}
+                    </div>
+                  ) : null}
+                </section>
 
-          <section className={`rounded-xl border p-6 ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).border} ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).bg}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
-              <span className={`text-xs font-bold uppercase tracking-wide ${regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).text}`}>
-                {regulatoryVerdictStyle(data?.regulatoryAlignment?.verdict).icon} {data?.regulatoryAlignment?.verdict ?? "—"}
-              </span>
-            </div>
-            <p className="mt-2 text-sm">
-              Pass/Warn/Fail: {data?.regulatoryAlignment?.counts?.pass ?? 0}/{data?.regulatoryAlignment?.counts?.warn ?? 0}/
-              {data?.regulatoryAlignment?.counts?.fail ?? 0}
-            </p>
-            {data?.regulatoryAlignment?.remediation_summary && (
-              <p className="mt-3 text-sm text-muted-foreground">{data.regulatoryAlignment.remediation_summary}</p>
+                {runError ? (
+                  <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900">{runError}</div>
+                ) : null}
+
+                <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+                  <h3 className="text-sm font-semibold">Data leakage detection</h3>
+                  <p className="mt-2 text-sm text-foreground/80">
+                    {validationProfile?.leakage_risk_cols && validationProfile.leakage_risk_cols.length > 0
+                      ? `Potential leakage detected: ${validationProfile.leakage_risk_cols.join(", ")}`
+                      : "No potential target leakage detected in the current dataset."}
+                  </p>
+                </div>
+              </>
             )}
-            {data?.regulatoryAlignment?.regulatory_references?.length ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {data.regulatoryAlignment.regulatory_references.map((ref: string) => (
-                  <span
-                    key={ref}
-                    className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80"
-                  >
-                    {ref}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {data?.regulatoryAlignment?.high_severity_fails?.length ? (
-              <div className="mt-3 text-sm text-destructive">
-                High severity fails: {data.regulatoryAlignment.high_severity_fails.length}
-              </div>
-            ) : null}
-          </section>
+          </TabsContent>
 
-          {runError ? (
-            <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900">{runError}</div>
-          ) : null}
+          <TabsContent value="conceptual" className="space-y-8 pt-4">
+            {conceptualLoading ? (
+              <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Conceptual Soundness...</div>
+            ) : conceptualError ? (
+              <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 2: {conceptualError}</div>
+            ) : (
+              <>
+                <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+                  <h3 className="mb-4 text-sm font-semibold">Conceptual Soundness Results</h3>
+                  <ComplianceSummaryRow summary={conceptualSummary} />
+                </section>
 
-          <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <h3 className="text-sm font-semibold">Data leakage detection</h3>
-            <p className="mt-2 text-sm text-foreground/80">
-              {validationProfile?.leakage_risk_cols && validationProfile.leakage_risk_cols.length > 0
-                ? `Potential leakage detected: ${validationProfile.leakage_risk_cols.join(", ")}`
-                : "No potential target leakage detected in the current dataset."}
-            </p>
-          </div>
-        </>
+                <section className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
+                  <div className="min-w-0">
+                    <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                      <div className="text-sm font-bold text-primary">📐 Threshold checks</div>
+                      <div className="text-xs text-muted-foreground">Quantitative checks against regulatory thresholds</div>
+                    </div>
+                    {conceptualData?.thresholdChecks && conceptualData.thresholdChecks.length > 0 ? (
+                      <ThresholdPanel checks={conceptualData.thresholdChecks} profileSource={validationProfile ?? profile} />
+                    ) : (
+                      <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                        No threshold checks generated for this stage.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="mb-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-bold text-violet-500">🤖 RAG agent rules</div>
+                        {conceptualLlmLoading && (
+                          <span className="flex items-center gap-1 text-xs font-medium text-violet-500">
+                            <Clock className="h-3 w-3 animate-pulse" /> AI reviewing documentation…
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Regulatory rules fetched from knowledge store (SS1/23, SS11/13, IFRS 9)
+                      </div>
+                    </div>
+                    {conceptualData?.ragRules && conceptualData.ragRules.length > 0 ? (
+                      <RagRulesPanel rules={conceptualData.ragRules} />
+                    ) : (
+                      <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                        No RAG agent flags generated for this stage.
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className={`rounded-xl border p-6 ${regulatoryVerdictStyle(conceptualData?.regulatoryAlignment?.verdict).border} ${regulatoryVerdictStyle(conceptualData?.regulatoryAlignment?.verdict).bg}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-foreground/70">Regulatory alignment</div>
+                    <span className={`text-xs font-bold uppercase tracking-wide ${regulatoryVerdictStyle(conceptualData?.regulatoryAlignment?.verdict).text}`}>
+                      {regulatoryVerdictStyle(conceptualData?.regulatoryAlignment?.verdict).icon} {conceptualData?.regulatoryAlignment?.verdict ?? "—"}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm">
+                    Pass/Warn/Fail: {conceptualData?.regulatoryAlignment?.counts?.pass ?? 0}/{conceptualData?.regulatoryAlignment?.counts?.warn ?? 0}/
+                    {conceptualData?.regulatoryAlignment?.counts?.fail ?? 0}
+                  </p>
+                  {conceptualData?.regulatoryAlignment?.remediation_summary && (
+                    <p className="mt-3 text-sm text-muted-foreground">{conceptualData.regulatoryAlignment.remediation_summary}</p>
+                  )}
+                  {conceptualData?.regulatoryAlignment?.regulatory_references?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {conceptualData.regulatoryAlignment.regulatory_references.map((ref: string) => (
+                        <span
+                          key={ref}
+                          className="rounded-full border border-primary/20 bg-background px-3 py-1 text-xs font-medium text-foreground/80"
+                        >
+                          {ref}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {conceptualData?.regulatoryAlignment?.high_severity_fails?.length ? (
+                    <div className="mt-3 text-sm text-destructive">
+                      High severity fails: {conceptualData.regulatoryAlignment.high_severity_fails.length}
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            )}
+          </TabsContent>
+        </Tabs>
       )}
 
       <div className="text-right">
         <Link
-          to="/validation/conceptual"
+          to="/validation/challenger"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
           Continue to Stage 3
@@ -368,9 +586,9 @@ const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string;
   PENDING: { border: "border-slate-400/40", bg: "bg-slate-400/10", badge: "bg-slate-400 text-slate-950", icon: "⏱️" },
 };
 
-// Mirrors Stage 8's VERDICT_STYLES convention — the regulatory alignment
-// card should reflect the actual verdict, not always render as a green
-// "all good" card regardless of whether it's PASS/CONDITIONAL/FAIL.
+// Mirrors the Findings page's VERDICT_STYLES convention — the regulatory
+// alignment card should reflect the actual verdict, not always render as a
+// green "all good" card regardless of whether it's PASS/CONDITIONAL/FAIL.
 const REGULATORY_VERDICT_STYLES: Record<string, { border: string; bg: string; text: string; icon: string }> = {
   PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", text: "text-emerald-700 dark:text-emerald-300", icon: "✅" },
   CONDITIONAL: { border: "border-amber-500/40", bg: "bg-amber-500/10", text: "text-amber-700 dark:text-amber-300", icon: "⚠️" },
@@ -380,12 +598,6 @@ const REGULATORY_VERDICT_STYLES: Record<string, { border: string; bg: string; te
 function regulatoryVerdictStyle(verdict: string | undefined) {
   return REGULATORY_VERDICT_STYLES[verdict ?? ""] ?? { border: "border-border", bg: "bg-card", text: "text-foreground", icon: "⚪" };
 }
-
-const SEVERITY_STYLES: Record<string, string> = {
-  HIGH: "bg-red-500 text-red-950",
-  MEDIUM: "bg-amber-500 text-amber-950",
-  LOW: "bg-emerald-500 text-emerald-950",
-};
 
 const CHECK_SOURCE_LABELS: Record<string, { label: string; classes: string }> = {
   llm: { label: "🤖 LLM", classes: "bg-violet-500 text-violet-950" },
@@ -436,44 +648,29 @@ function ComplianceDonut({ pass, warn, fail, size = 88 }: { pass: number; warn: 
   );
 }
 
-function CountCard({ label, value, tone }: { label: string; value: number; tone: "pass" | "warn" | "fail" | "na" }) {
-  const color =
-    tone === "pass"
-      ? "text-emerald-600 dark:text-emerald-400"
-      : tone === "warn"
-      ? "text-amber-600 dark:text-amber-400"
-      : tone === "na"
-      ? "text-indigo-600 dark:text-indigo-400"
-      : "text-red-600 dark:text-red-400";
-  const title = tone === "pass" ? "Pass" : tone === "warn" ? "Warn" : tone === "na" ? "N/A" : "Fail";
-  return (
-    <div className="rounded-xl border border-border bg-background p-4">
-      <div className="text-xs text-muted-foreground">{title}</div>
-      <div className={`mt-1 text-2xl font-bold ${color}`}>{value}</div>
-    </div>
-  );
-}
-
 function ComplianceSummaryRow({
   summary,
 }: {
   summary: { total: number; pass: number; warn: number; fail: number; pending?: number; na?: number };
 }) {
+  // The backend's own `total` (e.g. len(combined) in main.py's
+  // _group_stage2/_group_stage3) previously included "pending" findings
+  // that were never rendered as a tile below, so the "X/Y passed" header
+  // and the tile row could show different totals. Derive the total here
+  // from the exact same buckets CheckSummaryTiles renders instead.
+  const total = deriveCheckTotal(summary);
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+    <div className="space-y-3">
       <div className="flex items-center gap-4 rounded-xl border border-border bg-background p-4">
         <ComplianceDonut pass={summary.pass} warn={summary.warn} fail={summary.fail} />
         <div className="min-w-0">
           <div className="text-xs text-muted-foreground">Checks passed</div>
           <div className="text-base font-bold leading-tight text-foreground">
-            {summary.pass}/{summary.total} passed
+            {summary.pass}/{total} passed
           </div>
         </div>
       </div>
-      <CountCard label="Pass" value={summary.pass} tone="pass" />
-      <CountCard label="Warn" value={summary.warn} tone="warn" />
-      <CountCard label="Fail" value={summary.fail} tone="fail" />
-      <CountCard label="N/A" value={summary.na ?? 0} tone="na" />
+      <CheckSummaryTiles summary={summary} checksLabel="Checks" />
     </div>
   );
 }

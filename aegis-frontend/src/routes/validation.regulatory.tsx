@@ -6,9 +6,10 @@ import { ArrowRight, Loader2, Search } from "lucide-react";
 import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import PlotlyChart from "@/components/plotly-chart";
+import { CheckSummaryTiles, deriveCheckTotal } from "@/components/check-summary";
 
 export const Route = createFileRoute("/validation/regulatory")({
-  head: () => ({ meta: [{ title: "Stage 7 — Regulatory Review — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 6 — Regulatory Review — Aegis Credit" }] }),
   component: Regulatory,
 });
 
@@ -69,26 +70,6 @@ const SEVERITY_STYLES: Record<string, string> = {
 
 function statusStyle(status: string | undefined) {
   return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
-}
-
-function SummaryTile({ label, value, tone }: { label: string; value: number; tone: "neutral" | "pass" | "warn" | "fail" | "na" }) {
-  const classes =
-    tone === "pass"
-      ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
-      : tone === "warn"
-      ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300"
-      : tone === "fail"
-      ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
-      : tone === "na"
-      ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
-      : "border-border bg-background text-foreground";
-
-  return (
-    <div className={`rounded-xl border p-4 ${classes}`}>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className="mt-2 text-2xl font-semibold">{value}</div>
-    </div>
-  );
 }
 
 function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
@@ -176,7 +157,8 @@ function Regulatory() {
   }, [validationIntakeData, validationMddText]);
 
   const summary = data?.summary ?? { total: 0, pass: 0, warn: 0, fail: 0 };
-  const progress = summary.total > 0 ? Math.round((summary.pass / summary.total) * 100) : 0;
+  const totalChecks = deriveCheckTotal(summary);
+  const progress = totalChecks > 0 ? Math.round((summary.pass / totalChecks) * 100) : 0;
 
   const featureImportance = useMemo(() => {
     const rows = (validationStage4Result as any)?.replication?.result?.feature_importance as
@@ -193,7 +175,7 @@ function Regulatory() {
 
   // Dataset/target/model resolution mirrors validation.performance.tsx
   // (Stage 5) — the bias check reruns the train/split server-side since the
-  // backend is stateless, so it needs the same inputs Stage 4/5 use.
+  // backend is stateless, so it needs the same inputs Stage 3/4 use.
   const targetCol = ds.profile?.target_col || ds.trainingResult?.evaluation_data?.target_col || "default";
   const modelName = ds.selectedModel?.name || ds.trainingResult?.model_name || "Logistic Regression";
   const datasetFile = useMemo<File | null>(() => {
@@ -322,14 +304,14 @@ function Regulatory() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 7 — Regulatory Review"
+        title="Stage 6 — Regulatory Review"
         description="SS1/23 · SS11/13 · IFRS 9 · IFRS 7 — automated regulatory compliance checks and model explainability review."
       />
 
       {loading ? (
-        <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Stage 7 checks...</div>
+        <div className="rounded-xl border border-border bg-card p-6 text-center">Loading Stage 6 checks...</div>
       ) : error ? (
-        <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 7: {error}</div>
+        <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 6: {error}</div>
       ) : (
         <Tabs defaultValue="explainability" className="w-full">
           <TabsList>
@@ -340,13 +322,7 @@ function Regulatory() {
           <TabsContent value="compliance" className="space-y-6 pt-4">
             <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
               <h3 className="text-sm font-semibold">Regulatory Compliance Results (7.1–7.10)</h3>
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-                <SummaryTile label="Total Checks" value={summary.total} tone="neutral" />
-                <SummaryTile label="PASS" value={summary.pass} tone="pass" />
-                <SummaryTile label="WARN" value={summary.warn} tone="warn" />
-                <SummaryTile label="FAIL" value={summary.fail} tone="fail" />
-                <SummaryTile label="N/A" value={summary.na ?? 0} tone="na" />
-              </div>
+              <CheckSummaryTiles summary={summary} checksLabel="Total Checks" className="mt-4" />
               <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-muted">
                 <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />
               </div>
@@ -365,9 +341,9 @@ function Regulatory() {
 
           <TabsContent value="explainability" className="space-y-6 pt-4">
             <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <h3 className="text-sm font-semibold">🔬 SHAP Feature Importance (from Stage 4 Replication)</h3>
+              <h3 className="text-sm font-semibold">🔬 SHAP Feature Importance (from Stage 3 Replication)</h3>
               <p className="text-xs text-muted-foreground">
-                Reuses the replicated model's feature importances computed in Stage 4 — no re-training here.
+                Reuses the replicated model's feature importances computed in Stage 3 — no re-training here.
               </p>
 
               {featureImportanceFigure ? (
@@ -376,7 +352,7 @@ function Regulatory() {
                 </div>
               ) : (
                 <div className="mt-4 rounded-xl border border-dashed border-border bg-background p-8 text-center text-sm text-muted-foreground">
-                  Feature importances not available. Run Stage 4 Model Replication first to populate this chart.
+                  Feature importances not available. Run Stage 3 Model Replication first to populate this chart.
                 </div>
               )}
               <p className="mt-2 text-xs text-muted-foreground">Top 15 Feature Importances (Replicated Model)</p>
@@ -497,7 +473,7 @@ function Regulatory() {
           to="/validation/findings"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
-          Continue to Stage 8
+          Continue to Stage 7
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

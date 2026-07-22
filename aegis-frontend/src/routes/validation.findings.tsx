@@ -6,7 +6,7 @@ import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
 export const Route = createFileRoute("/validation/findings")({
-  head: () => ({ meta: [{ title: "Stage 8 — Findings & Final Report — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 7 — Findings & Final Report — Aegis Credit" }] }),
   component: Findings,
 });
 
@@ -322,7 +322,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 8 — Findings & Final Validation Report"
+        title="Stage 7 — Findings & Final Validation Report"
         description="SS1/23 P4.1/P5 · SS11/13 §13 — consolidated findings, verdict, and sign-off for the Model Risk Committee."
       />
 
@@ -335,7 +335,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
       </section>
 
       {loading ? (
-        <div className="rounded-xl border border-border bg-card p-6 text-center">Compiling Stage 8 findings...</div>
+        <div className="rounded-xl border border-border bg-card p-6 text-center">Compiling Stage 7 findings...</div>
       ) : error ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-6">
           <div className="flex items-start gap-3">
@@ -344,7 +344,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
               <div className="text-sm font-semibold text-destructive">
                 {errorKind === "network"
                   ? "Backend unreachable — this looks like a transient network issue"
-                  : "Error loading Stage 8 findings"}
+                  : "Error loading Stage 7 findings"}
               </div>
               <p className="mt-1 text-sm text-foreground/80">
                 {errorKind === "network"
@@ -607,7 +607,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           {/* Performance metrics vs regulatory thresholds */}
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
             <h3 className="text-sm font-semibold">4. Performance Metrics vs Regulatory Thresholds</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Replicated (Stage 4/5) metrics evaluated against the minimum required by regulation.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Replicated (Stage 3/4) metrics evaluated against the minimum required by regulation.</p>
             <div className="mt-3 overflow-x-auto rounded-lg border border-border">
               <table className="w-full text-sm">
                 <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -758,7 +758,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           to="/validation/regulatory"
           className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold hover:border-primary/40"
         >
-          ← Back to Stage 7: Regulatory Review
+          ← Back to Stage 6: Regulatory Review
         </Link>
         <Link
           to="/validation"

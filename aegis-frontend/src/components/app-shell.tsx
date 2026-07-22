@@ -15,7 +15,6 @@ import {
   ChevronsRight,
   Home,
   FileText,
-  BookOpen,
   GitCompareArrows,
   BarChart3,
   Activity,
@@ -50,8 +49,7 @@ const developmentNav: NavItem[] = [
 
 const validationNav: NavItem[] = [
   { to: "/validation/intake", label: "Intake & Governance", icon: FileText, exact: true },
-  { to: "/validation/data-quality", label: "Data Validation", icon: Database },
-  { to: "/validation/conceptual", label: "Conceptual Soundness", icon: BookOpen },
+  { to: "/validation/data-quality", label: "Data Validation & Conceptual Soundness", icon: Database },
   { to: "/validation/challenger", label: "Model Replication", icon: GitCompareArrows },
   { to: "/validation/performance", label: "Performance Testing", icon: BarChart3 },
   { to: "/validation/stress", label: "Stress & Backtesting", icon: Activity },

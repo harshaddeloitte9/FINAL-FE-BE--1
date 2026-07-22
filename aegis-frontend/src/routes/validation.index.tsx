@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
-import { ArrowRight, FileText, Database, BookOpen, GitCompareArrows, BarChart3, Activity, ShieldCheck, ClipboardCheck } from "lucide-react";
+import { ArrowRight, FileText, Database, GitCompareArrows, BarChart3, Activity, ShieldCheck, ClipboardCheck } from "lucide-react";
 
 export const Route = createFileRoute("/validation/")({
   head: () => ({
@@ -14,13 +14,12 @@ export const Route = createFileRoute("/validation/")({
 
 const stages = [
   { stage: 1, to: "/validation/intake", icon: FileText, title: "Intake & Governance", desc: "Model metadata, artifacts, risk tier, and governance attestation." },
-  { stage: 2, to: "/validation/data-quality", icon: Database, title: "Data Validation", desc: "Automated dataset checks, leakage scan, and sample representativeness." },
-  { stage: 3, to: "/validation/conceptual", icon: BookOpen, title: "Conceptual Soundness", desc: "Feature relevance, methodology, assumptions, and documentation." },
-  { stage: 4, to: "/validation/challenger", icon: GitCompareArrows, title: "Model Replication", desc: "Independently reproduce developer outputs and verify the R4.1-R4.8 replication checks." },
-  { stage: 5, to: "/validation/performance", icon: BarChart3, title: "Performance Testing", desc: "AUC, KS, calibration, threshold analysis, hold-out validation, and champion vs challenger benchmarking." },
-  { stage: 6, to: "/validation/stress", icon: Activity, title: "Stress & Backtesting", desc: "Scenario simulations, stability, backtests, and stress results." },
-  { stage: 7, to: "/validation/regulatory", icon: ShieldCheck, title: "Regulatory Compliance Review", desc: "IFRS 9 / IFRS 7 / SS1/23 review, rule coverage, and remediation." },
-  { stage: 8, to: "/validation/findings", icon: ClipboardCheck, title: "Findings & Final Report", desc: "Final observations, risk grading, recommendation, and sign-off." },
+  { stage: 2, to: "/validation/data-quality", icon: Database, title: "Data Validation & Conceptual Soundness", desc: "Automated dataset checks, leakage scan, sample representativeness, feature relevance, methodology, and assumptions." },
+  { stage: 3, to: "/validation/challenger", icon: GitCompareArrows, title: "Model Replication", desc: "Independently reproduce developer outputs and verify the R4.1-R4.8 replication checks." },
+  { stage: 4, to: "/validation/performance", icon: BarChart3, title: "Performance Testing", desc: "AUC, KS, calibration, threshold analysis, hold-out validation, and champion vs challenger benchmarking." },
+  { stage: 5, to: "/validation/stress", icon: Activity, title: "Stress & Backtesting", desc: "Scenario simulations, stability, backtests, and stress results." },
+  { stage: 6, to: "/validation/regulatory", icon: ShieldCheck, title: "Regulatory Compliance Review", desc: "IFRS 9 / IFRS 7 / SS1/23 review, rule coverage, and remediation." },
+  { stage: 7, to: "/validation/findings", icon: ClipboardCheck, title: "Findings & Final Report", desc: "Final observations, risk grading, recommendation, and sign-off." },
 ] as const;
 
 function ValidationHome() {

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { ArrowRight } from "lucide-react";
 import PlotlyChart from "@/components/plotly-chart";
+import { CheckSummaryTiles } from "@/components/check-summary";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
@@ -290,7 +291,7 @@ function Stress() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 6 — Stress & Backtesting"
+        title="Stage 5 — Stress & Backtesting"
         description="Scenario simulations, model stability over time, and back-tested predictions vs realised outcomes."
       />
 
@@ -305,7 +306,7 @@ function Stress() {
       <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
         <h3 className="text-sm font-semibold">Run configuration</h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          Stress testing retrains the replicated model within this run (same approach as Stage 4 Model Replication —
+          Stress testing retrains the replicated model within this run (same approach as Stage 3 Model Replication —
           nothing is cached between requests), then applies sensitivity, macro-scenario, stability, backtesting, and
           directional checks against it.
         </p>
@@ -315,27 +316,12 @@ function Stress() {
         {runError ? <div className="mt-3 text-xs text-red-500">{runError}</div> : null}
       </section>
 
-      {summary ? (
-        <section className="grid grid-cols-1 gap-3 md:grid-cols-5">
-          {[
-            ["Checks", (summary.pass ?? 0) + (summary.warn ?? 0) + (summary.fail ?? 0) + (summary.pending ?? 0) + (summary.na ?? 0), undefined],
-            ["PASS", summary.pass, "pass"],
-            ["WARN", summary.warn, "warn"],
-            ["FAIL", summary.fail, "fail"],
-            ["N/A", summary.na, "na"],
-          ].map(([label, value, tone]) => (
-            <div key={label as string} className={`rounded-xl border p-4 ${tone ? TONE_CLASSES[tone as string] : "border-border bg-card"}`}>
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-              <div className="mt-1 text-2xl font-semibold text-foreground">{value}</div>
-            </div>
-          ))}
-        </section>
-      ) : null}
+      {summary ? <CheckSummaryTiles summary={summary} /> : null}
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="rounded-xl border border-border bg-card p-6 shadow-elegant">
           <h3 className="text-sm font-semibold">Sensitivity — AUC drop on feature removal</h3>
-          <p className="text-xs text-muted-foreground">From Stage 4 ablation. SS1/23 P4.3.</p>
+          <p className="text-xs text-muted-foreground">From Stage 3 ablation. SS1/23 P4.3.</p>
           <div className="mt-4 h-64">
             {report?.sensitivity?.available ? (
               <PlotlyChart figure={sensitivityFigure} style={{ height: "100%" }} />
@@ -522,7 +508,7 @@ function Stress() {
           to="/validation/regulatory"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
-          Continue to Stage 7
+          Continue to Stage 6
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

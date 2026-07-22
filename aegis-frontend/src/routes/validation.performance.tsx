@@ -69,7 +69,7 @@ function Performance() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Seed from shared context so returning to this page (e.g. via Back from
-  // Stage 6) shows the already-computed result instead of resetting to the
+  // Stage 5) shows the already-computed result instead of resetting to the
   // bare input form — payload previously lived only in this local state and
   // was lost on every remount.
   const [payload, setPayload] = React.useState<PerformanceResponse | null>(
@@ -79,9 +79,9 @@ function Performance() {
   const datasetName = ds.file?.name ?? ds.profile?.dataset_name ?? "uploaded dataset";
   const datasetReady = Boolean(ds.file || ds.profile?.csv_text || ds.profile?.dataset_name);
 
-  // By the time a reviewer reaches Stage 5, the working dataset often only
+  // By the time a reviewer reaches Stage 4, the working dataset often only
   // exists as profile.csv_text (not a literal File object) — carried forward
-  // through preprocessing/FE/macro-fetch as text, same as Stage 4's activeFile
+  // through preprocessing/FE/macro-fetch as text, same as Stage 3's activeFile
   // pattern. Without this reconstruction, the auto-run below silently no-ops
   // whenever ds.file is null, leaving the page stuck with no data.
   const datasetFile = React.useMemo<File | null>(() => {
@@ -98,7 +98,7 @@ function Performance() {
   const handleRun = React.useCallback(async (fileOverride?: File | null) => {
     const fileToUse = fileOverride ?? datasetFile;
     if (!fileToUse) {
-      setError("Upload a dataset or use the file from Intake before running Stage 5.");
+      setError("Upload a dataset or use the file from Intake before running Stage 4.");
       return;
     }
     if (!targetCol.trim()) {
@@ -139,8 +139,8 @@ function Performance() {
   }, [datasetFile, targetCol, modelName, benchmarkModel]);
 
   // Auto-run once the shared dataset from Intake/Data Upload is available,
-  // same as Stage 2/Stage 3 — the reviewer shouldn't have to manually
-  // re-upload a file that's already sitting in context just to see Stage 5
+  // same as Stage 2 — the reviewer shouldn't have to manually
+  // re-upload a file that's already sitting in context just to see Stage 4
   // results. Skipped if we already restored a cached result from context
   // (Back/Forward nav) or the reviewer already ran it locally this session.
   const autoRunAttempted = React.useRef(payload !== null);
@@ -389,14 +389,14 @@ function Performance() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 5 — Performance Testing"
+        title="Stage 4 — Performance Testing"
         description="A full performance check on data the model has never seen, before stress testing and regulatory review."
       />
 
       {loading ? (
         <section className="flex items-center gap-2 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground shadow-elegant">
           <Loader2 className="h-4 w-4 animate-spin" />
-          Running Stage 5 performance analysis on the shared dataset…
+          Running Stage 4 performance analysis on the shared dataset…
         </section>
       ) : null}
 
@@ -417,7 +417,7 @@ function Performance() {
 
       {!payload && !loading ? (
         <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground shadow-elegant">
-          Waiting on a dataset from Stage 1/Stage 2 to run the Stage 5 performance report.
+          Waiting on a dataset from Stage 1/Stage 2 to run the Stage 4 performance report.
         </div>
       ) : null}
 
@@ -590,7 +590,7 @@ function Performance() {
           to="/validation/stress"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
-          Continue to Stage 6
+          Continue to Stage 5
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>
