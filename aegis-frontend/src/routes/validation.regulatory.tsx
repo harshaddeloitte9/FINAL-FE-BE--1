@@ -331,10 +331,10 @@ function Regulatory() {
       ) : error ? (
         <div className="rounded-xl border border-border bg-card p-6 text-destructive">Error loading Stage 7: {error}</div>
       ) : (
-        <Tabs defaultValue="compliance" className="w-full">
+        <Tabs defaultValue="explainability" className="w-full">
           <TabsList>
-            <TabsTrigger value="compliance">Regulatory Compliance</TabsTrigger>
-            <TabsTrigger value="explainability">Explainability &amp; Fairness</TabsTrigger>
+            <TabsTrigger value="explainability">Explainability and Fairness</TabsTrigger>
+            <TabsTrigger value="compliance">Explainability and Fairness</TabsTrigger>
           </TabsList>
 
           <TabsContent value="compliance" className="space-y-6 pt-4">
