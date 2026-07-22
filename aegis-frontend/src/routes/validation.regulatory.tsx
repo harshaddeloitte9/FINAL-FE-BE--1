@@ -316,7 +316,7 @@ function Regulatory() {
         <Tabs defaultValue="explainability" className="w-full">
           <TabsList>
             <TabsTrigger value="explainability">Explainability and Fairness</TabsTrigger>
-            <TabsTrigger value="compliance">Explainability and Fairness</TabsTrigger>
+            <TabsTrigger value="compliance">Regulatory Compliance</TabsTrigger>
           </TabsList>
 
           <TabsContent value="compliance" className="space-y-6 pt-4">
