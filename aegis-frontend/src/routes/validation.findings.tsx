@@ -758,7 +758,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           to="/validation/regulatory"
           className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold hover:border-primary/40"
         >
-          ← Back to Stage 6: Regulatory Review
+          ← Back to Stage 6: Explainability and Fairness
         </Link>
         <Link
           to="/validation"

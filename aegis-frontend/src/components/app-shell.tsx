@@ -49,11 +49,11 @@ const developmentNav: NavItem[] = [
 
 const validationNav: NavItem[] = [
   { to: "/validation/intake", label: "Intake & Governance", icon: FileText, exact: true },
-  { to: "/validation/data-quality", label: "Data Validation & Conceptual Soundness", icon: Database },
+  { to: "/validation/data-quality", label: "Data & Model Soundness", icon: Database },
   { to: "/validation/challenger", label: "Model Replication", icon: GitCompareArrows },
   { to: "/validation/performance", label: "Performance Testing", icon: BarChart3 },
   { to: "/validation/stress", label: "Stress & Backtesting", icon: Activity },
-  { to: "/validation/regulatory", label: "Regulatory Compliance Review", icon: ShieldCheck },
+  { to: "/validation/regulatory", label: "Explainability and Fairness", icon: ShieldCheck },
   { to: "/validation/findings", label: "Findings & Final Report", icon: ClipboardCheck },
 ];
 

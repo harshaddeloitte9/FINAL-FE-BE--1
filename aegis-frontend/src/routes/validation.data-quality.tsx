@@ -8,7 +8,7 @@ import { ArrowRight, AlertTriangle, AlertCircle, Clock, Check } from "lucide-rea
 import { useEffect, useMemo, useRef, useState } from "react";
 
 export const Route = createFileRoute("/validation/data-quality")({
-  head: () => ({ meta: [{ title: "Stage 2 — Data Validation & Conceptual Soundness — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 2 — Data & Model Soundness — Aegis Credit" }] }),
   component: DataQuality,
 });
 
@@ -350,7 +350,7 @@ function DataQuality() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 2 — Data Validation & Conceptual Soundness"
+        title="Stage 2 — Data & Model Soundness"
         description="Is the dataset complete and representative, and are the chosen features, methodology, and assumptions appropriate for the stated business objective and regulatory context?"
       />
 

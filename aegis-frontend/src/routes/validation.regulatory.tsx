@@ -9,7 +9,7 @@ import PlotlyChart from "@/components/plotly-chart";
 import { CheckSummaryTiles, deriveCheckTotal } from "@/components/check-summary";
 
 export const Route = createFileRoute("/validation/regulatory")({
-  head: () => ({ meta: [{ title: "Stage 6 — Regulatory Review — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Stage 6 — Explainability and Fairness — Aegis Credit" }] }),
   component: Regulatory,
 });
 
@@ -304,7 +304,7 @@ function Regulatory() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 6 — Regulatory Review"
+        title="Stage 6 — Explainability and Fairness"
         description="SS1/23 · SS11/13 · IFRS 9 · IFRS 7 — automated regulatory compliance checks and model explainability review."
       />
 
