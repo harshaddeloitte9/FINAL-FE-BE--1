@@ -15,11 +15,13 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ProfilingRouteImport } from './routes/profiling'
 import { Route as PreprocessingRouteImport } from './routes/preprocessing'
 import { Route as PdRouteImport } from './routes/pd'
+import { Route as ModelTrainingEvaluationRouteImport } from './routes/model-training-evaluation'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as ExplainabilityRouteImport } from './routes/explainability'
 import { Route as EvaluationRouteImport } from './routes/evaluation'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
+import { Route as DataPreparationRouteImport } from './routes/data-preparation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ValidationIndexRouteImport } from './routes/validation.index'
 import { Route as ValidationStressRouteImport } from './routes/validation.stress'
@@ -86,6 +88,16 @@ const DataUploadRoute = DataUploadRouteImport.update({
   path: '/data-upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DataPreparationRoute = DataPreparationRouteImport.update({
+  id: '/data-preparation',
+  path: '/data-preparation',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelTrainingEvaluationRoute = ModelTrainingEvaluationRouteImport.update({
+  id: '/model-training-evaluation',
+  path: '/model-training-evaluation',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -139,11 +151,13 @@ const ValidationChallengerRoute = ValidationChallengerRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/data-preparation': typeof DataPreparationRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/model-training-evaluation': typeof ModelTrainingEvaluationRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -162,11 +176,13 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/data-preparation': typeof DataPreparationRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/model-training-evaluation': typeof ModelTrainingEvaluationRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -185,11 +201,13 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/data-preparation': typeof DataPreparationRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
   '/explainability': typeof ExplainabilityRoute
   '/features': typeof FeaturesRoute
+  '/model-training-evaluation': typeof ModelTrainingEvaluationRoute
   '/pd': typeof PdRoute
   '/preprocessing': typeof PreprocessingRoute
   '/profiling': typeof ProfilingRoute
@@ -210,11 +228,13 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/data-preparation'
     | '/data-upload'
     | '/development'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/model-training-evaluation'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -233,11 +253,13 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/data-preparation'
     | '/data-upload'
     | '/development'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/model-training-evaluation'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -255,11 +277,13 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/data-preparation'
     | '/data-upload'
     | '/development'
     | '/evaluation'
     | '/explainability'
     | '/features'
+    | '/model-training-evaluation'
     | '/pd'
     | '/preprocessing'
     | '/profiling'
@@ -279,11 +303,13 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  DataPreparationRoute: typeof DataPreparationRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
   EvaluationRoute: typeof EvaluationRoute
   ExplainabilityRoute: typeof ExplainabilityRoute
   FeaturesRoute: typeof FeaturesRoute
+  ModelTrainingEvaluationRoute: typeof ModelTrainingEvaluationRoute
   PdRoute: typeof PdRoute
   PreprocessingRoute: typeof PreprocessingRoute
   ProfilingRoute: typeof ProfilingRoute
@@ -369,6 +395,20 @@ declare module '@tanstack/react-router' {
       path: '/data-upload'
       fullPath: '/data-upload'
       preLoaderRoute: typeof DataUploadRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/data-preparation': {
+      id: '/data-preparation'
+      path: '/data-preparation'
+      fullPath: '/data-preparation'
+      preLoaderRoute: typeof DataPreparationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-training-evaluation': {
+      id: '/model-training-evaluation'
+      path: '/model-training-evaluation'
+      fullPath: '/model-training-evaluation'
+      preLoaderRoute: typeof ModelTrainingEvaluationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -474,11 +514,13 @@ const ValidationRouteWithChildren = ValidationRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  DataPreparationRoute: DataPreparationRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
   EvaluationRoute: EvaluationRoute,
   ExplainabilityRoute: ExplainabilityRoute,
   FeaturesRoute: FeaturesRoute,
+  ModelTrainingEvaluationRoute: ModelTrainingEvaluationRoute,
   PdRoute: PdRoute,
   PreprocessingRoute: PreprocessingRoute,
   ProfilingRoute: ProfilingRoute,

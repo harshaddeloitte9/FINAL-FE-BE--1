@@ -3,10 +3,8 @@ import {
   UploadCloud,
   Database,
   ShieldCheck,
-  Wand2,
   Layers,
   Cpu,
-  LineChart,
   Sparkles,
   Settings,
   Bell,
@@ -29,21 +27,15 @@ type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean }
 
 const workflowSteps: Array<{ to: string; label: string }> = [
   { to: "/data-upload", label: "Data Upload" },
-  { to: "/profiling", label: "Data Profiling" },
-  { to: "/preprocessing", label: "Preprocessing" },
-  { to: "/features", label: "Feature Engineering" },
-  { to: "/training", label: "Model Training" },
-  { to: "/evaluation", label: "Model Evaluation" },
+  { to: "/data-preparation", label: "Data Preparation & Feature Engineering" },
+  { to: "/model-training-evaluation", label: "Model Training & Evaluation" },
   { to: "/explainability", label: "Explainability" },
 ];
 
 const developmentNav: NavItem[] = [
   { to: "/data-upload", label: "Data Upload", icon: UploadCloud },
-  { to: "/profiling", label: "Data Profiling", icon: Database },
-  { to: "/preprocessing", label: "Preprocessing", icon: Wand2 },
-  { to: "/features", label: "Feature Engineering", icon: Layers },
-  { to: "/training", label: "Model Training", icon: Cpu },
-  { to: "/evaluation", label: "Model Evaluation", icon: LineChart },
+  { to: "/data-preparation", label: "Data Preparation & Feature Engineering", icon: Layers },
+  { to: "/model-training-evaluation", label: "Model Training & Evaluation", icon: Cpu },
   { to: "/explainability", label: "Explainability", icon: Sparkles },
 ];
 
@@ -77,11 +69,8 @@ function resolveWorkspace(pathname: string): "landing" | "development" | "valida
 function resolveActiveModelTab(pathname: string): ModelTab["key"] {
   if (pathname.startsWith("/pd") || [
     "/data-upload",
-    "/profiling",
-    "/preprocessing",
-    "/features",
-    "/training",
-    "/evaluation",
+    "/data-preparation",
+    "/model-training-evaluation",
     "/explainability",
     "/settings",
     "/development",
