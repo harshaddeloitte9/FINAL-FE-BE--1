@@ -37,12 +37,8 @@ import joblib
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import confusion_matrix, roc_auc_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import confusion_matrix
 
 _local_agent2_spec = importlib.util.spec_from_file_location("local_agent2", Path(__file__).resolve().parent / "agent2.py")
 if _local_agent2_spec is None or _local_agent2_spec.loader is None:
@@ -2624,59 +2620,87 @@ async def explain_model(
 
 def _run_benchmark_comparison(
     replication_result: Dict[str, Any],
-    benchmark_model: str,
+    challenger_model_name: str,
+    target_col: str,
     y_true: Optional[np.ndarray],
     y_proba: Optional[np.ndarray],
 ) -> Dict[str, Any]:
+    """Fits the selected challenger model and compares it against the
+    already-fitted champion.
+
+    Reuses the exact same lightweight fit path as /models/compare —
+    get_model_instance() + _lighten_for_comparison() + train_model() with
+    no CV/hyperopt/OOT, through the same rebuild_preprocessor_for()
+    pipeline the champion itself was fit with — rather than a separate,
+    cruder hand-rolled imputer+scaler path limited to three hardcoded
+    "industry standard" models. This makes champion-vs-challenger an
+    apples-to-apples comparison, and lets any model the reviewer picked
+    from the challenger comparison step serve as the benchmark.
+    """
     X_train = replication_result.get("X_train")
     X_test = replication_result.get("X_test")
     y_train = replication_result.get("y_train")
-    if X_train is None or X_test is None or y_train is None or y_true is None or y_proba is None:
+    col_types = replication_result.get("col_types")
+    prep_report = replication_result.get("prep_report_fe") or replication_result.get("prep_report")
+    task_type = replication_result.get("task_type", "binary")
+
+    if (
+        X_train is None or X_test is None or y_train is None
+        or y_true is None or y_proba is None
+        or col_types is None or prep_report is None
+    ):
         return {
-            "model_name": benchmark_model,
+            "model_name": challenger_model_name,
             "status": "SKIP",
             "metrics": {},
             "comparison": {},
         }
 
-    X_tr_num = X_train.select_dtypes(include=[np.number])
-    X_te_num = X_test.select_dtypes(include=[np.number])
-    if X_tr_num.empty or X_te_num.empty:
+    try:
+        model = get_model_instance(challenger_model_name, task_type)
+        model = _lighten_for_comparison(model, challenger_model_name)
+        pipeline, _training_info, _ = train_model(
+            X_train, y_train,
+            col_types=col_types,
+            target_col=target_col,
+            prep_report=prep_report,
+            model=model,
+            use_cv=False,
+            use_hyperopt=False,
+            task_type=task_type,
+            model_name=challenger_model_name,
+            use_oot=False,
+        )
+        if not hasattr(pipeline, "predict_proba"):
+            return {
+                "model_name": challenger_model_name,
+                "status": "SKIP",
+                "metrics": {},
+                "comparison": {},
+            }
+        bm_proba_2d = pipeline.predict_proba(X_test)
+        bm_pred = pipeline.predict(X_test)
+        bm_metrics = compute_binary_metrics(np.asarray(y_true).astype(int), bm_pred, bm_proba_2d, threshold=None)
+    except Exception as e:
         return {
-            "model_name": benchmark_model,
-            "status": "SKIP",
+            "model_name": challenger_model_name,
+            "status": "ERROR",
+            "error": str(e),
             "metrics": {},
             "comparison": {},
         }
 
-    imputer = SimpleImputer(strategy="median")
-    X_tr_imp = imputer.fit_transform(X_tr_num)
-    X_te_imp = imputer.transform(X_te_num)
+    bm_auc = bm_metrics.get("roc_auc")
+    bm_gini = bm_metrics.get("gini")
+    bm_recall = bm_metrics.get("recall")
 
-    scaler = StandardScaler()
-    X_tr_sc = scaler.fit_transform(X_tr_imp)
-    X_te_sc = scaler.transform(X_te_imp)
-
-    if "Logistic" in benchmark_model:
-        model = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
-    elif "Decision Tree" in benchmark_model:
-        model = DecisionTreeClassifier(max_depth=5, class_weight="balanced", random_state=42)
-    else:
-        model = RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42)
-
-    model.fit(X_tr_sc, y_train)
-    bm_proba = model.predict_proba(X_te_sc)[:, 1]
-    bm_pred = (bm_proba >= 0.5).astype(int)
-    bm_auc = round(float(roc_auc_score(np.asarray(y_true), bm_proba)), 4)
-    bm_gini = round(2 * bm_auc - 1, 4)
-    bm_recall = round(float(np.mean(bm_pred[np.asarray(y_true) == 1] == 1)), 4)
-
-    champion_auc = replication_result.get("metrics", {}).get("roc_auc")
-    champion_recall = replication_result.get("metrics", {}).get("recall")
-    champion_gini = replication_result.get("metrics", {}).get("gini")
+    champion_metrics = replication_result.get("metrics", {})
+    champion_auc = champion_metrics.get("roc_auc")
+    champion_recall = champion_metrics.get("recall")
+    champion_gini = champion_metrics.get("gini")
 
     return {
-        "model_name": benchmark_model,
+        "model_name": challenger_model_name,
         "status": "OK",
         "metrics": {
             "roc_auc": bm_auc,
@@ -2876,7 +2900,7 @@ async def validation_performance(
     target_col: str = Form(...),
     file: Optional[UploadFile] = File(None),
     csv_text: Optional[str] = Form(None),
-    benchmark_model: str = Form("Logistic Regression (Industry Standard)"),
+    challenger_model_name: str = Form("Logistic Regression"),
     seeds: Optional[str] = Form("42,43,44,45,46"),
     test_size: float = Form(0.15),
     val_size: float = Form(0.15),
@@ -2891,10 +2915,19 @@ async def validation_performance(
     the old Stage 4 "Performance" tab are now a single combined page. This
     endpoint still fits the champion model (same replication core) because
     the champion-vs-challenger comparison needs a freshly-fit champion to
-    compare against the selected benchmark model, and the ROC overlay chart
-    needs the champion's ROC points — but it no longer computes or returns
-    the rest of the performance report, and no longer takes intake/MDD/
-    reported-metrics params, since those only fed the parts that moved.
+    compare against the selected challenger model, and the ROC overlay
+    chart needs the champion's ROC points — but it no longer computes or
+    returns the rest of the performance report, and no longer takes
+    intake/MDD/reported-metrics params, since those only fed the parts
+    that moved.
+
+    `challenger_model_name` is a real registry model name (see
+    GET /models/list) — typically whichever model the reviewer picked
+    after comparing several candidates via POST /models/compare, the same
+    lightweight comparison used in the model development pipeline's Model
+    Selection step. It's fit here via the same path (get_model_instance +
+    train_model, no CV/hyperopt/OOT) so the comparison is apples-to-apples
+    with the champion.
     """
     df = await _read_dataframe(file=file, csv_text=csv_text)
     if target_col not in df.columns:
@@ -2931,7 +2964,8 @@ async def validation_performance(
 
     benchmark_payload = _run_benchmark_comparison(
         replication_result=replication_result,
-        benchmark_model=benchmark_model,
+        challenger_model_name=challenger_model_name,
+        target_col=target_col,
         y_true=y_true_arr,
         y_proba=y_proba_arr,
     )

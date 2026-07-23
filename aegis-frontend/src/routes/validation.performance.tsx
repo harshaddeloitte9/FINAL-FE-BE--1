@@ -27,11 +27,34 @@ type PerformanceResponse = {
   };
 };
 
-const benchmarkOptions = [
-  { value: "Logistic Regression (Industry Standard)", label: "Logistic Regression" },
-  { value: "Decision Tree (Industry Standard)", label: "Decision Tree" },
-  { value: "Random Forest (Industry Standard)", label: "Random Forest" },
+// Mirrors model_selector.py's CLASSIFICATION_MODELS registry keys (also
+// available from the backend at GET /models/list) — the same candidate set
+// offered during the model development pipeline's Model Selection step.
+const CHALLENGER_CANDIDATES = [
+  "Logistic Regression",
+  "Random Forest",
+  "XGBoost",
+  "LightGBM",
+  "Gradient Boosting",
 ];
+
+type ChallengerComparisonRow = {
+  model_name: string;
+  roc_auc?: number;
+  gini?: number;
+  ks?: number;
+  accuracy?: number;
+  precision?: number;
+  recall?: number;
+  f1?: number;
+  training_time_s?: number;
+  error?: string;
+};
+
+type CompareModelsResponse = {
+  task_type: string;
+  comparison: ChallengerComparisonRow[];
+};
 
 function formatValue(value: unknown, digits = 3) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
@@ -48,7 +71,11 @@ function Performance() {
   const [modelName, setModelName] = React.useState(
     () => ds.selectedModel?.name || ds.trainingResult?.model_name || "Logistic Regression",
   );
-  const [benchmarkModel, setBenchmarkModel] = React.useState("Logistic Regression (Industry Standard)");
+  const [challengerModelName, setChallengerModelName] = React.useState("Logistic Regression");
+  const [selectedCandidates, setSelectedCandidates] = React.useState<string[]>([...CHALLENGER_CANDIDATES]);
+  const [comparisonRows, setComparisonRows] = React.useState<ChallengerComparisonRow[] | null>(null);
+  const [comparing, setComparing] = React.useState(false);
+  const [comparisonError, setComparisonError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Seed from shared context so returning to this page (e.g. via Back from
@@ -101,7 +128,7 @@ function Performance() {
       form.append("file", fileToUse);
       form.append("model_name", modelName.trim());
       form.append("target_col", targetCol.trim());
-      form.append("benchmark_model", benchmarkModel.trim());
+      form.append("challenger_model_name", challengerModelName.trim());
       const res = await formUpload<PerformanceResponse>("/validation/performance", form);
       setPayload(res);
       ds.setValidationStage5Result(res as unknown as Record<string, any>);
@@ -119,7 +146,7 @@ function Performance() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetFile, targetCol, modelName, benchmarkModel]);
+  }, [datasetFile, targetCol, modelName, challengerModelName]);
 
   // Auto-run once the shared dataset from Intake/Data Upload is available,
   // same as Stage 2 — the reviewer shouldn't have to manually
@@ -135,6 +162,54 @@ function Performance() {
     void handleRun(datasetFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetReady, datasetFile, targetCol, modelName]);
+
+  const toggleCandidate = React.useCallback((name: string) => {
+    setSelectedCandidates((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    );
+  }, []);
+
+  // Reuses /models/compare — the exact same lightweight, no-CV/no-hyperopt
+  // comparison the model development pipeline's Model Selection step uses
+  // — so picking a challenger here is grounded in the same fast read on
+  // "which model is worth committing to" rather than a separate mechanism.
+  const runComparison = React.useCallback(async () => {
+    if (!datasetFile) {
+      setComparisonError("Upload a dataset or use the file from Intake before comparing challengers.");
+      return;
+    }
+    if (!targetCol.trim()) {
+      setComparisonError("Target column is required.");
+      return;
+    }
+    if (selectedCandidates.length === 0) {
+      setComparisonError("Select at least one challenger candidate to compare.");
+      return;
+    }
+
+    setComparing(true);
+    setComparisonError(null);
+    try {
+      const form = new FormData();
+      form.append("file", datasetFile);
+      form.append("target_col", targetCol.trim());
+      form.append("model_names", JSON.stringify(selectedCandidates));
+      const res = await formUpload<CompareModelsResponse>("/models/compare", form);
+      setComparisonRows(res.comparison ?? []);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const detail =
+          err.body && typeof err.body === "object" && "detail" in (err.body as any)
+            ? String((err.body as any).detail)
+            : err.message;
+        setComparisonError(detail);
+      } else {
+        setComparisonError(err instanceof Error ? err.message : "Challenger comparison failed.");
+      }
+    } finally {
+      setComparing(false);
+    }
+  }, [datasetFile, targetCol, selectedCandidates]);
 
   const rocPoints = payload?.report?.roc_curve?.points ?? [];
   const benchmarkResponse = payload?.report?.benchmark;
@@ -270,21 +345,123 @@ function Performance() {
       {payload ? (
         <div className="space-y-6">
           <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-            <div className="flex flex-wrap items-end gap-4">
-              <label className="space-y-2 text-sm">
-                <span className="font-medium">Benchmark selector</span>
-                <select
-                  value={benchmarkModel}
-                  onChange={(e) => setBenchmarkModel(e.target.value)}
-                  className="w-full rounded-lg border border-border bg-background px-3 py-2"
+            <h3 className="text-sm font-semibold">Compare challenger models</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Reuses the same lightweight, no-CV comparison from the model development pipeline's
+              Model Selection step — fit → predict → summary metrics per model, so you can see which
+              challenger is worth benchmarking against before committing to one.
+            </p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {CHALLENGER_CANDIDATES.map((name) => (
+                <label
+                  key={name}
+                  className={
+                    "inline-flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium " +
+                    (selectedCandidates.includes(name)
+                      ? "border-primary/40 bg-primary-soft text-foreground"
+                      : "border-border bg-background text-muted-foreground")
+                  }
                 >
-                  {benchmarkOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  <input
+                    type="checkbox"
+                    className="hidden"
+                    checked={selectedCandidates.includes(name)}
+                    onChange={() => toggleCandidate(name)}
+                  />
+                  {name}
+                </label>
+              ))}
+            </div>
+
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void runComparison()}
+                disabled={comparing || !datasetFile || selectedCandidates.length === 0}
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {comparing ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                Compare Challengers
+              </button>
+              <span className="text-xs text-muted-foreground">
+                Current challenger: <span className="font-semibold text-foreground">{challengerModelName}</span>
+              </span>
+            </div>
+
+            {comparisonError ? (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{comparisonError}</span>
+              </div>
+            ) : null}
+
+            {comparisonRows && comparisonRows.length > 0 ? (
+              <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-sm">
+                  <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Model</th>
+                      <th className="px-3 py-2 text-right">ROC-AUC</th>
+                      <th className="px-3 py-2 text-right">Gini</th>
+                      <th className="px-3 py-2 text-right">Recall</th>
+                      <th className="px-3 py-2 text-right">KS</th>
+                      <th className="px-3 py-2 text-right">Fit time (s)</th>
+                      <th className="px-3 py-2 text-left">Select challenger model</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {comparisonRows.map((row) => {
+                      const isSelected = row.model_name === challengerModelName;
+                      const gini = typeof row.gini === "number" ? row.gini : (typeof row.roc_auc === "number" ? 2 * row.roc_auc - 1 : undefined);
+                      return (
+                        <tr key={row.model_name} className={isSelected ? "bg-primary-soft" : undefined}>
+                          <td className="px-3 py-2 font-medium">{row.model_name}</td>
+                          {row.error ? (
+                            <td colSpan={5} className="px-3 py-2 text-xs text-destructive">{row.error}</td>
+                          ) : (
+                            <>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.roc_auc, 3)}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatValue(gini, 3)}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.recall, 3)}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.ks, 3)}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.training_time_s, 2)}</td>
+                            </>
+                          )}
+                          <td className="px-3 py-2">
+                            <button
+                              type="button"
+                              onClick={() => setChallengerModelName(row.model_name)}
+                              disabled={Boolean(row.error)}
+                              className={
+                                "rounded-lg border px-3 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 " +
+                                (isSelected
+                                  ? "border-primary bg-primary text-primary-foreground"
+                                  : "border-border bg-background hover:border-primary/40")
+                              }
+                            >
+                              {isSelected ? "Selected" : "Select"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="text-sm">
+                <span className="font-medium">Champion vs Challenger</span>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Benchmarks the champion model against{" "}
+                  <span className="font-semibold text-foreground">{challengerModelName}</span> — change the
+                  selection above and re-run to compare against a different challenger.
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => handleRun()}
