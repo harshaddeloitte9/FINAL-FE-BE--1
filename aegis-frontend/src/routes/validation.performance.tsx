@@ -1,48 +1,31 @@
 import React from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowRight, AlertCircle, Loader2, PlayCircle } from "lucide-react";
-import { rocCurve, prCurve, scoreDistribution } from "@/lib/mock-data";
 import { useDataset } from "@/lib/app-context";
 import PlotlyChart from "@/components/plotly-chart";
 import { ApiError, formUpload } from "@/lib/api";
 
 export const Route = createFileRoute("/validation/performance")({
-  head: () => ({ meta: [{ title: "Performance Validation — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Benchmarking — Aegis Credit" }] }),
   component: Performance,
 });
 
+// Stage 4 — Benchmarking only. The full performance report (metrics, ROC/PR
+// curves, confusion matrix, calibration, score distribution) that used to
+// live on this page moved to Stage 3 (/validation/challenger, "Model
+// Replication & Performance Testing"), since replication and performance
+// testing fit the model the same way under the hood and showing them
+// together avoids re-running that fit twice. This page keeps just the
+// champion-vs-industry-benchmark comparison.
 type PerformanceResponse = {
   stage: string;
   report: {
     metrics: Record<string, any>;
     roc_curve: { points: Array<Record<string, number>>; auc?: number | null };
-    pr_curve: { points: Array<Record<string, number>>; average_precision?: number | null };
-    confusion_matrix: { labels: Array<number | string>; matrix: number[][] };
-    score_distribution: { bins: Array<Record<string, any>> };
-    calibration_chart: { points: Array<Record<string, any>> };
-    train_test_auc_gap: { gap?: number | null; status?: string | null; cv_mean_auc?: number | null; test_auc?: number | null };
-    threshold_selection?: { threshold: number; metric: string; f1?: number; precision?: number; recall?: number } | null;
-    metric_checks?: Array<Record<string, any>>;
-    compliance_findings?: Array<Record<string, any>>;
     benchmark?: Record<string, any>;
-    threshold_analysis?: Array<Record<string, any>>;
   };
-  replication?: Record<string, any>;
 };
-
-const metricDefinitions = [
-  { key: "roc_auc", label: "ROC-AUC", digits: 3 },
-  { key: "gini", label: "Gini", digits: 3 },
-  { key: "ks", label: "KS", digits: 3 },
-  { key: "accuracy", label: "Accuracy", digits: 3 },
-  { key: "precision", label: "Precision", digits: 3 },
-  { key: "recall", label: "Recall", digits: 3 },
-  { key: "f1", label: "F1 Score", digits: 3 },
-  { key: "brier_score", label: "Brier", digits: 3 },
-  { key: "pr_auc", label: "PR-AUC", digits: 3 },
-];
 
 const benchmarkOptions = [
   { value: "Logistic Regression (Industry Standard)", label: "Logistic Regression" },
@@ -130,7 +113,7 @@ function Performance() {
             : err.message;
         setError(detail);
       } else {
-        setError(err instanceof Error ? err.message : "Performance analysis failed.");
+        setError(err instanceof Error ? err.message : "Benchmark analysis failed.");
       }
     } finally {
       setLoading(false);
@@ -153,20 +136,7 @@ function Performance() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetReady, datasetFile, targetCol, modelName]);
 
-  const metricCards = React.useMemo(() => {
-    const metrics = payload?.report?.metrics ?? {};
-    return metricDefinitions
-      .map((item) => ({ label: item.label, value: formatValue(metrics[item.key], item.digits) }))
-      .filter((item) => item.value !== "—");
-  }, [payload]);
-
-  const gap = payload?.report?.train_test_auc_gap;
   const rocPoints = payload?.report?.roc_curve?.points ?? [];
-  const prPoints = payload?.report?.pr_curve?.points ?? [];
-  const scoreBins = payload?.report?.score_distribution?.bins ?? [];
-  const calibrationPoints = payload?.report?.calibration_chart?.points ?? [];
-  const confusionMatrix = payload?.report?.confusion_matrix;
-  const thresholdSelection = payload?.report?.threshold_selection;
   const benchmarkResponse = payload?.report?.benchmark;
   const benchmarkComparison = benchmarkResponse?.comparison?.champion_vs_challenger;
 
@@ -196,130 +166,6 @@ function Performance() {
       { metric: "Recall", champion: benchmarkComparison.recall?.champion, challenger: benchmarkComparison.recall?.challenger },
     ];
   }, [benchmarkComparison]);
-
-  const rocFigure = React.useMemo(() => {
-    const fpr = rocPoints.map((point) => point.fpr);
-    const tpr = rocPoints.map((point) => point.tpr);
-    const diagonal = rocPoints.map((point) => point.fpr);
-    return {
-      data: [
-        {
-          type: "scatter",
-          mode: "lines",
-          x: fpr,
-          y: tpr,
-          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
-          hovertemplate: "TPR %{y:.3f}<br>FPR %{x:.3f}<extra></extra>",
-          name: "ROC",
-        },
-        {
-          type: "scatter",
-          mode: "lines",
-          x: diagonal,
-          y: diagonal,
-          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
-          hoverinfo: "skip",
-          showlegend: false,
-          name: "Diagonal",
-        },
-      ],
-      layout: {
-        margin: { l: 40, r: 20, t: 25, b: 40 },
-        xaxis: { title: "FPR", tickfont: { size: 11 }, showline: false },
-        yaxis: { title: "TPR", tickfont: { size: 11 }, showline: false },
-        height: 320,
-      },
-    };
-  }, [rocPoints]);
-
-  const prFigure = React.useMemo(() => {
-    const recall = prPoints.map((point) => point.recall);
-    const precision = prPoints.map((point) => point.precision);
-    return {
-      data: [
-        {
-          type: "scatter",
-          mode: "lines",
-          x: recall,
-          y: precision,
-          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
-          hovertemplate: "Precision %{y:.3f}<br>Recall %{x:.3f}<extra></extra>",
-          name: "PR",
-        },
-      ],
-      layout: {
-        margin: { l: 40, r: 20, t: 25, b: 40 },
-        xaxis: { title: "Recall", tickfont: { size: 11 }, showline: false },
-        yaxis: { title: "Precision", tickfont: { size: 11 }, showline: false },
-        height: 320,
-      },
-    };
-  }, [prPoints]);
-
-  const calibrationFigure = React.useMemo(() => {
-    const pred = calibrationPoints.map((point) => point.predicted_rate);
-    const actual = calibrationPoints.map((point) => point.actual_rate);
-    return {
-      data: [
-        {
-          type: "scatter",
-          mode: "lines",
-          x: pred,
-          y: actual,
-          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
-          hovertemplate: "Actual %{y:.3f}<br>Pred %{x:.3f}<extra></extra>",
-          name: "Actual",
-        },
-        {
-          type: "scatter",
-          mode: "lines",
-          x: pred,
-          y: pred,
-          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
-          hoverinfo: "skip",
-          showlegend: false,
-          name: "Perfect",
-        },
-      ],
-      layout: {
-        margin: { l: 40, r: 20, t: 25, b: 40 },
-        xaxis: { title: "Predicted rate", tickfont: { size: 11 }, showline: false },
-        yaxis: { title: "Observed rate", tickfont: { size: 11 }, showline: false },
-        height: 320,
-      },
-    };
-  }, [calibrationPoints]);
-
-  const scoreDistributionFigure = React.useMemo(() => {
-    const bins = scoreBins.map((bin) => bin.bin);
-    const good = scoreBins.map((bin) => bin.good ?? 0);
-    const bad = scoreBins.map((bin) => bin.bad ?? 0);
-    return {
-      data: [
-        {
-          type: "bar",
-          x: bins,
-          y: good,
-          name: "Good",
-          marker: { color: "oklch(0.76 0.18 130)" },
-        },
-        {
-          type: "bar",
-          x: bins,
-          y: bad,
-          name: "Bad",
-          marker: { color: "oklch(0.6 0.22 27)" },
-        },
-      ],
-      layout: {
-        barmode: "stack",
-        margin: { l: 40, r: 20, t: 25, b: 40 },
-        xaxis: { title: "Score bin", tickfont: { size: 11 }, showline: false },
-        yaxis: { title: "Count", tickfont: { size: 11 }, showline: false },
-        height: 320,
-      },
-    };
-  }, [scoreBins]);
 
   const benchmarkComparisonFigure = React.useMemo(() => {
     const metrics = comparisonChartData.map((row) => row.metric);
@@ -389,14 +235,14 @@ function Performance() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 4 — Performance Testing"
-        description="A full performance check on data the model has never seen, before stress testing and regulatory review."
+        title="Stage 4 — Benchmarking"
+        description="Compare the champion model against an industry-standard challenger before stress testing and regulatory review."
       />
 
       {loading ? (
         <section className="flex items-center gap-2 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground shadow-elegant">
           <Loader2 className="h-4 w-4 animate-spin" />
-          Running Stage 4 performance analysis on the shared dataset…
+          Running Stage 4 benchmarking analysis on the shared dataset…
         </section>
       ) : null}
 
@@ -417,172 +263,77 @@ function Performance() {
 
       {!payload && !loading ? (
         <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground shadow-elegant">
-          Waiting on a dataset from Stage 1/Stage 2 to run the Stage 4 performance report.
+          Waiting on a dataset from Stage 1/Stage 2 to run the Stage 4 benchmark report.
         </div>
       ) : null}
 
       {payload ? (
-        <Tabs defaultValue="performance" className="w-full">
-          <TabsList>
-            <TabsTrigger value="performance">Performance</TabsTrigger>
-            <TabsTrigger value="benchmarking">Benchmarking</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="performance" className="space-y-8 pt-4">
-            <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-              {metricCards.map((m) => (
-                <div key={m.label} className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{m.label}</div>
-                  <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{m.value}</div>
-                </div>
-              ))}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-elegant">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Train/Test AUC Gap</div>
-                <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">
-                  {gap ? formatValue(gap.gap, 3) : "—"}
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Status: {gap?.status ?? "—"}
-                </div>
-              </div>
-            </section>
-
-            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="ROC curve" sub={`AUC ${formatValue(payload.report.roc_curve.auc, 3)}`}>
-                <PlotlyChart figure={rocFigure} style={{ height: "100%" }} />
-              </Card>
-
-              <Card title="Precision–Recall" sub={`Average precision ${formatValue(payload.report.pr_curve.average_precision, 3)}`}>
-                <PlotlyChart figure={prFigure} style={{ height: "100%" }} />
-              </Card>
-
-              <Card
-                title="Confusion matrix"
-                sub={
-                  thresholdSelection
-                    ? `Threshold ${formatValue(thresholdSelection.threshold, 2)} (auto-calibrated for max F1)`
-                    : "Threshold —"
-                }
-              >
-                <div className="flex h-full flex-col">
-                  <div className="mb-1 text-center text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Predicted
-                  </div>
-                  <div className="flex flex-1 items-stretch gap-2">
-                    <div className="flex items-center">
-                      <span className="w-4 origin-center -rotate-90 whitespace-nowrap text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                        Actual
-                      </span>
-                    </div>
-                    <div className="grid flex-1 grid-cols-2 gap-3">
-                      {confusionMatrix?.matrix?.length
-                        ? confusionMatrix.matrix.flatMap((row, rowIndex) =>
-                            row.map((value, colIndex) => {
-                              const label = confusionMatrix.labels?.[colIndex] ?? colIndex;
-                              const tone = rowIndex === 1 && colIndex === 1 ? "primary" : rowIndex === 0 && colIndex === 1 ? "warning" : "destructive";
-                              return (
-                                <div
-                                  key={`${rowIndex}-${colIndex}`}
-                                  className={
-                                    "flex flex-col justify-between rounded-xl border p-4 " +
-                                    (tone === "primary"
-                                      ? "border-primary/30 bg-primary-soft"
-                                      : tone === "warning"
-                                        ? "border-warning/40 bg-warning/15"
-                                        : "border-destructive/30 bg-destructive/10")
-                                  }
-                                >
-                                  <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                                    Predicted {label} · Actual {confusionMatrix.labels?.[rowIndex] ?? rowIndex}
-                                  </span>
-                                  <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
-                                </div>
-                              );
-                            }),
-                          )
-                        : null}
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
-              <Card title="Calibration" sub="Predicted vs observed default rate">
-                <PlotlyChart figure={calibrationFigure} style={{ height: "100%" }} />
-              </Card>
-
-              <Card title="Score distribution" sub={`Hold-out set · KS ${formatValue(payload.report.metrics.ks, 3)}`}>
-                <PlotlyChart figure={scoreDistributionFigure} style={{ height: "100%" }} />
-              </Card>
-            </section>
-          </TabsContent>
-
-          <TabsContent value="benchmarking" className="space-y-6 pt-4">
-            <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
-              <div className="flex flex-wrap items-end gap-4">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Benchmark selector</span>
-                  <select
-                    value={benchmarkModel}
-                    onChange={(e) => setBenchmarkModel(e.target.value)}
-                    className="w-full rounded-lg border border-border bg-background px-3 py-2"
-                  >
-                    {benchmarkOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => handleRun()}
-                  disabled={loading || !datasetFile}
-                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+        <div className="space-y-6">
+          <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
+            <div className="flex flex-wrap items-end gap-4">
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Benchmark selector</span>
+                <select
+                  value={benchmarkModel}
+                  onChange={(e) => setBenchmarkModel(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2"
                 >
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
-                  Run Benchmark
-                </button>
-              </div>
-            </section>
+                  {benchmarkOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => handleRun()}
+                disabled={loading || !datasetFile}
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                Run Benchmark
+              </button>
+            </div>
+          </section>
 
-            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="Industry benchmark table" sub="Selected challenger benchmark versus champion model">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2 text-left">#</th>
-                        <th className="px-3 py-2 text-left">Model</th>
-                        <th className="px-3 py-2 text-right">ROC-AUC</th>
-                        <th className="px-3 py-2 text-right">Gini</th>
-                        <th className="px-3 py-2 text-right">Recall</th>
+          <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <Card title="Industry benchmark table" sub="Selected challenger benchmark versus champion model">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left">#</th>
+                      <th className="px-3 py-2 text-left">Model</th>
+                      <th className="px-3 py-2 text-right">ROC-AUC</th>
+                      <th className="px-3 py-2 text-right">Gini</th>
+                      <th className="px-3 py-2 text-right">Recall</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {benchmarkTableRows.map((row, rowIndex) => (
+                      <tr key={row.model}>
+                        <td className="px-3 py-2 text-muted-foreground">{rowIndex + 1}</td>
+                        <td className="px-3 py-2 font-medium">{row.model}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.roc_auc, 3)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.gini, 3)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.recall, 3)}</td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border">
-                      {benchmarkTableRows.map((row, rowIndex) => (
-                        <tr key={row.model}>
-                          <td className="px-3 py-2 text-muted-foreground">{rowIndex + 1}</td>
-                          <td className="px-3 py-2 font-medium">{row.model}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.roc_auc, 3)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.gini, 3)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{formatValue(row.recall, 3)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
 
-              <Card title="Champion vs Challenger comparison" sub="Metric deltas from the benchmark response">
-                <PlotlyChart figure={benchmarkComparisonFigure} style={{ height: "100%" }} />
-              </Card>
+            <Card title="Champion vs Challenger comparison" sub="Metric deltas from the benchmark response">
+              <PlotlyChart figure={benchmarkComparisonFigure} style={{ height: "100%" }} />
+            </Card>
 
-              <Card title="ROC overlay chart" sub="Champion vs selected benchmark model">
-                <PlotlyChart figure={benchmarkOverlayFigure} style={{ height: "100%" }} />
-              </Card>
-            </section>
-          </TabsContent>
-        </Tabs>
+            <Card title="ROC overlay chart" sub="Champion vs selected benchmark model">
+              <PlotlyChart figure={benchmarkOverlayFigure} style={{ height: "100%" }} />
+            </Card>
+          </section>
+        </div>
       ) : null}
 
       <div className="text-right">

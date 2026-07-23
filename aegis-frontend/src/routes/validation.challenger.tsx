@@ -1,6 +1,7 @@
 import React from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ArrowRight,
   PlayCircle,
@@ -18,11 +19,18 @@ import { formUpload, ApiError } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 
 export const Route = createFileRoute("/validation/challenger")({
-  head: () => ({ meta: [{ title: "Model Replication — Aegis Credit" }] }),
+  head: () => ({ meta: [{ title: "Model Replication & Performance — Aegis Credit" }] }),
   component: Challenger,
 });
 
-// --- Model Replication (Stage 4a) — real backend-connected panel ---
+// --- Model Replication + Performance Testing (Stage 3) — real backend-connected panel ---
+// Combines what used to be two separate pages: Stage 3 (Model Replication —
+// R4.1-R4.8 checks, seed stability, feature ablation) and Stage 4's
+// "Performance" tab (metrics, ROC/PR curves, confusion matrix, calibration,
+// score distribution). Stage 4 (/validation/performance) is now
+// benchmarking-only, since both pages already fit the model the same way
+// under the hood (run_replication) — this just stops making the reviewer
+// do it twice.
 
 type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
 
@@ -55,8 +63,40 @@ type ReplicationResult = {
 type ReplicationResponse = {
   stage: string;
   flags: string[];
-  report: { replication: { result: ReplicationResult; checks: ReplicationCheck[] } };
+  report: {
+    replication: { result: ReplicationResult; checks: ReplicationCheck[] };
+    metrics: Record<string, any>;
+    roc_curve: { points: Array<Record<string, number>>; auc?: number | null };
+    pr_curve: { points: Array<Record<string, number>>; average_precision?: number | null };
+    confusion_matrix: { labels: Array<number | string>; matrix: number[][] };
+    score_distribution: { bins: Array<Record<string, any>> };
+    calibration_chart: { points: Array<Record<string, any>> };
+    train_test_auc_gap: { gap?: number | null; status?: string | null; cv_mean_auc?: number | null; test_auc?: number | null };
+    threshold_selection?: { threshold: number; metric: string; f1?: number; precision?: number; recall?: number } | null;
+    metric_checks?: Array<Record<string, any>>;
+    compliance_findings?: Array<Record<string, any>>;
+    threshold_analysis?: Array<Record<string, any>>;
+  };
 };
+
+const metricDefinitions = [
+  { key: "roc_auc", label: "ROC-AUC", digits: 3 },
+  { key: "gini", label: "Gini", digits: 3 },
+  { key: "ks", label: "KS", digits: 3 },
+  { key: "accuracy", label: "Accuracy", digits: 3 },
+  { key: "precision", label: "Precision", digits: 3 },
+  { key: "recall", label: "Recall", digits: 3 },
+  { key: "f1", label: "F1 Score", digits: 3 },
+  { key: "brier_score", label: "Brier", digits: 3 },
+  { key: "pr_auc", label: "PR-AUC", digits: 3 },
+];
+
+function formatValue(value: unknown, digits = 3) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  return num.toFixed(digits);
+}
 
 const statusStyles: Record<CheckStatus, string> = {
   PASS: "bg-primary-soft text-foreground border-primary/30",
@@ -97,13 +137,16 @@ function ModelReplicationPanel() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Seed from shared context so returning to this page (e.g. via Back from
-  // Stage 4) shows the already-computed R4.1-R4.8 checks and model ranking
-  // instead of forcing a full rerun — replication/flags previously lived
-  // only in this local state and were lost on every remount.
+  // Stage 4 — Benchmarking) shows the already-computed R4.1-R4.8 checks,
+  // model ranking, and performance report instead of forcing a full rerun —
+  // this previously lived only in local state and was lost on every remount.
   const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
     (ds.validationStage4Result?.replication as { result: ReplicationResult; checks: ReplicationCheck[] } | null) ?? null,
   );
   const [flags, setFlags] = React.useState<string[]>((ds.validationStage4Result?.flags as string[] | null) ?? []);
+  const [performanceReport, setPerformanceReport] = React.useState<ReplicationResponse["report"] | null>(
+    (ds.validationStage4Result?.performanceReport as ReplicationResponse["report"] | null) ?? null,
+  );
 
   // profile / trainingResult shapes aren't strictly typed on the context
   // (Record<string, any>), so field access below is defensive with fallbacks.
@@ -223,6 +266,7 @@ function ModelReplicationPanel() {
     setLoading(true);
     setReplication(null);
     setFlags([]);
+    setPerformanceReport(null);
     try {
       const form = new FormData();
       if (activeFile) {
@@ -250,7 +294,12 @@ function ModelReplicationPanel() {
       const res = await formUpload<ReplicationResponse>("/validation/replication", form);
       setReplication(res.report.replication);
       setFlags(res.flags ?? []);
-      ds.setValidationStage4Result({ replication: res.report.replication, flags: res.flags ?? [] });
+      setPerformanceReport(res.report);
+      ds.setValidationStage4Result({
+        replication: res.report.replication,
+        flags: res.flags ?? [],
+        performanceReport: res.report,
+      });
     } catch (err) {
       if (err instanceof ApiError) {
         const detail =
@@ -330,6 +379,146 @@ function ModelReplicationPanel() {
   }, [ablationChartData]);
 
   const metrics = replication?.result?.metrics ?? {};
+
+  // --- Performance tab data (ported from the old Stage 4 "Performance" tab) ---
+  const metricCards = React.useMemo(() => {
+    const m = performanceReport?.metrics ?? {};
+    return metricDefinitions
+      .map((item) => ({ label: item.label, value: formatValue(m[item.key], item.digits) }))
+      .filter((item) => item.value !== "—");
+  }, [performanceReport]);
+
+  const gap = performanceReport?.train_test_auc_gap;
+  const rocPoints = performanceReport?.roc_curve?.points ?? [];
+  const prPoints = performanceReport?.pr_curve?.points ?? [];
+  const scoreBins = performanceReport?.score_distribution?.bins ?? [];
+  const calibrationPoints = performanceReport?.calibration_chart?.points ?? [];
+  const confusionMatrix = performanceReport?.confusion_matrix;
+  const thresholdSelection = performanceReport?.threshold_selection;
+
+  const rocFigure = React.useMemo(() => {
+    const fpr = rocPoints.map((point) => point.fpr);
+    const tpr = rocPoints.map((point) => point.tpr);
+    const diagonal = rocPoints.map((point) => point.fpr);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: fpr,
+          y: tpr,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "TPR %{y:.3f}<br>FPR %{x:.3f}<extra></extra>",
+          name: "ROC",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: diagonal,
+          y: diagonal,
+          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Diagonal",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "FPR", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "TPR", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [rocPoints]);
+
+  const prFigure = React.useMemo(() => {
+    const recall = prPoints.map((point) => point.recall);
+    const precision = prPoints.map((point) => point.precision);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: recall,
+          y: precision,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "Precision %{y:.3f}<br>Recall %{x:.3f}<extra></extra>",
+          name: "PR",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Recall", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Precision", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [prPoints]);
+
+  const calibrationFigure = React.useMemo(() => {
+    const pred = calibrationPoints.map((point) => point.predicted_rate);
+    const actual = calibrationPoints.map((point) => point.actual_rate);
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: pred,
+          y: actual,
+          line: { color: "oklch(0.6 0.18 135)", width: 2.5 },
+          hovertemplate: "Actual %{y:.3f}<br>Pred %{x:.3f}<extra></extra>",
+          name: "Actual",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: pred,
+          y: pred,
+          line: { color: "oklch(0.6 0.01 240)", dash: "dash" },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Perfect",
+        },
+      ],
+      layout: {
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Predicted rate", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Observed rate", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [calibrationPoints]);
+
+  const scoreDistributionFigure = React.useMemo(() => {
+    const bins = scoreBins.map((bin) => bin.bin);
+    const good = scoreBins.map((bin) => bin.good ?? 0);
+    const bad = scoreBins.map((bin) => bin.bad ?? 0);
+    return {
+      data: [
+        {
+          type: "bar",
+          x: bins,
+          y: good,
+          name: "Good",
+          marker: { color: "oklch(0.76 0.18 130)" },
+        },
+        {
+          type: "bar",
+          x: bins,
+          y: bad,
+          name: "Bad",
+          marker: { color: "oklch(0.6 0.22 27)" },
+        },
+      ],
+      layout: {
+        barmode: "stack",
+        margin: { l: 40, r: 20, t: 25, b: 40 },
+        xaxis: { title: "Score bin", tickfont: { size: 11 }, showline: false },
+        yaxis: { title: "Count", tickfont: { size: 11 }, showline: false },
+        height: 320,
+      },
+    };
+  }, [scoreBins]);
 
   return (
     <section className="rounded-xl border border-border bg-card p-6 shadow-elegant">
@@ -519,76 +708,192 @@ function ModelReplicationPanel() {
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-                {["roc_auc", "gini", "ks", "accuracy", "precision", "recall", "f1"].map((k) => (
-                  <div key={k} className="rounded-lg border border-border bg-background p-3">
-                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{k.replace("_", " ")}</div>
-                    <div className="mt-1 text-lg font-semibold tabular-nums">
-                      {typeof metrics[k] === "number" ? metrics[k].toFixed(3) : "—"}
-                    </div>
-                  </div>
-                ))}
-                <div className="rounded-lg border border-border bg-background p-3">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">cv mean auc</div>
-                  <div className="mt-1 text-lg font-semibold tabular-nums">
-                    {typeof replication.result.cv_mean_auc === "number" ? replication.result.cv_mean_auc.toFixed(3) : "—"}
-                  </div>
-                </div>
-              </div>
+              <Tabs defaultValue="replication" className="w-full">
+                <TabsList>
+                  <TabsTrigger value="replication">Replication Checks</TabsTrigger>
+                  <TabsTrigger value="performance">Performance</TabsTrigger>
+                </TabsList>
 
-              {/* Checks table */}
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-sm">
-                  <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <tr>
-                      <th className="px-4 py-2 text-left">#</th>
-                      <th className="px-4 py-2 text-left">ID</th>
-                      <th className="px-4 py-2 text-left">Check</th>
-                      <th className="px-4 py-2 text-left">Observed</th>
-                      <th className="px-4 py-2 text-left">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {replication.checks.map((c, rowIndex) => (
-                      <tr key={c.id}>
-                        <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
-                        <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{c.id}</td>
-                        <td className="px-4 py-2 font-medium">{c.title}</td>
-                        <td className="px-4 py-2 text-xs text-foreground/80">{c.observed ?? "—"}</td>
-                        <td className="px-4 py-2">
-                          <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusStyles[c.status]}`}>
-                            <StatusIcon s={c.status} />
-                            {c.status}
-                          </span>
-                        </td>
-                      </tr>
+                <TabsContent value="replication" className="space-y-6 pt-4">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+                    {["roc_auc", "gini", "ks", "accuracy", "precision", "recall", "f1"].map((k) => (
+                      <div key={k} className="rounded-lg border border-border bg-background p-3">
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{k.replace("_", " ")}</div>
+                        <div className="mt-1 text-lg font-semibold tabular-nums">
+                          {typeof metrics[k] === "number" ? metrics[k].toFixed(3) : "—"}
+                        </div>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Seed stability + ablation charts */}
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                {seedFigure && (
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Seed stability (R4.6)</h4>
-                    <div className="mt-2 h-56">
-                      <PlotlyChart figure={seedFigure} style={{ height: "100%" }} />
+                    <div className="rounded-lg border border-border bg-background p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">cv mean auc</div>
+                      <div className="mt-1 text-lg font-semibold tabular-nums">
+                        {typeof replication.result.cv_mean_auc === "number" ? replication.result.cv_mean_auc.toFixed(3) : "—"}
+                      </div>
                     </div>
                   </div>
-                )}
 
-                {ablationFigure && (
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      Top feature ablation — AUC drop (R4.5)
-                    </h4>
-                    <div className="mt-2 h-56">
-                      <PlotlyChart figure={ablationFigure} style={{ height: "100%" }} />
-                    </div>
+                  {/* Checks table */}
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-sm">
+                      <thead className="bg-background text-[10px] uppercase tracking-wider text-muted-foreground">
+                        <tr>
+                          <th className="px-4 py-2 text-left">#</th>
+                          <th className="px-4 py-2 text-left">ID</th>
+                          <th className="px-4 py-2 text-left">Check</th>
+                          <th className="px-4 py-2 text-left">Observed</th>
+                          <th className="px-4 py-2 text-left">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {replication.checks.map((c, rowIndex) => (
+                          <tr key={c.id}>
+                            <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{rowIndex + 1}</td>
+                            <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{c.id}</td>
+                            <td className="px-4 py-2 font-medium">{c.title}</td>
+                            <td className="px-4 py-2 text-xs text-foreground/80">{c.observed ?? "—"}</td>
+                            <td className="px-4 py-2">
+                              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusStyles[c.status]}`}>
+                                <StatusIcon s={c.status} />
+                                {c.status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                )}
-              </div>
+
+                  {/* Seed stability + ablation charts */}
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    {seedFigure && (
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Seed stability (R4.6)</h4>
+                        <div className="mt-2 h-56">
+                          <PlotlyChart figure={seedFigure} style={{ height: "100%" }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {ablationFigure && (
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          Top feature ablation — AUC drop (R4.5)
+                        </h4>
+                        <div className="mt-2 h-56">
+                          <PlotlyChart figure={ablationFigure} style={{ height: "100%" }} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="performance" className="space-y-8 pt-4">
+                  <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                    {metricCards.map((m) => (
+                      <div key={m.label} className="rounded-xl border border-border bg-background p-4">
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{m.label}</div>
+                        <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{m.value}</div>
+                      </div>
+                    ))}
+                    <div className="rounded-xl border border-border bg-background p-4">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Train/Test AUC Gap</div>
+                      <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">
+                        {gap ? formatValue(gap.gap, 3) : "—"}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Status: {gap?.status ?? "—"}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    <div className="rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-sm font-semibold">ROC curve</h3>
+                      <p className="text-xs text-muted-foreground">AUC {formatValue(performanceReport?.roc_curve?.auc, 3)}</p>
+                      <div className="mt-4 h-56">
+                        <PlotlyChart figure={rocFigure} style={{ height: "100%" }} />
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-sm font-semibold">Precision–Recall</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Average precision {formatValue(performanceReport?.pr_curve?.average_precision, 3)}
+                      </p>
+                      <div className="mt-4 h-56">
+                        <PlotlyChart figure={prFigure} style={{ height: "100%" }} />
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-sm font-semibold">Confusion matrix</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {thresholdSelection
+                          ? `Threshold ${formatValue(thresholdSelection.threshold, 2)} (auto-calibrated for max F1)`
+                          : "Threshold —"}
+                      </p>
+                      <div className="mt-4 flex h-56 flex-col">
+                        <div className="mb-1 text-center text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                          Predicted
+                        </div>
+                        <div className="flex flex-1 items-stretch gap-2">
+                          <div className="flex items-center">
+                            <span className="w-4 origin-center -rotate-90 whitespace-nowrap text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                              Actual
+                            </span>
+                          </div>
+                          <div className="grid flex-1 grid-cols-2 gap-3">
+                            {confusionMatrix?.matrix?.length
+                              ? confusionMatrix.matrix.flatMap((row, rowIndex) =>
+                                  row.map((value, colIndex) => {
+                                    const label = confusionMatrix.labels?.[colIndex] ?? colIndex;
+                                    const tone = rowIndex === 1 && colIndex === 1 ? "primary" : rowIndex === 0 && colIndex === 1 ? "warning" : "destructive";
+                                    return (
+                                      <div
+                                        key={`${rowIndex}-${colIndex}`}
+                                        className={
+                                          "flex flex-col justify-between rounded-xl border p-4 " +
+                                          (tone === "primary"
+                                            ? "border-primary/30 bg-primary-soft"
+                                            : tone === "warning"
+                                              ? "border-warning/40 bg-warning/15"
+                                              : "border-destructive/30 bg-destructive/10")
+                                        }
+                                      >
+                                        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                                          Predicted {label} · Actual {confusionMatrix.labels?.[rowIndex] ?? rowIndex}
+                                        </span>
+                                        <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
+                                      </div>
+                                    );
+                                  }),
+                                )
+                              : null}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-sm font-semibold">Calibration</h3>
+                      <p className="text-xs text-muted-foreground">Predicted vs observed default rate</p>
+                      <div className="mt-4 h-56">
+                        <PlotlyChart figure={calibrationFigure} style={{ height: "100%" }} />
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-sm font-semibold">Score distribution</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Hold-out set · KS {formatValue(performanceReport?.metrics?.ks, 3)}
+                      </p>
+                      <div className="mt-4 h-56">
+                        <PlotlyChart figure={scoreDistributionFigure} style={{ height: "100%" }} />
+                      </div>
+                    </div>
+                  </section>
+                </TabsContent>
+              </Tabs>
             </>
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -605,8 +910,8 @@ function Challenger() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Stage 3 — Model Replication"
-        description="Independently reproduce the developer's submitted model and outputs, and verify results against the R4.1-R4.8 replication checks."
+        title="Stage 3 — Model Replication & Performance Testing"
+        description="Independently reproduce the developer's submitted model, verify results against the R4.1-R4.8 replication checks, and review its full performance profile on data the model has never seen."
       />
 
       <ModelReplicationPanel />
@@ -616,7 +921,7 @@ function Challenger() {
           to="/validation/performance"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
         >
-          Continue to Stage 4
+          Continue to Stage 4 — Benchmarking
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

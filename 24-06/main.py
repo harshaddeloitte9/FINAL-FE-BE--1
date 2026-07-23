@@ -2702,64 +2702,23 @@ def _run_benchmark_comparison(
     }
 
 
-@app.post("/validation/performance")
-async def validation_performance(
-    model_name: str = Form(...),
-    target_col: str = Form(...),
-    file: Optional[UploadFile] = File(None),
-    csv_text: Optional[str] = Form(None),
-    benchmark_model: str = Form("Logistic Regression (Industry Standard)"),
-    intake_json: Optional[str] = Form(None),
-    mdd_file: Optional[UploadFile] = File(None),
-    seeds: Optional[str] = Form("42,43,44,45,46"),
-    test_size: float = Form(0.15),
-    val_size: float = Form(0.15),
-    random_seed: int = Form(42),
-    cv_folds: int = Form(5),
-    reported_json: Optional[str] = Form(None),
+def _build_performance_report(
+    df: Optional[pd.DataFrame],
+    replication_result: Dict[str, Any],
+    intake_payload: Dict[str, Any],
+    mdd_text: str,
 ) -> Dict[str, Any]:
-    df = await _read_dataframe(file=file, csv_text=csv_text)
-    if target_col not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+    """Full performance report (metrics, ROC/PR curves, confusion matrix,
+    calibration, score distribution, train/test AUC gap, metric checks,
+    compliance findings) built from an already-fitted replication result.
 
-    intake_payload = {}
-    if intake_json:
-        try:
-            intake_payload = json.loads(intake_json)
-        except Exception:
-            intake_payload = {}
-
-    mdd_text = ""
-    if mdd_file is not None:
-        try:
-            mdd_text = parse_mdd_file(mdd_file)
-        except Exception:
-            mdd_text = ""
-
-    reported_payload: Dict[str, Any] = {}
-    if reported_json:
-        try:
-            reported_payload = json.loads(reported_json)
-        except Exception:
-            reported_payload = {}
-
-    try:
-        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
-    except Exception:
-        seed_list = [random_seed]
-
-    replication_result = run_replication(
-        df=df,
-        target_col=target_col,
-        model_name=model_name,
-        test_size=test_size,
-        val_size=val_size,
-        random_seed=random_seed,
-        cv_folds=cv_folds,
-        reported=reported_payload,
-        seeds=seed_list,
-    )
-
+    This used to live only in /validation/performance. Stage 3 (Model
+    Replication, /validation/replication) and the old Stage 4 "Performance"
+    tab are now one combined page, so both endpoints call this — replication
+    for the combined page's charts, performance for the champion metrics +
+    ROC curve its benchmarking view still needs. Factored out rather than
+    duplicated so the two stay in sync.
+    """
     y_true = replication_result.get("y_test")
     y_proba = replication_result.get("y_proba")
     y_true_arr = np.asarray(y_true).astype(int) if y_true is not None else None
@@ -2833,13 +2792,6 @@ async def validation_performance(
         if finding.get("stage") == "Stage 5: Performance Validation"
     ]
 
-    benchmark_payload = _run_benchmark_comparison(
-        replication_result=replication_result,
-        benchmark_model=benchmark_model,
-        y_true=y_true_arr,
-        y_proba=y_proba_arr,
-    )
-
     performance_checks = []
     if metrics.get("roc_auc") is not None:
         performance_checks.append({
@@ -2898,34 +2850,98 @@ async def validation_performance(
             "value": metrics["ks"],
         })
 
-    safe_replication_result = dict(replication_result)
-    for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
-        safe_replication_result.pop(key, None)
+    return {
+        "metrics": metrics,
+        "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc")},
+        "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc")},
+        "confusion_matrix": cm,
+        "threshold_selection": threshold_selection,
+        "score_distribution": {"bins": score_distribution},
+        "calibration_chart": {"points": calibration_points},
+        "train_test_auc_gap": {
+            "cv_mean_auc": cv_mean_auc,
+            "test_auc": test_auc,
+            "gap": train_test_gap,
+            "status": train_test_gap_status,
+        },
+        "metric_checks": performance_checks,
+        "compliance_findings": stage5_findings,
+        "threshold_analysis": threshold_analysis,
+    }
+
+
+@app.post("/validation/performance")
+async def validation_performance(
+    model_name: str = Form(...),
+    target_col: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    benchmark_model: str = Form("Logistic Regression (Industry Standard)"),
+    seeds: Optional[str] = Form("42,43,44,45,46"),
+    test_size: float = Form(0.15),
+    val_size: float = Form(0.15),
+    random_seed: int = Form(42),
+    cv_folds: int = Form(5),
+) -> Dict[str, Any]:
+    """Stage 4 — Benchmarking only.
+
+    The full performance report (ROC/PR curves, confusion matrix,
+    calibration, score distribution, metric checks, compliance findings)
+    moved to /validation/replication, since Stage 3 (Model Replication) and
+    the old Stage 4 "Performance" tab are now a single combined page. This
+    endpoint still fits the champion model (same replication core) because
+    the champion-vs-challenger comparison needs a freshly-fit champion to
+    compare against the selected benchmark model, and the ROC overlay chart
+    needs the champion's ROC points — but it no longer computes or returns
+    the rest of the performance report, and no longer takes intake/MDD/
+    reported-metrics params, since those only fed the parts that moved.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    try:
+        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    except Exception:
+        seed_list = [random_seed]
+
+    replication_result = run_replication(
+        df=df,
+        target_col=target_col,
+        model_name=model_name,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
+        cv_folds=cv_folds,
+        reported={},
+        seeds=seed_list,
+    )
+
+    y_true = replication_result.get("y_test")
+    y_proba = replication_result.get("y_proba")
+    y_true_arr = np.asarray(y_true).astype(int) if y_true is not None else None
+    y_proba_arr = np.asarray(y_proba).astype(float) if y_proba is not None else None
+
+    metrics = dict(replication_result.get("metrics") or {})
+    metrics = {k: _json_safe_scalar(v) for k, v in metrics.items()}
+
+    roc_curve = []
+    if y_true_arr is not None and y_proba_arr is not None:
+        roc_curve = compute_roc_curve(y_true_arr, y_proba_arr)
+
+    benchmark_payload = _run_benchmark_comparison(
+        replication_result=replication_result,
+        benchmark_model=benchmark_model,
+        y_true=y_true_arr,
+        y_proba=y_proba_arr,
+    )
 
     return {
-        "stage": "performance",
-        "replication": {
-            "result": safe_replication_result,
-            "checks": evaluate_replication_checks(replication_result, reported_payload, seed_list),
-        },
+        "stage": "benchmarking",
         "report": {
             "metrics": metrics,
             "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc")},
-            "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc")},
-            "confusion_matrix": cm,
-            "threshold_selection": threshold_selection,
-            "score_distribution": {"bins": score_distribution},
-            "calibration_chart": {"points": calibration_points},
-            "train_test_auc_gap": {
-                "cv_mean_auc": cv_mean_auc,
-                "test_auc": test_auc,
-                "gap": train_test_gap,
-                "status": train_test_gap_status,
-            },
-            "metric_checks": performance_checks,
-            "compliance_findings": stage5_findings,
             "benchmark": benchmark_payload,
-            "threshold_analysis": threshold_analysis,
         },
     }
 
@@ -3027,6 +3043,7 @@ async def validation_replication(
     cv_folds: int = Form(5),
     mdd_file: Optional[UploadFile] = File(None),
     reported_json: Optional[str] = Form(None),
+    intake_json: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Run backend replication checks. Returns {'flags', 'report'} to match existing shapes.
 
@@ -3035,6 +3052,16 @@ async def validation_replication(
     already-completed training run's evaluation_metrics) and/or an uploaded MDD
     file. When both are present, values extracted from the MDD take precedence
     per-key, since the MDD is the authoritative developer documentation.
+
+    This now also returns the full performance report (`report.metrics`,
+    `report.roc_curve`, `report.pr_curve`, `report.confusion_matrix`,
+    `report.calibration_chart`, `report.score_distribution`,
+    `report.train_test_auc_gap`, `report.metric_checks`,
+    `report.compliance_findings`, `report.threshold_analysis`) alongside the
+    existing `report.replication.{result,checks}` — Stage 3 (Model
+    Replication) and the old Stage 4 "Performance" tab are now a single
+    combined page, so this one call produces everything it needs.
+    `intake_json` is optional and only feeds `compliance_findings`.
     """
     df = await _read_dataframe(file=file, csv_text=csv_text)
     # parse seeds
@@ -3047,7 +3074,15 @@ async def validation_replication(
     if not resolved_model_name:
         raise HTTPException(status_code=400, detail="Model or algorithm is required.")
 
+    intake_payload: Dict[str, Any] = {}
+    if intake_json:
+        try:
+            intake_payload = json.loads(intake_json)
+        except Exception:
+            intake_payload = {}
+
     reported: Dict[str, Any] = {}
+    mdd_text = ""
     if reported_json:
         try:
             parsed = json.loads(reported_json)
@@ -3098,7 +3133,16 @@ async def validation_replication(
         safe_result.pop(key, None)
     safe_result = _serialize_stage5_payload(safe_result)
 
-    return {"stage": "replication", "flags": flags, "report": {"replication": {"result": safe_result, "checks": checks}}}
+    performance_report = _build_performance_report(df, result, intake_payload, mdd_text)
+
+    return {
+        "stage": "replication",
+        "flags": flags,
+        "report": {
+            "replication": {"result": safe_result, "checks": checks},
+            **performance_report,
+        },
+    }
 
 
 @app.post("/validation/stage7/bias-check")
