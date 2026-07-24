@@ -192,11 +192,28 @@ def _fit_core(
     val_size: float,
     random_seed: int,
     cv_folds: int,
+    use_feature_engineering: bool = False,
+    model_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Shared train/split/fit core used by both full replication and the
     lighter-weight bias check — factored out so a bias-check run doesn't
     have to pay for replication's seed-stability + ablation loops just to
-    get a fitted pipeline and a test split."""
+    get a fitted pipeline and a test split.
+
+    `use_feature_engineering` and `model_params` let the caller mirror the
+    ACTUAL configuration the model was trained with (Stage 5's
+    training_config). Defaulting `use_feature_engineering` to False matches
+    /models/train's default — previously this was unconditionally applied
+    here regardless of what the real model used, so a model trained without
+    feature engineering was "replicated" on a different feature set
+    entirely. `model_params`, when supplied, overrides the registry's
+    generic default_params with whatever hyperparameters (manual or
+    hyperopt-tuned) actually produced the model being validated — without
+    it, replication silently substitutes a differently-tuned model, which
+    can materially degrade AUC and, on imbalanced credit data, collapse
+    threshold-based metrics like precision/recall/F1 toward zero even when
+    the drop in AUC looks modest.
+    """
     col_types = detect_column_types(df)
     task_type = detect_task_type(df[target_col])
     X, y, _, prep_report, _ = prepare_data(df, col_types, target_col)
@@ -212,21 +229,36 @@ def _fit_core(
         X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test
     )
 
-    fe_plan = analyze_for_feature_engineering(
-        X_train_raw, y_train, col_types, task_type
-    )
-    X_train, fe_summary = apply_feature_engineering(X_train_raw, fe_plan)
-    X_val, _ = apply_feature_engineering(X_val_raw, fe_plan)
-    X_test_eng, _ = apply_feature_engineering(X_test_raw, fe_plan)
-
     import copy as _copy
-    live_cols = set(X_train.columns)
-    prep_report_fe = _copy.deepcopy(prep_report)
-    prep_report_fe["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_cols}
-    prep_report_fe["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_cols}
+    if use_feature_engineering:
+        fe_plan = analyze_for_feature_engineering(
+            X_train_raw, y_train, col_types, task_type
+        )
+        X_train, fe_summary = apply_feature_engineering(X_train_raw, fe_plan)
+        X_val, _ = apply_feature_engineering(X_val_raw, fe_plan)
+        X_test_eng, _ = apply_feature_engineering(X_test_raw, fe_plan)
+
+        live_cols = set(X_train.columns)
+        prep_report_fe = _copy.deepcopy(prep_report)
+        prep_report_fe["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_cols}
+        prep_report_fe["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_cols}
+    else:
+        # Mirrors /models/train's default (use_feature_engineering=False):
+        # train directly on the split, un-engineered columns so the
+        # replicated feature set matches what the real model was built on.
+        X_train, X_val, X_test_eng = X_train_raw, X_val_raw, X_test_raw
+        fe_summary = None
+        prep_report_fe = prep_report
 
     model_cls, default_params = _resolve_model_class(model_name)
-    model_inst = model_cls(**default_params)
+    merged_params = dict(default_params)
+    if model_params:
+        try:
+            valid_keys = set(model_cls().get_params().keys())
+        except Exception:
+            valid_keys = set(default_params.keys()) | set(model_params.keys())
+        merged_params.update({k: v for k, v in model_params.items() if k in valid_keys})
+    model_inst = model_cls(**merged_params)
 
     pipeline, training_info, feature_names = train_model(
         X_train, y_train,
@@ -267,10 +299,12 @@ def _fit_core(
         "X": X, "y": y,
         "X_train": X_train, "X_test": X_test_eng, "y_train": y_train, "y_test": y_test,
         "prep_report": prep_report, "prep_report_fe": prep_report_fe,
-        "model_cls": model_cls, "default_params": default_params,
+        "model_cls": model_cls, "default_params": merged_params,
         "pipeline": pipeline, "training_info": training_info,
         "y_proba": y_proba, "y_pred": y_pred,
         "metrics": metrics, "split_stats": split_stats,
+        "use_feature_engineering": use_feature_engineering,
+        "model_params_used": merged_params,
     }
 
 
@@ -284,6 +318,8 @@ def run_replication(
     cv_folds: int,
     reported: Dict[str, Any],
     seeds: List[int],
+    use_feature_engineering: bool = False,
+    model_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     # Wraps the original _run_replication but returns JSON-serializable outputs
     out = {
@@ -303,10 +339,17 @@ def run_replication(
         "y_proba": None,
         "y_pred": None,
         "feature_importance": [],
+        "use_feature_engineering": use_feature_engineering,
+        "model_params_used": None,
     }
     t0 = time.time()
     try:
-        fit = _fit_core(df, target_col, model_name, test_size, val_size, random_seed, cv_folds)
+        fit = _fit_core(
+            df, target_col, model_name, test_size, val_size, random_seed, cv_folds,
+            use_feature_engineering=use_feature_engineering,
+            model_params=model_params,
+        )
+        out["model_params_used"] = fit.get("model_params_used")
         col_types = fit["col_types"]
         task_type = fit["task_type"]
         X, y = fit["X"], fit["y"]
@@ -342,6 +385,10 @@ def run_replication(
             "y_proba": y_proba,
             "y_pred": y_pred,
             "feature_importance": feature_importance,
+            "col_types": col_types,
+            "task_type": task_type,
+            "prep_report": prep_report,
+            "prep_report_fe": prep_report_fe,
         })
 
         seed_aucs = []
@@ -354,16 +401,20 @@ def run_replication(
                     task_type=task_type,
                     random_state=s,
                 )
-                fe_plan_s = analyze_for_feature_engineering(
-                    Xtr_s, ytr_s, col_types, task_type
-                )
-                Xtr_fe_s, _ = apply_feature_engineering(Xtr_s, fe_plan_s)
-                Xte_fe_s, _ = apply_feature_engineering(Xte_s, fe_plan_s)
+                if use_feature_engineering:
+                    fe_plan_s = analyze_for_feature_engineering(
+                        Xtr_s, ytr_s, col_types, task_type
+                    )
+                    Xtr_fe_s, _ = apply_feature_engineering(Xtr_s, fe_plan_s)
+                    Xte_fe_s, _ = apply_feature_engineering(Xte_s, fe_plan_s)
 
-                live_s = set(Xtr_fe_s.columns)
-                prep_report_s = _copy.deepcopy(prep_report)
-                prep_report_s["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_s}
-                prep_report_s["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_s}
+                    live_s = set(Xtr_fe_s.columns)
+                    prep_report_s = _copy.deepcopy(prep_report)
+                    prep_report_s["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_s}
+                    prep_report_s["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_s}
+                else:
+                    Xtr_fe_s, Xte_fe_s = Xtr_s, Xte_s
+                    prep_report_s = prep_report
 
                 m_s = model_cls(**default_params)
                 pipe_s, _, _ = train_model(
@@ -511,10 +562,6 @@ def run_bias_check(
                 "observed": f"AUC gap across groups: {auc_gap:.4f} (max: {max(auc_vals):.4f}, min: {min(auc_vals):.4f})",
                 "threshold": "AUC gap across protected groups < 0.05",
                 "detail": "Large AUC gap indicates model performs differently for different groups — potential discrimination risk",
-                # A statistical convention (not literal regulatory text) —
-                # SS1/23 P1.3 requires bias to be assessed, not this specific
-                # 0.05 cutoff. See _normalize_threshold_check in main.py.
-                "check_type": "data",
             }
         else:
             out["check"] = {
@@ -527,7 +574,6 @@ def run_bias_check(
                 "observed": "Fewer than 2 groups with >= 10 records — AUC gap not computable",
                 "threshold": "AUC gap across protected groups < 0.05",
                 "detail": "",
-                "check_type": "data",
             }
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
