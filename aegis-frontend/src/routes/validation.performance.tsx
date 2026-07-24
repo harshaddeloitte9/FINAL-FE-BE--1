@@ -68,6 +68,10 @@ function Performance() {
   const [benchmarkModel, setBenchmarkModel] = React.useState("Logistic Regression (Industry Standard)");
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // Tracks which sub-tab is active so the bottom button can tell whether
+  // the reviewer is still on the first sub-tab (Performance — button just
+  // advances to Benchmarking) or the last one (button navigates to Stage 5).
+  const [activeTab, setActiveTab] = React.useState<string>("performance");
   // Seed from shared context so returning to this page (e.g. via Back from
   // Stage 5) shows the already-computed result instead of resetting to the
   // bare input form — payload previously lived only in this local state and
@@ -422,7 +426,7 @@ function Performance() {
       ) : null}
 
       {payload ? (
-        <Tabs defaultValue="performance" className="w-full">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList>
             <TabsTrigger value="performance">Performance</TabsTrigger>
             <TabsTrigger value="benchmarking">Benchmarking</TabsTrigger>
@@ -586,13 +590,24 @@ function Performance() {
       ) : null}
 
       <div className="text-right">
-        <Link
-          to="/validation/stress"
-          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
-        >
-          Continue to Stage 5
-          <ArrowRight className="h-4 w-4" />
-        </Link>
+        {activeTab === "performance" && payload ? (
+          <button
+            type="button"
+            onClick={() => setActiveTab("benchmarking")}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+          >
+            Continue
+            <ArrowRight className="h-4 w-4" />
+          </button>
+        ) : (
+          <Link
+            to="/validation/stress"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-elegant hover:bg-primary/90"
+          >
+            Continue to Stage 5
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        )}
       </div>
     </div>
   );
