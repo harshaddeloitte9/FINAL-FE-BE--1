@@ -180,10 +180,68 @@
   100% { background-position: 200% 0; }
 }
 
+@keyframes aeiFadeInUp {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes aeiChartReveal {
+  0% {
+    opacity: 0;
+    transform: scaleY(0.96);
+    transform-origin: center top;
+  }
+  100% {
+    opacity: 1;
+    transform: scaleY(1);
+    transform-origin: center top;
+  }
+}
+
 @utility skeleton-shimmer {
   background: linear-gradient(90deg, var(--color-muted) 0%, color-mix(in oklab, var(--color-muted) 60%, var(--color-background)) 50%, var(--color-muted) 100%);
   background-size: 200% 100%;
   animation: shimmer 1.6s linear infinite;
+}
+
+.page-transition-shell {
+  animation: aeiFadeInUp 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: opacity, transform;
+}
+
+.page-transition-shell--login {
+  animation-duration: 250ms;
+}
+
+.chart-enter,
+[data-chart-enter="true"] {
+  animation: aeiChartReveal 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.chart-enter > *,
+[data-chart-enter="true"] > * {
+  will-change: opacity, transform;
+}
+
+.recharts-wrapper,
+.plotly-container,
+.chart-shell {
+  contain: layout paint;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-transition-shell,
+  .page-transition-shell--login,
+  .chart-enter,
+  [data-chart-enter="true"] {
+    animation: none !important;
+  }
 }
 
 /* Full Report printing (Explainability > Summary > Download Full Report).

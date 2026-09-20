@@ -73,7 +73,13 @@ const PlotlyChart: React.FC<PlotlyChartProps> = ({ figure, useContainerWidth = t
     ? { width: "100%", ...style }
     : { width: "100%", minHeight: 320, ...style };
 
-  return <div ref={containerRef} style={containerStyle} />;
+  return (
+    <div
+      ref={containerRef}
+      className="plotly-container chart-enter"
+      style={containerStyle}
+    />
+  );
 };
 
 export default PlotlyChart;

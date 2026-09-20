@@ -11,6 +11,7 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AppShell } from "@/components/app-shell";
+import { PageTransition } from "@/components/page-transition";
 import { DatasetProvider } from "@/lib/app-context";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 
@@ -108,7 +109,9 @@ function RootComponent() {
         <DatasetProvider>
           <AuthGate>
             <AppShell>
-              <Outlet />
+              <PageTransition>
+                <Outlet />
+              </PageTransition>
             </AppShell>
           </AuthGate>
         </DatasetProvider>

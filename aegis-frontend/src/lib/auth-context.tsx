@@ -13,8 +13,6 @@ type AuthState = {
   logout: () => void;
 };
 
-const AUTH_STORAGE_KEY = "aegis_auth_user";
-
 const AuthContext = React.createContext<AuthState | null>(null);
 
 // Turns a raw username like "jane.doe" or "jane_doe" into a display name
@@ -33,27 +31,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = React.useState<AuthUser | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
 
+  // Demo/dummy authentication only — the "signed in" state intentionally
+  // lives ONLY in memory for the current app session (no localStorage/
+  // sessionStorage). Opening or reloading the app must always show the
+  // login page again; navigating between routes within the same session
+  // (no full page reload) keeps this in-memory state intact.
   React.useEffect(() => {
-    if (typeof window === "undefined") {
-      setIsHydrated(true);
-      return;
-    }
-    try {
-      const stored = window.localStorage.getItem(AUTH_STORAGE_KEY);
-      if (stored) {
-        setUser(JSON.parse(stored));
-      }
-    } catch {
-      // Ignore invalid stored state
-    } finally {
-      setIsHydrated(true);
-    }
+    setIsHydrated(true);
   }, []);
 
-  // Demo authentication: accept any non-empty username and password and
-  // assign a persistent random demo role on login. The role is stored
-  // with the user in localStorage so it survives refresh but does not
-  // change on every navigation.
   const DEMO_ROLES = [
     "Risk Validator",
     "Model Risk Analyst",
@@ -67,43 +53,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // validate against hardcoded credentials.
     if (!uname || !password) return;
 
-    // If a stored user already exists, preserve its role (don't re-randomize).
-    let assignedRole: string | null = null;
-    try {
-      const stored = typeof window !== "undefined" ? window.localStorage.getItem(AUTH_STORAGE_KEY) : null;
-      if (stored) {
-        const parsed = JSON.parse(stored) as AuthUser | null;
-        if (parsed && parsed.role) assignedRole = parsed.role;
-      }
-    } catch {
-      // ignore
-    }
-
-    if (!assignedRole) {
-      // Pick a random role once at login.
-      assignedRole = DEMO_ROLES[Math.floor(Math.random() * DEMO_ROLES.length)];
-    }
+    // Pick a random demo role for this session.
+    const assignedRole = DEMO_ROLES[Math.floor(Math.random() * DEMO_ROLES.length)];
 
     const nextUser: AuthUser = { name: toDisplayName(uname), username: uname, role: assignedRole };
     setUser(nextUser);
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
-      } catch {
-        // Ignore storage failures — session still works in memory.
-      }
-    }
   }, []);
 
   const logout = React.useCallback(() => {
     setUser(null);
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.removeItem(AUTH_STORAGE_KEY);
-      } catch {
-        // Ignore storage failures
-      }
-    }
   }, []);
 
   const value = React.useMemo(

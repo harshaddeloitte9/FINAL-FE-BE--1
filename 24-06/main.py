@@ -507,8 +507,23 @@ async def history_artifact(log_file: str, run_id: str) -> Dict[str, Any]:
 
 
 @app.get("/history/latest")
-async def history_latest(log_file: str, stage: str) -> Dict[str, Any]:
-    return {"latest": persistence.get_latest(log_file, stage)}
+async def history_latest(
+    log_file: str,
+    stage: str,
+    business_model_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Both filters are optional and default to the prior unscoped lookup for
+    # every existing caller. When a caller passes them (currently only Model
+    # Replication's resume), the most-recent row is restricted to that exact
+    # model + dataset combination so a more recent run for the same model
+    # against a DIFFERENT dataset — or an unrelated model entirely — is never
+    # resumed under the wrong context.
+    return {
+        "latest": persistence.get_latest(
+            log_file, stage, business_model_name=business_model_name, dataset_name=dataset_name,
+        ),
+    }
 
 
 class InventoryModelRequest(BaseModel):
@@ -3869,6 +3884,8 @@ async def validation_replication(
     mdd_file: Optional[UploadFile] = File(None),
     reported_json: Optional[str] = Form(None),
     intake_json: Optional[str] = Form(None),
+    model_params_json: Optional[str] = Form(None),
+    model_params_source: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Run backend replication checks. Returns {'flags', 'report'} to match existing shapes.
 
@@ -3887,6 +3904,22 @@ async def validation_replication(
     Replication) and the old Stage 4 "Performance" tab are now a single
     combined page, so this one call produces everything it needs.
     `intake_json` is optional and only feeds `compliance_findings`.
+
+    `model_params_json`, per the Model Replication Methodology Audit: the
+    developer's actual recoverable training configuration (hyperopt
+    best_params, or explicit manual_params/scale_pos_weight), when the
+    frontend found one that belongs to this same model. Passed straight
+    through to `run_replication(model_params=...)`, which already supports
+    it — replication itself, its thresholds, and R4.1-R4.8 are unchanged.
+    `model_params_source` is a hint the frontend sends alongside it
+    ("developer_hyperopt_best_params" or "developer_training_config"); it is
+    only trusted when a real, non-empty `model_params_json` backs it up — a
+    label with no real params behind it is never recorded as if it were.
+    When neither is supplied (or parsing fails), replication falls back to
+    the registry defaults exactly as before, and the result explicitly
+    records that via `replication_config_source =
+    "registry_defaults_unavailable_config"` rather than staying silent
+    about it.
     """
     df = await _read_dataframe(file=file, csv_text=csv_text)
     # parse seeds
@@ -3899,6 +3932,27 @@ async def validation_replication(
         business_model_name, estimator_name = resolve_replication_model_inputs(model_name, algorithm)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Developer configuration for the model being replicated — see the
+    # docstring above. `replication_config_source` is derived entirely from
+    # whether a real, non-empty dict was actually received, never from the
+    # client's claimed label alone.
+    model_params: Optional[Dict[str, Any]] = None
+    if model_params_json:
+        try:
+            parsed_model_params = json.loads(model_params_json)
+            if isinstance(parsed_model_params, dict) and parsed_model_params:
+                model_params = parsed_model_params
+        except Exception:
+            model_params = None
+    if model_params:
+        replication_config_source = (
+            model_params_source
+            if model_params_source in ("developer_hyperopt_best_params", "developer_training_config")
+            else "developer_training_config"
+        )
+    else:
+        replication_config_source = "registry_defaults_unavailable_config"
 
     intake_payload: Dict[str, Any] = {}
     if intake_json:
@@ -3938,13 +3992,25 @@ async def validation_replication(
         except Exception:
             pass
 
+    # The dataset identity used to scope replication resume (see the
+    # /history/latest call below) — the same filename/intake fallback the
+    # Model Inventory registration below already uses for its own
+    # `dataset_payload["file_name"]`, computed here independently (rather
+    # than reading it back off `dataset_payload` after the fact) so it stays
+    # correct even if that registration's own try/except below fails before
+    # `dataset_payload` is ever assigned. Left as None — never a placeholder
+    # string like "uploaded_dataset" — when no real filename/intake dataset
+    # name is known, so two different nameless uploads can never be
+    # mistaken for the same dataset by the resume filter.
+    dataset_name_for_log = getattr(file, "filename", None) or intake_payload.get("dataset_name") or None
+
     # Ensure the Model Inventory is updated from real validation uploads/intake.
     try:
         store = persistence.load_model_inventory()
         inventory_model_name = business_model_name or estimator_name
         dataset_payload = {
-            "file_name": getattr(file, "filename", None) or intake_payload.get("dataset_name") or "uploaded_dataset",
-            "storage_reference": getattr(file, "filename", None) or intake_payload.get("dataset_name") or "",
+            "file_name": dataset_name_for_log or "uploaded_dataset",
+            "storage_reference": dataset_name_for_log or "",
             "source_type": "file",
             "purpose": "Validation dataset",
             "record_count": int(df.shape[0]) if df is not None else None,
@@ -3987,6 +4053,7 @@ async def validation_replication(
         cv_folds=cv_folds,
         reported=reported,
         seeds=seed_list,
+        model_params=model_params,
     )
 
     checks = []
@@ -4002,6 +4069,10 @@ async def validation_replication(
     for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
         safe_result.pop(key, None)
     safe_result = _serialize_stage5_payload(safe_result)
+    # Explicit provenance — never silent about whether this run actually
+    # used the developer's real configuration or fell back to registry
+    # defaults. Derived above purely from what was actually received.
+    safe_result["replication_config_source"] = replication_config_source
 
     performance_report = _build_performance_report(df, result, intake_payload, mdd_text)
 
@@ -4022,6 +4093,8 @@ async def validation_replication(
                 "business_model_name": business_model_name,
                 "algorithm": estimator_name,
                 "model_name": estimator_name,
+                "dataset_name": dataset_name_for_log,
+                "replication_config_source": replication_config_source,
                 "metrics": performance_report.get("metrics"),
                 "flags": flags,
             },

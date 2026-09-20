@@ -17,6 +17,7 @@ import {
   History,
   ChevronDown,
   Database,
+  Gauge,
 } from "lucide-react";
 import { type ReactNode } from "react";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,7 @@ type NavItem = { to: string; label: string; icon: typeof Home; exact?: boolean }
 const developmentNav: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: Home },
   { to: "/data-upload", label: "Data Upload", icon: UploadCloud },
+  { to: "/data-quality", label: "Data Quality", icon: Gauge },
   { to: "/data-preparation", label: "Data Preparation & Feature Engineering", icon: Layers },
   { to: "/model-training-evaluation", label: "Model Training & Evaluation", icon: Cpu },
   { to: "/explainability", label: "Explainability", icon: Sparkles },
@@ -82,7 +84,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isLoginPage = pathname === "/login";
   const isLanding = pathname === "/" || isLoginPage;
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
 
   return (
     <div className="flex min-h-screen w-full bg-background text-foreground">
@@ -197,6 +200,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           )}
           {!isLanding && <div className="md:hidden text-sm font-semibold">Aegis Credit</div>}
+          {isLoginPage && (
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="hidden text-[10px] font-medium uppercase tracking-widest text-sidebar-foreground/60 sm:inline">
+                Systems Operational
+              </span>
+            </div>
+          )}
           {!isLoginPage && (
             <div className="ml-auto flex items-center gap-2">
               {isLanding && (

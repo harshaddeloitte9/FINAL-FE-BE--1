@@ -105,8 +105,41 @@ def read_log(log_file: str) -> list:
     return rows
 
 
-def get_latest(log_file: str, stage: str) -> Optional[Dict[str, Any]]:
+def get_latest(
+    log_file: str,
+    stage: str,
+    business_model_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Most recent logged row for a stage, optionally scoped to one model
+    and/or one dataset.
+
+    `business_model_name` and `dataset_name`, each independently optional,
+    restrict to rows whose logged `summary.business_model_name` /
+    `summary.dataset_name` match exactly (both must match when both are
+    given — this is an AND, not an OR). Used by /validation/replication's
+    resume so a reviewer looking at model A's Setup can never be shown model
+    A run against a DIFFERENT dataset, or a different model entirely, just
+    because it happened more recently system-wide. A row logged before
+    `dataset_name` existed has no such field, so `summary.get("dataset_name")
+    == dataset_name` is false and it is correctly excluded rather than
+    treated as a match — no backfill/migration needed.
+
+    Left both unset, behavior is unchanged for every other caller
+    (intake/training/explainability/etc. resume, none of which scope by
+    model or dataset).
+    """
     rows = [r for r in read_log(log_file) if r.get("stage") == stage]
+    if business_model_name:
+        rows = [
+            r for r in rows
+            if isinstance(r.get("summary"), dict) and r["summary"].get("business_model_name") == business_model_name
+        ]
+    if dataset_name:
+        rows = [
+            r for r in rows
+            if isinstance(r.get("summary"), dict) and r["summary"].get("dataset_name") == dataset_name
+        ]
     if not rows:
         return None
 

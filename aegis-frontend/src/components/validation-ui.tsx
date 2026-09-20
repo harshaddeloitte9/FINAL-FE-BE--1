@@ -137,15 +137,15 @@ export function KpiTile({
     slate: "bg-slate-500/10 text-slate-600",
   };
   return (
-    <div className="bg-white p-4">
+    <div className="flex h-full min-h-[104px] flex-col justify-between bg-white p-3 sm:p-4">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-500">{label}</span>
+        <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-slate-500">{label}</span>
         <span className={cn("flex h-6 w-6 shrink-0 items-center justify-center rounded-md", toneClasses[tone])}>
           <Icon className="h-3.5 w-3.5" />
         </span>
       </div>
-      <div className="mt-2 text-2xl font-bold tabular-nums text-slate-900">{value}</div>
-      {sub && <div className="mt-0.5 truncate text-[11px] text-slate-500">{sub}</div>}
+      <div className="mt-3 text-2xl font-bold tracking-[-0.03em] tabular-nums text-slate-900">{value}</div>
+      {sub && <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{sub}</div>}
     </div>
   );
 }
@@ -252,7 +252,7 @@ const STATUS_PILL_TONE: Record<string, string> = {
 
 export function StatusPill({ tone, children }: { tone: keyof typeof STATUS_PILL_TONE; children: ReactNode }) {
   return (
-    <span className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold", STATUS_PILL_TONE[tone] ?? STATUS_PILL_TONE.pending)}>
+    <span className={cn("inline-flex min-h-[26px] items-center justify-center gap-1 rounded-full border px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-[0.08em]", STATUS_PILL_TONE[tone] ?? STATUS_PILL_TONE.pending)}>
       {children}
     </span>
   );

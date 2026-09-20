@@ -1,13 +1,53 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ArrowRight, Loader2, Search, ShieldCheck, Microscope, Scale } from "lucide-react";
+import {
+  ArrowRight,
+  Loader2,
+  Search,
+  ShieldCheck,
+  Microscope,
+  Scale,
+  ListChecks,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  MinusCircle,
+  Clock,
+} from "lucide-react";
 import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import PlotlyChart from "@/components/plotly-chart";
-import { CheckSummaryTiles, deriveCheckTotal } from "@/components/check-summary";
+import { deriveCheckTotal } from "@/components/check-summary";
 import { useResumeState } from "@/hooks/use-resume-state";
-import { StageHero, HeroChip, VCard, VEmptyState } from "@/components/validation-ui";
+import { StageHero, HeroChip, VCard, VEmptyState, StatusPill, KpiStrip } from "@/components/validation-ui";
+
+// Same hex palette / no-toolbar convention established on the redesigned
+// Benchmarking and Stress & Backtesting pages — Plotly's bundled color
+// parser can't read CSS Color 4 oklch() syntax and silently falls back to
+// black (visible in the pre-redesign AUC chart's solid black bars), so every
+// figure color below is plain hex/rgba instead.
+const CHART_INDIGO = "#4f46e5";
+const CHART_TEAL = "#0891b2";
+const CHART_ROSE = "#e11d48";
+const CHART_GRID = "#eef2ff";
+const CHART_HOVERLABEL = { bgcolor: "#ffffff", bordercolor: "#c7d2fe", font: { size: 12, color: "#334155" } };
+const NO_TOOLBAR_CONFIG = { displayModeBar: false, scrollZoom: false };
+
+// Lightweight grouping header, same pattern used on the redesigned Stress &
+// Backtesting page — purely presentational, duplicated locally rather than
+// extracted into a shared file to keep this task's diff scoped to this page.
+function SectionHeading({ eyebrow, description }: { eyebrow: string; description?: string }) {
+  return (
+    <div className="flex flex-col gap-1.5 pt-2">
+      <div className="flex items-center gap-3">
+        <span className="shrink-0 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">{eyebrow}</span>
+        <div className="h-px flex-1 bg-slate-200" />
+      </div>
+      {description ? <p className="text-xs text-slate-500">{description}</p> : null}
+    </div>
+  );
+}
 
 export const Route = createFileRoute("/validation/regulatory")({
   head: () => ({ meta: [{ title: "Stage 6 — Explainability and Fairness — Aegis Credit" }] }),
@@ -68,55 +108,62 @@ type BiasResponse = {
   check: BiasCheckResult | null;
 };
 
-const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string; icon: string }> = {
-  PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", badge: "bg-emerald-500 text-emerald-950", icon: "✅" },
-  WARN: { border: "border-amber-500/40", bg: "bg-amber-500/10", badge: "bg-amber-500 text-amber-950", icon: "🟡" },
-  FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950", icon: "🔴" },
-  PENDING: { border: "border-border", bg: "bg-muted/30", badge: "bg-muted text-foreground", icon: "⏭️" },
+const STATUS_TONE: Record<string, "pass" | "warn" | "fail" | "pending"> = {
+  PASS: "pass",
+  WARN: "warn",
+  FAIL: "fail",
+  PENDING: "pending",
 };
 
 const SEVERITY_STYLES: Record<string, string> = {
-  HIGH: "bg-red-500 text-red-950",
-  MEDIUM: "bg-amber-500 text-amber-950",
-  LOW: "bg-emerald-500 text-emerald-950",
+  HIGH: "border-red-200 bg-red-50 text-red-700",
+  MEDIUM: "border-amber-200 bg-amber-50 text-amber-700",
+  LOW: "border-emerald-200 bg-emerald-50 text-emerald-700",
 };
 
-function statusStyle(status: string | undefined) {
-  return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
-}
-
 function ThresholdCheckCard({ check }: { check: ThresholdCheck }) {
-  const s = statusStyle(check.status);
-  const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "bg-slate-200 text-slate-700";
+  const tone = STATUS_TONE[check.status ?? ""] ?? "pending";
+  const sevClasses = SEVERITY_STYLES[check.severity?.toUpperCase()] ?? "border-slate-200 bg-slate-100 text-slate-700";
   const isConvention = isQuantitativeConventionCheck(check.check_type);
   return (
-    <div className={`min-w-0 rounded-r-lg border-l-4 ${s.border} ${s.bg} p-4`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-900">
-          {s.icon} <span className="text-slate-400">[{check.check_id}]</span> {check.title}{" "}
-          <span className={`ml-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
-            {check.severity}
-          </span>
+    <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">[{check.check_id}]</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${sevClasses}`}>
+              {check.severity}
+            </span>
+          </div>
+          <div className="mt-1 break-words text-sm font-semibold text-slate-900">{check.title}</div>
         </div>
-        <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
+        <StatusPill tone={tone}>{check.status}</StatusPill>
       </div>
-      {isConvention ? (
-        <div className="mt-2 text-xs text-slate-500">
-          Regulatory basis: {check.source} {check.principle} — requires this to be assessed/documented
+
+      <div className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 text-xs leading-relaxed">
+        <div className="text-slate-700">
+          <span className="font-semibold uppercase tracking-wide text-slate-400">Observed </span>
+          <code className="text-slate-700">{check.observed}</code>
         </div>
-      ) : (
-        <div className="mt-2 text-xs text-slate-500">
-          {check.source} — {check.principle}
+        <div className="text-slate-500">
+          <span className="font-semibold uppercase tracking-wide text-slate-400">Threshold </span>
+          {check.threshold}
+          {isConvention ? " — industry-standard convention" : ""}
         </div>
-      )}
-      <div className="mt-2 text-sm text-slate-800">
-        Observed: <code className="text-slate-700">{check.observed}</code>
+        <div className="text-slate-500">
+          <span className="font-semibold uppercase tracking-wide text-slate-400">Regulatory basis </span>
+          {isConvention ? (
+            <>
+              {check.source} {check.principle} — requires this to be assessed/documented
+            </>
+          ) : (
+            <>
+              {check.source} — {check.principle}
+            </>
+          )}
+        </div>
+        {check.detail ? <div className="text-slate-500">{check.detail}</div> : null}
       </div>
-      <div className="mt-1 text-xs text-slate-500">
-        Threshold: {check.threshold}
-        {isConvention ? " — industry-standard convention" : ""}
-      </div>
-      {check.detail ? <div className="mt-2 text-sm text-slate-500">{check.detail}</div> : null}
     </div>
   );
 }
@@ -295,19 +342,27 @@ function Regulatory() {
           orientation: "h",
           x: featureImportance.map((row) => row.Importance),
           y: featureImportance.map((row) => row.Feature),
-          marker: { color: "oklch(0.6 0.18 280)" },
-          hovertemplate: "%{y}: %{x:.4f}<extra></extra>",
+          marker: { color: CHART_INDIGO, cornerradius: 3 },
+          hovertemplate: "<b>%{y}</b><br>Importance: %{x:.4f}<extra></extra>",
           name: "Importance",
         },
       ],
       layout: {
-        margin: { l: 140, r: 20, t: 20, b: 40 },
-        xaxis: { title: { text: "Importance" }, tickfont: { size: 11 }, automargin: true },
-        yaxis: { tickfont: { size: 11 }, automargin: true, autorange: "reversed" },
-        height: 420,
+        autosize: true,
+        hovermode: "closest",
+        hoverlabel: CHART_HOVERLABEL,
+        margin: { l: 150, r: 20, t: 10, b: 40 },
+        xaxis: { title: { text: "Importance" }, tickfont: { size: 11 }, automargin: true, gridcolor: CHART_GRID, zeroline: false, showline: false },
+        yaxis: { tickfont: { size: 11.5 }, automargin: true, autorange: "reversed", gridcolor: CHART_GRID, zeroline: false, showline: false },
       },
     };
   }, [featureImportance]);
+
+  // Grows with the number of groups (rows can vary a lot by protected
+  // characteristic — e.g. many distinct "age" values vs a handful of
+  // "region" categories) so labels never get cramped, capped so a
+  // high-cardinality column can't blow out the page.
+  const biasAucChartHeight = Math.max(260, Math.min(520, biasAucRows.length * 26 + 60));
 
   const biasAucFigure = useMemo(() => {
     if (!biasAucRows.length) return null;
@@ -319,11 +374,13 @@ function Regulatory() {
           y: biasAucRows.map((row) => row.Group),
           orientation: "h",
           marker: {
-            color: biasAucRows.map((row) =>
-              Math.abs(row.AUC - biasAucMean) > 0.05 ? "oklch(0.6 0.22 27)" : "oklch(0.76 0.18 130)",
-            ),
+            // Same >0.05 AUC-gap flag the bar color always used — rose marks
+            // a group the bias check itself would flag, teal a group within
+            // the mean's normal range. No new threshold logic, just hex.
+            color: biasAucRows.map((row) => (Math.abs(row.AUC - biasAucMean) > 0.05 ? CHART_ROSE : CHART_TEAL)),
+            cornerradius: 3,
           },
-          hovertemplate: "%{y}: %{x:.4f}<extra></extra>",
+          hovertemplate: "<b>%{y}</b><br>AUC: %{x:.4f}<extra></extra>",
           name: "AUC",
         },
         {
@@ -331,23 +388,35 @@ function Regulatory() {
           mode: "lines",
           x: Array(biasAucRows.length).fill(biasAucMean),
           y: biasAucRows.map((row) => row.Group),
-          line: { color: "oklch(0.6 0.18 280)", dash: "dash" },
-          hoverinfo: "skip",
-          showlegend: false,
+          line: { color: CHART_INDIGO, dash: "dash", width: 2 },
+          hovertemplate: `Mean AUC: ${biasAucMean.toFixed(4)}<extra></extra>`,
+          showlegend: true,
           name: "Mean AUC",
         },
       ],
       layout: {
-        margin: { l: 140, r: 20, t: 20, b: 40 },
-        xaxis: { title: { text: "AUC" }, tickfont: { size: 11 }, automargin: true, range: [0, 1] },
-        yaxis: { tickfont: { size: 11 }, automargin: true, autorange: "reversed" },
-        height: 320,
+        autosize: true,
+        hovermode: "closest",
+        hoverlabel: CHART_HOVERLABEL,
+        // margin.b + legend.y give the legend row clear space below the
+        // x-axis title instead of overlapping it — the same fix already
+        // applied to the Benchmarking page's ROC chart for the identical
+        // legend/axis-title collision.
+        legend: { orientation: "h", y: -0.28, font: { size: 11 }, bgcolor: "rgba(0,0,0,0)" },
+        margin: { l: 150, r: 20, t: 10, b: 68 },
+        xaxis: { title: { text: "AUC" }, tickfont: { size: 11 }, automargin: true, range: [0, 1], gridcolor: CHART_GRID, zeroline: false, showline: false },
+        // Explicit "category" type: Group values (e.g. "0", "1", numeric-ish
+        // ages) would otherwise be auto-typed as a numeric axis by Plotly's
+        // own type inference, which turns readable per-group labels into a
+        // sparse numeric scale — a real readability regression, not a data
+        // change (the same Group strings the table already renders).
+        yaxis: { type: "category", tickfont: { size: 11 }, automargin: true, autorange: "reversed", gridcolor: CHART_GRID, zeroline: false, showline: false },
       },
     };
   }, [biasAucRows, biasAucMean]);
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
       <StageHero
         eyebrow="STAGE 6 · MODEL VALIDATION"
         title="Explainability and Fairness"
@@ -358,9 +427,9 @@ function Regulatory() {
       />
 
       {loading ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-6 text-center">Loading Stage 6 checks...</div>
+        <VEmptyState icon={Loader2} title="Loading Stage 6 checks…" description="Running explainability and regulatory compliance checks." />
       ) : error ? (
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-700">Error loading Stage 6: {error}</div>
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Error loading Stage 6: {error}</div>
       ) : (
         <Tabs value={activeSubTab} onValueChange={setActiveSubTab} className="w-full">
           <TabsList>
@@ -370,28 +439,40 @@ function Regulatory() {
 
           <TabsContent value="compliance" className="space-y-6 pt-4">
             <VCard icon={ShieldCheck} title="Regulatory Compliance Results (7.1–7.10)">
-              <CheckSummaryTiles summary={summary} checksLabel="Total Checks" />
-              <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+              <KpiStrip
+                tiles={[
+                  { icon: ListChecks, label: "Total Checks", value: totalChecks, tone: "slate" },
+                  { icon: CheckCircle2, label: "Pass", value: summary.pass ?? 0, tone: "emerald" },
+                  { icon: AlertTriangle, label: "Warn", value: summary.warn ?? 0, tone: "amber" },
+                  { icon: XCircle, label: "Fail", value: summary.fail ?? 0, tone: "rose" },
+                  { icon: MinusCircle, label: "N/A", value: summary.na ?? 0, tone: "slate" },
+                  { icon: Clock, label: "Pending", value: summary.pending ?? 0, tone: "primary" },
+                ]}
+              />
+              <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
                 <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />
               </div>
             </VCard>
 
-            <div className="mx-auto max-w-2xl space-y-3">
-              {data?.checks && data.checks.length > 0 ? (
-                data.checks.map((c) => <ThresholdCheckCard key={c.check_id} check={c} />)
-              ) : (
-                <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
-                  No regulatory compliance checks generated for this stage.
+            {data?.checks && data.checks.length > 0 ? (
+              <div>
+                <SectionHeading eyebrow="Compliance Findings" description="Every 7.1–7.10 check the backend evaluated for this run, most-recent result shown." />
+                <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {data.checks.map((c) => (
+                    <ThresholdCheckCard key={c.check_id} check={c} />
+                  ))}
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <VEmptyState icon={ShieldCheck} title="No compliance checks yet" description="No regulatory compliance checks generated for this stage." />
+            )}
           </TabsContent>
 
           <TabsContent value="explainability" className="space-y-6 pt-4">
             <VCard icon={Microscope} title="SHAP Feature Importance (from Stage 3 Replication)" sub="Reuses the replicated model's feature importances computed in Stage 3 — no re-training here.">
               {featureImportanceFigure ? (
-                <div className="h-[420px]">
-                  <PlotlyChart figure={featureImportanceFigure} style={{ height: "100%" }} />
+                <div className="h-[420px] overflow-hidden rounded-xl border border-slate-100 bg-white p-1">
+                  <PlotlyChart figure={featureImportanceFigure} style={{ height: "100%" }} config={NO_TOOLBAR_CONFIG} />
                 </div>
               ) : (
                 <VEmptyState icon={Microscope} title="Feature importances not available" description="Run Stage 3 Model Replication first to populate this chart." />
@@ -428,47 +509,71 @@ function Regulatory() {
                       type="button"
                       onClick={() => void runBiasCheck()}
                       disabled={!biasCol || biasLoading}
-                      className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_20px_rgba(37,99,235,0.35)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="inline-flex items-center gap-2 rounded-lg bg-[#2f67ff] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {biasLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
                       Run Bias Check
                     </button>
                   </div>
 
-                  {biasError ? <p className="mt-3 text-sm text-red-600">{biasError}</p> : null}
+                  {biasError ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{biasError}</div> : null}
+
+                  {/* Overall bias-check finding — the backend already returns
+                      this on every /validation/stage7/bias-check response
+                      (BiasResponse.check), but it was fetched and never
+                      rendered anywhere. Surfacing it here (reusing the same
+                      ThresholdCheckCard used on the Compliance tab, since
+                      BiasCheckResult has the identical shape) makes the
+                      actual PASS/WARN/FAIL result visually prominent per the
+                      requested hierarchy, using only data already fetched —
+                      no new calculation or endpoint. */}
+                  {biasData?.check ? (
+                    <div className="mt-4">
+                      <ThresholdCheckCard check={biasData.check} />
+                    </div>
+                  ) : null}
 
                   {biasData?.rows && biasData.rows.length > 0 ? (
                     <>
-                      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200">
-                        <table className="w-full text-sm">
-                          <thead className="bg-slate-50 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
-                            <tr>
-                              <th className="px-3 py-2 text-left">#</th>
-                              <th className="px-3 py-2 text-left">Group</th>
-                              <th className="px-3 py-2 text-right">Count</th>
-                              <th className="px-3 py-2 text-right">Default Rate</th>
-                              <th className="px-3 py-2 text-right">Avg Predicted PD</th>
-                              <th className="px-3 py-2 text-right">AUC</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {biasData.rows.map((r, rowIndex) => (
-                              <tr key={r.Group}>
-                                <td className="px-3 py-2 text-slate-400">{rowIndex + 1}</td>
-                                <td className="px-3 py-2 font-medium text-slate-900">{r.Group}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{r.Count.toLocaleString()}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{(r["Default Rate"] * 100).toFixed(2)}%</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{(r["Avg Predicted PD"] * 100).toFixed(2)}%</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{r.AUC !== null ? r.AUC.toFixed(4) : "N/A"}</td>
+                      <div className="mt-5">
+                        <SectionHeading eyebrow="Group-Level Comparison" />
+                        <div className="mt-3 max-h-[420px] overflow-y-auto overflow-x-auto rounded-xl border border-slate-200">
+                          <table className="w-full text-sm">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                                <th className="px-3 py-2 text-left">#</th>
+                                <th className="px-3 py-2 text-left">Group</th>
+                                <th className="px-3 py-2 text-right">Count</th>
+                                <th className="px-3 py-2 text-right">Default Rate</th>
+                                <th className="px-3 py-2 text-right">Avg Predicted PD</th>
+                                <th className="px-3 py-2 text-right">AUC</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                            </thead>
+                            <tbody className="divide-y divide-slate-50">
+                              {biasData.rows.map((r, rowIndex) => (
+                                <tr key={r.Group} className="hover:bg-slate-50/60">
+                                  <td className="px-3 py-2 text-slate-400">{rowIndex + 1}</td>
+                                  <td className="px-3 py-2 font-medium text-slate-900">{r.Group}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{r.Count.toLocaleString()}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{(r["Default Rate"] * 100).toFixed(2)}%</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{(r["Avg Predicted PD"] * 100).toFixed(2)}%</td>
+                                  <td className="px-3 py-2 text-right tabular-nums">{r.AUC !== null ? r.AUC.toFixed(4) : "N/A"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
 
                       {biasAucFigure ? (
-                        <div className="mt-4 h-64">
-                          <PlotlyChart figure={biasAucFigure} style={{ height: "100%" }} />
+                        <div className="mt-5">
+                          <SectionHeading eyebrow="AUC by Group" description="Dashed line marks the mean AUC across groups; a group more than 0.05 away from it is flagged." />
+                          <div
+                            className="mt-3 overflow-hidden rounded-xl border border-slate-100 bg-white p-1"
+                            style={{ height: `${biasAucChartHeight}px` }}
+                          >
+                            <PlotlyChart figure={biasAucFigure} style={{ height: "100%" }} config={NO_TOOLBAR_CONFIG} />
+                          </div>
                         </div>
                       ) : null}
                     </>

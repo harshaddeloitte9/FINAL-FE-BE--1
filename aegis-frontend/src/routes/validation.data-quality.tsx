@@ -6,7 +6,7 @@ import { formUpload } from "@/lib/api";
 import { ArrowRight, AlertTriangle, AlertCircle, Clock, Check, Database, Ruler, Bot, Gauge, ShieldCheck, Download, Droplet } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResumeState } from "@/hooks/use-resume-state";
-import { StageHero, HeroChip, VCard, VEmptyState } from "@/components/validation-ui";
+import { StageHero, HeroChip, VCard, VEmptyState, StatusPill } from "@/components/validation-ui";
 
 export const Route = createFileRoute("/validation/data-quality")({
   head: () => ({ meta: [{ title: "Stage 2 — Data & Model Soundness — Aegis Credit" }] }),
@@ -571,9 +571,9 @@ function DataQuality() {
 
           <TabsContent value="data-validation" className="space-y-6 pt-4">
             {checksLoading ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-6 text-center">Loading Data Validation...</div>
+              <VEmptyState icon={Database} title="Loading Data Validation…" description="Running automated dataset checks against regulatory thresholds." />
             ) : checksError ? (
-              <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-700">Error loading Stage 2: {checksError}</div>
+              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Error loading Stage 2: {checksError}</div>
             ) : (
               <>
                 <SoundnessWorkspace
@@ -589,7 +589,7 @@ function DataQuality() {
                   validationProfile={validationProfile}
                 />
                 {runError ? (
-                  <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900">{runError}</div>
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{runError}</div>
                 ) : null}
               </>
             )}
@@ -597,9 +597,9 @@ function DataQuality() {
 
           <TabsContent value="conceptual" className="space-y-6 pt-4">
             {conceptualLoading ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-6 text-center">Loading Conceptual Soundness...</div>
+              <VEmptyState icon={Database} title="Loading Conceptual Soundness…" description="Reviewing methodology, assumptions, and feature relevance." />
             ) : conceptualError ? (
-              <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-700">Error loading Stage 2: {conceptualError}</div>
+              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Error loading Stage 2: {conceptualError}</div>
             ) : (
               <SoundnessWorkspace
                 resultsTitle="Conceptual Soundness Results"
@@ -638,11 +638,11 @@ function DataQuality() {
   );
 }
 
-const STATUS_STYLES: Record<string, { border: string; bg: string; badge: string; icon: string }> = {
-  PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", badge: "bg-emerald-500 text-emerald-950", icon: "✅" },
-  WARN: { border: "border-amber-500/40", bg: "bg-amber-500/10", badge: "bg-amber-500 text-amber-950", icon: "🟡" },
-  FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950", icon: "🔴" },
-  PENDING: { border: "border-slate-400/40", bg: "bg-slate-400/10", badge: "bg-slate-400 text-slate-950", icon: "⏱️" },
+const STATUS_STYLES: Record<string, { border: string; bg: string; tone: "pass" | "warn" | "fail" | "pending" }> = {
+  PASS: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", tone: "pass" },
+  WARN: { border: "border-amber-500/40", bg: "bg-amber-500/10", tone: "warn" },
+  FAIL: { border: "border-red-500/40", bg: "bg-red-500/10", tone: "fail" },
+  PENDING: { border: "border-slate-400/40", bg: "bg-slate-400/10", tone: "pending" },
 };
 
 const CHECK_SOURCE_LABELS: Record<string, { label: string; classes: string }> = {
@@ -653,19 +653,19 @@ const CHECK_SOURCE_LABELS: Record<string, { label: string; classes: string }> = 
 };
 
 function statusStyle(status: string | undefined) {
-  return STATUS_STYLES[status ?? ""] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground", icon: "⚪" };
+  return STATUS_STYLES[status ?? ""] ?? { border: "border-slate-200", bg: "bg-slate-50", tone: "pending" as const };
 }
 
 function statusIcon(status: string | undefined, className = "h-4 w-4") {
   switch (status) {
     case "FAIL":
-      return <AlertTriangle className={`${className} text-red-600 dark:text-red-400`} />;
+      return <AlertTriangle className={`${className} text-red-600`} />;
     case "WARN":
-      return <AlertCircle className={`${className} text-amber-600 dark:text-amber-400`} />;
+      return <AlertCircle className={`${className} text-amber-600`} />;
     case "PENDING":
-      return <Clock className={`${className} text-slate-500 dark:text-slate-400`} />;
+      return <Clock className={`${className} text-slate-500`} />;
     default:
-      return <Check className={`${className} text-emerald-600 dark:text-emerald-400`} />;
+      return <Check className={`${className} text-emerald-600`} />;
   }
 }
 
@@ -685,10 +685,10 @@ function ComplianceDonut({ pass, warn, fail, size = 88 }: { pass: number; warn: 
     <div className="relative shrink-0" style={{ width: size, height: size }}>
       <div className="h-full w-full rounded-full" style={{ background: gradient }} />
       <div
-        className="absolute flex items-center justify-center rounded-full bg-card"
+        className="absolute flex items-center justify-center rounded-full bg-white"
         style={{ inset: Math.round(size * 0.16) }}
       >
-        <span className="text-lg font-bold text-foreground">{score}%</span>
+        <span className="text-lg font-bold text-slate-900">{score}%</span>
       </div>
     </div>
   );
@@ -710,8 +710,8 @@ function ComplianceSummaryRow({
       <div className="flex items-center gap-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
         <ComplianceDonut pass={summary.pass} warn={summary.warn} fail={summary.fail} />
         <div className="min-w-0">
-          <div className="text-xs text-muted-foreground">Checks passed</div>
-          <div className="text-base font-bold leading-tight text-foreground">
+          <div className="text-xs text-slate-500">Checks passed</div>
+          <div className="text-base font-bold leading-tight text-slate-900">
             {summary.pass}/{total} passed
           </div>
         </div>
@@ -782,9 +782,7 @@ function SoundnessWorkspace({
         {checkData?.thresholdChecks && checkData.thresholdChecks.length > 0 ? (
           <ThresholdPanel checks={checkData.thresholdChecks} profileSource={profileSource} selectedFrameworks={selectedFrameworkLabels} />
         ) : (
-          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-500">
-            No threshold checks were returned for this stage.
-          </div>
+          <VEmptyState icon={Ruler} title="No threshold checks yet" description="No threshold checks were returned for this stage." />
         )}
       </VCard>
 
@@ -803,23 +801,21 @@ function SoundnessWorkspace({
         {checkData?.ragRules && checkData.ragRules.length > 0 ? (
           <RagRulesPanel rules={checkData.ragRules} />
         ) : (
-          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-500">
-            No RAG agent flags generated for this stage.
-          </div>
+          <VEmptyState icon={Bot} title="No RAG agent flags yet" description="No RAG agent flags generated for this stage." />
         )}
       </VCard>
 
       <VCard icon={ShieldCheck} title="Regulatory Alignment" badge={{ text: alignment?.verdict ?? "—", tone: regulatoryBadgeTone(alignment?.verdict) }}>
-        <p className="text-sm text-foreground/80">
+        <p className="text-sm text-slate-700">
           Pass/Warn/Fail: {alignment?.counts?.pass ?? 0}/{alignment?.counts?.warn ?? 0}/{alignment?.counts?.fail ?? 0}
         </p>
         {alignment?.remediation_summary ? (
-          <p className="mt-3 text-sm text-muted-foreground">{alignment.remediation_summary}</p>
+          <p className="mt-3 text-sm text-slate-500">{alignment.remediation_summary}</p>
         ) : null}
         {selectedFrameworkLabels.length > 0 || alignment?.regulatory_references?.length ? (
           <div className="mt-3 flex flex-wrap gap-2">
             {(selectedFrameworkLabels.length > 0 ? selectedFrameworkLabels : alignment?.regulatory_references ?? []).map((ref: string) => (
-              <span key={ref} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+              <span key={ref} className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600">
                 {ref}
               </span>
             ))}
@@ -832,7 +828,7 @@ function SoundnessWorkspace({
 
       {showLeakage ? (
         <VCard icon={Droplet} title="Data leakage detection">
-          <p className="text-sm text-foreground/80">
+          <p className="text-sm text-slate-700">
             {validationProfile?.leakage_risk_cols && validationProfile.leakage_risk_cols.length > 0
               ? `Potential leakage detected: ${validationProfile.leakage_risk_cols.join(", ")}`
               : "No potential target leakage detected in the current dataset."}
@@ -902,23 +898,23 @@ function MissingnessChart({ rows }: { rows: { column: string; pct: number }[] })
   const max = Math.max(...top.map((r) => r.pct), 1);
 
   return (
-    <div className="mt-4 rounded-lg border border-border/60 bg-background/60 p-3">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
         Missing values by column
       </div>
       <div className="space-y-1.5">
         {top.map((r) => (
           <div key={r.column} className="flex items-center gap-2 text-xs">
-            <span className="w-28 shrink-0 truncate text-foreground/80" title={r.column}>
+            <span className="w-28 shrink-0 truncate text-slate-700" title={r.column}>
               {r.column}
             </span>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
               <div
                 className="h-full rounded-full bg-amber-500"
                 style={{ width: `${Math.min(100, (r.pct / max) * 100)}%` }}
               />
             </div>
-            <span className="w-12 shrink-0 text-right text-muted-foreground">{r.pct.toFixed(1)}%</span>
+            <span className="w-12 shrink-0 text-right text-slate-500">{r.pct.toFixed(1)}%</span>
           </div>
         ))}
       </div>
@@ -964,17 +960,17 @@ function ThresholdTile({
 }) {
   const palette =
     check.status === "FAIL"
-      ? "border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"
+      ? "border-red-300 bg-red-50 text-red-700"
       : check.status === "WARN"
-      ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
-      : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300";
+      ? "border-amber-300 bg-amber-50 text-amber-700"
+      : "border-emerald-300 bg-emerald-50 text-emerald-700";
 
   return (
     <button
       type="button"
       onClick={onClick}
       className={`flex min-h-[64px] flex-col items-center justify-center gap-1 rounded-lg border p-2.5 text-center transition-colors ${palette} ${
-        active ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+        active ? "ring-2 ring-blue-600 ring-offset-1 ring-offset-white" : ""
       }`}
     >
       {statusIcon(check.status)}
@@ -987,36 +983,36 @@ function ThresholdDetailPanel({ check, profileSource }: { check: ThresholdCheck;
   const s = statusStyle(check.status);
   const isConvention = isQuantitativeConventionCheck(check.check_type);
   return (
-    <div className={`mt-4 rounded-xl border ${s.border} ${s.bg} p-5`}>
+    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
-        <h4 className="text-base font-bold text-foreground">
+        <h4 className="text-base font-bold text-slate-900">
           [{check.check_id}] {check.title}
         </h4>
-        <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${s.badge}`}>{check.status}</span>
+        <StatusPill tone={s.tone}>{check.status}</StatusPill>
       </div>
       {isConvention ? (
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="mt-1 text-xs text-slate-500">
           Regulatory basis: {check.source} {check.principle} — requires this to be assessed/documented
         </p>
       ) : (
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="mt-1 text-xs text-slate-500">
           {check.source} — {check.principle}
         </p>
       )}
       <dl className="mt-3 space-y-1.5 text-sm">
         <div>
-          <dt className="inline font-semibold text-foreground">Observed </dt>
-          <dd className="inline text-foreground/90">{check.observed}</dd>
+          <dt className="inline font-semibold text-slate-900">Observed </dt>
+          <dd className="inline text-slate-700">{check.observed}</dd>
         </div>
         <div>
-          <dt className="inline font-semibold text-foreground">Threshold </dt>
-          <dd className="inline text-foreground/90">
+          <dt className="inline font-semibold text-slate-900">Threshold </dt>
+          <dd className="inline text-slate-700">
             {check.threshold}
-            {isConvention ? <span className="text-muted-foreground"> — industry-standard convention</span> : null}
+            {isConvention ? <span className="text-slate-500"> — industry-standard convention</span> : null}
           </dd>
         </div>
       </dl>
-      <p className="mt-3 text-sm text-muted-foreground">{check.detail}</p>
+      <p className="mt-3 text-sm text-slate-500">{check.detail}</p>
       <DatasetInsight check={check} profileSource={profileSource} />
     </div>
   );
@@ -1053,7 +1049,7 @@ function ThresholdPanel({
 
   return (
     <div>
-      <div className="mb-2 text-xs text-muted-foreground">Tap a tile for detail</div>
+      <div className="mb-2 text-xs text-slate-500">Tap a tile for detail</div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
         {sorted.map((c) => (
           <ThresholdTile key={c.check_id} check={c} active={selectedId === c.check_id} onClick={() => setSelectedId(c.check_id)} />
@@ -1085,7 +1081,7 @@ function RagRuleRow({ rule, active, onClick }: { rule: RagRule; active: boolean;
       }`}
     >
       <span className="shrink-0">{statusIcon(eff)}</span>
-      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{rule.flag}</span>
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">{rule.flag}</span>
     </button>
   );
 }
@@ -1097,23 +1093,23 @@ function RagRuleDetailPanel({ rule }: { rule: RagRule }) {
   const csrc = CHECK_SOURCE_LABELS[rule.check_source ?? ""];
 
   return (
-    <div className={`mt-4 rounded-xl border ${s.border} ${s.bg} p-5`}>
+    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
-        <h4 className="text-base font-bold text-foreground">{rule.flag}</h4>
-        <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${s.badge}`}>{eff}</span>
+        <h4 className="text-base font-bold text-slate-900">{rule.flag}</h4>
+        <StatusPill tone={s.tone}>{eff}</StatusPill>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">
+      <p className="mt-1 text-xs text-slate-500">
         {rule.source} — {rule.principle}
         {csrc ? ` · ${csrc.label.replace(/^\S+\s/, "")}` : ""}
         {rule.not_verifiable ? " · not verifiable with current data" : ""}
       </p>
       {observed != null && observed !== "" ? (
-        <p className="mt-3 text-sm text-foreground">
-          Observed: <span className="text-foreground/90">{observed}</span>
+        <p className="mt-3 text-sm text-slate-900">
+          Observed: <span className="text-slate-700">{observed}</span>
         </p>
       ) : null}
-      {rule.reasoning ? <p className="mt-2 text-xs italic text-violet-600 dark:text-violet-300">{rule.reasoning}</p> : null}
-      <p className="mt-3 text-sm text-muted-foreground">{rule.suggestion}</p>
+      {rule.reasoning ? <p className="mt-2 text-xs italic text-violet-600">{rule.reasoning}</p> : null}
+      <p className="mt-3 text-sm text-slate-500">{rule.suggestion}</p>
     </div>
   );
 }
@@ -1143,8 +1139,8 @@ function RagRulesPanel({ rules }: { rules: RagRule[] }) {
             onClick={() => setFilter(t.key)}
             className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
               filter === t.key
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:bg-muted"
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-slate-200 text-slate-500 hover:bg-slate-50"
             }`}
           >
             {t.label}
@@ -1158,9 +1154,7 @@ function RagRulesPanel({ rules }: { rules: RagRule[] }) {
             <RagRuleRow key={r.rule_id} rule={r} active={selected?.rule_id === r.rule_id} onClick={() => setSelectedId(r.rule_id)} />
           ))
         ) : (
-          <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-500">
-            No rules match this filter.
-          </div>
+          <VEmptyState icon={Bot} title="No rules match this filter" description="Choose a different status filter above to see more rules." />
         )}
       </div>
 

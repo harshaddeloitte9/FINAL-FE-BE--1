@@ -1,10 +1,25 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import React from "react";
-import { ArrowRight, AlertTriangle, RefreshCw, Printer, ChevronDown, ChevronRight, FileText, Gauge, Download, Users } from "lucide-react";
+import {
+  ArrowRight,
+  AlertTriangle,
+  RefreshCw,
+  Printer,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Gauge,
+  Download,
+  Users,
+  CheckCircle2,
+  XCircle,
+  ClipboardList,
+  Database,
+} from "lucide-react";
 import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { useResumeState } from "@/hooks/use-resume-state";
-import { StageHero, HeroChip, VCard } from "@/components/validation-ui";
+import { StageHero, HeroChip, VCard, KpiStrip, StatusPill, VEmptyState } from "@/components/validation-ui";
 
 export const Route = createFileRoute("/validation/findings")({
   head: () => ({ meta: [{ title: "Stage 7 — Findings & Final Report — Aegis Credit" }] }),
@@ -45,20 +60,53 @@ type RemediationRow = {
   status: string;
 };
 
-const VERDICT_STYLES: Record<string, { border: string; bg: string; text: string; icon: string }> = {
-  APPROVED: { border: "border-emerald-500", bg: "bg-emerald-500/10", text: "text-emerald-600 dark:text-emerald-300", icon: "✅" },
-  "CONDITIONALLY APPROVED": { border: "border-amber-500", bg: "bg-amber-500/10", text: "text-amber-600 dark:text-amber-300", icon: "⚠️" },
-  REJECTED: { border: "border-red-500", bg: "bg-red-500/10", text: "text-red-600 dark:text-red-300", icon: "❌" },
+const VERDICT_BADGE_TONE: Record<string, "emerald" | "amber" | "rose"> = {
+  APPROVED: "emerald",
+  "CONDITIONALLY APPROVED": "amber",
+  REJECTED: "rose",
+};
+
+// Text-color counterpart to VERDICT_BADGE_TONE, used for the large verdict
+// headline in the Overall Verdict section — same tone mapping, just a
+// foreground color instead of a badge background.
+const VERDICT_TEXT_TONE: Record<string, string> = {
+  APPROVED: "text-emerald-600",
+  "CONDITIONALLY APPROVED": "text-amber-600",
+  REJECTED: "text-rose-600",
+};
+
+const VERDICT_ICON: Record<string, typeof CheckCircle2> = {
+  APPROVED: CheckCircle2,
+  "CONDITIONALLY APPROVED": AlertTriangle,
+  REJECTED: XCircle,
 };
 
 const SEVERITY_STYLES: Record<string, { border: string; bg: string; badge: string }> = {
-  HIGH: { border: "border-red-500/40", bg: "bg-red-500/10", badge: "bg-red-500 text-red-950" },
-  MEDIUM: { border: "border-amber-500/40", bg: "bg-amber-500/10", badge: "bg-amber-500 text-amber-950" },
-  LOW: { border: "border-emerald-500/40", bg: "bg-emerald-500/10", badge: "bg-emerald-500 text-emerald-950" },
+  HIGH: { border: "border-red-200", bg: "bg-red-50", badge: "border-red-200 bg-red-50 text-red-700" },
+  MEDIUM: { border: "border-amber-200", bg: "bg-amber-50", badge: "border-amber-200 bg-amber-50 text-amber-700" },
+  LOW: { border: "border-emerald-200", bg: "bg-emerald-50", badge: "border-emerald-200 bg-emerald-50 text-emerald-700" },
 };
 
 function severityStyle(sev: string) {
-  return SEVERITY_STYLES[sev?.toUpperCase()] ?? { border: "border-border", bg: "bg-card", badge: "bg-muted text-foreground" };
+  return SEVERITY_STYLES[sev?.toUpperCase()] ?? { border: "border-slate-200", bg: "bg-slate-50", badge: "border-slate-200 bg-slate-100 text-slate-700" };
+}
+
+// Finding/remediation `status` values returned by /validation/stage8/findings
+// are plain "FAIL"/"WARN" strings (main.py) — mapped to the same StatusPill
+// tone language already used for the Performance Metrics table on this page
+// and every other redesigned validation stage, so a reviewer reads FAIL/WARN
+// the same way everywhere in Aegis instead of a generic bold-text label.
+function statusTone(status: string | undefined): "pass" | "warn" | "fail" | "pending" {
+  switch ((status ?? "").toUpperCase()) {
+    case "PASS":
+      return "pass";
+    case "WARN":
+      return "warn";
+    case "FAIL":
+      return "fail";
+    default:
+      return "pending";
+  }
 }
 
 function csvEscape(value: unknown): string {
@@ -128,6 +176,38 @@ function metricThresholdRows(repMetrics: Record<string, any>): MetricThresholdRo
 }
 
 const STAGE_ORDER = ["Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"];
+
+// Subtle numbered-section label — "01  Overall Verdict" — used as every major
+// section's VCard title across this page, matching the report-like hierarchy
+// requested for Stage 7 specifically (the other validation stages use plain
+// titles; this is the one page meant to read as a final consolidated report).
+function NumberedTitle({ n, children }: { n: string; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-100 text-[10px] font-bold text-slate-400">{n}</span>
+      {children}
+    </span>
+  );
+}
+
+function InfoField({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
+      <div className="mt-0.5 break-words text-sm font-semibold text-slate-900">{value}</div>
+    </div>
+  );
+}
+
+function VerdictStat({ label, value, tone }: { label: string; value: number; tone: "rose" | "amber" | "slate" }) {
+  const toneClasses: Record<string, string> = { rose: "text-rose-600", amber: "text-amber-600", slate: "text-slate-900" };
+  return (
+    <div className="text-center">
+      <div className={`text-2xl font-extrabold tabular-nums ${toneClasses[tone]}`}>{value}</div>
+      <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
+    </div>
+  );
+}
 
 function Findings() {
   const ds = useDataset();
@@ -287,10 +367,20 @@ function Findings() {
   const repMetricsForReport = (validationStage5Result as any)?.report?.metrics ?? {};
   const metricRows = React.useMemo(() => metricThresholdRows(repMetricsForReport), [repMetricsForReport]);
 
+  const executiveOverviewTiles = React.useMemo(() => {
+    if (!data) return [] as Array<{ icon: typeof Gauge; label: string; value: React.ReactNode; sub?: string; tone?: "primary" | "amber" | "emerald" | "rose" | "violet" | "slate" }>;
+
+    return [
+      { icon: Gauge, label: "Verdict", value: data.verdict, sub: "Overall decision", tone: data.verdict === "APPROVED" ? "emerald" : data.verdict === "REJECTED" ? "rose" : "amber" },
+      { icon: AlertTriangle, label: "High", value: data.high_count, sub: "Critical issues", tone: "rose" },
+      { icon: ClipboardList, label: "Medium", value: data.medium_count, sub: "Follow-up items", tone: "amber" },
+      { icon: CheckCircle2, label: "Total", value: data.total_count, sub: "Findings logged", tone: "slate" },
+    ];
+  }, [data]);
+
   const downloadFullReportPdf = () => window.print();
 
   const ij = validationIntakeData ?? {};
-  const verdictStyle = VERDICT_STYLES[data?.verdict ?? ""] ?? VERDICT_STYLES.REJECTED;
 
   const execSummaryDefault = React.useMemo(() => {
     if (!data) return "";
@@ -338,7 +428,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
   const [signOff, setSignOff] = React.useState({ validator: "", modelOwner: "", committee: "" });
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
       <StageHero
         eyebrow="STAGE 7 · MODEL VALIDATION"
         title="Findings & Final Validation Report"
@@ -353,36 +443,61 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
         }
       />
 
-      <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-600">
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3 text-sm text-slate-600">
+        <Database className="h-4 w-4 shrink-0 text-slate-400" />
         {datasetReady ? (
-          <>Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-slate-900">{datasetName}</span>.</>
+          <span>
+            Using the shared dataset from Stage 1 / Stage 2: <span className="font-semibold text-slate-900">{datasetName}</span>
+          </span>
         ) : (
-          <>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</>
+          <span>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</span>
         )}
       </div>
 
+      {data && (
+        <VCard icon={Gauge} title={<NumberedTitle n="00">Executive Overview</NumberedTitle>} sub="Validation outcome at a glance">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {executiveOverviewTiles.map((tile) => {
+              const Icon = tile.icon;
+              return (
+                <div key={tile.label} className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400">{tile.label}</span>
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                      <Icon className="h-3.5 w-3.5" />
+                    </span>
+                  </div>
+                  <div className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">{tile.value}</div>
+                  <div className="mt-1 text-[11px] text-slate-500">{tile.sub}</div>
+                </div>
+              );
+            })}
+          </div>
+        </VCard>
+      )}
+
       {loading ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-6 text-center text-sm text-slate-500">Compiling Stage 7 findings...</div>
+        <VEmptyState icon={RefreshCw} title="Compiling Stage 7 findings…" description="Consolidating results from Stages 1–6 into the final validation report." />
       ) : error ? (
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-6">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
             <div className="flex-1">
               <div className="text-sm font-semibold text-red-700">
                 {errorKind === "network"
                   ? "Backend unreachable — this looks like a transient network issue"
                   : "Error loading Stage 7 findings"}
               </div>
-              <p className="mt-1 text-sm text-slate-700">
+              <p className="mt-1 text-sm text-red-700">
                 {errorKind === "network"
                   ? "The findings request never reached the server (connection refused, CORS, or the backend is still starting up). It's likely temporary — try again in a moment."
                   : error}
               </p>
-              {errorKind === "network" ? <p className="mt-1 text-xs text-slate-500">{error}</p> : null}
+              {errorKind === "network" ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
               <button
                 type="button"
                 onClick={() => setRetryToken((t) => t + 1)}
-                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300"
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
               >
                 <RefreshCw className="h-3.5 w-3.5" /> Retry
               </button>
@@ -390,85 +505,80 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           </div>
         </div>
       ) : data ? (
-        <>
-          <div className="flex items-center justify-end">
-            <button
-              type="button"
-              onClick={downloadFullReportPdf}
-              className="no-print inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-slate-900 via-blue-800 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_20px_rgba(37,99,235,0.35)] transition-opacity hover:opacity-90"
-            >
-              <Printer className="h-4 w-4" />
-              Download Full Report (PDF)
-            </button>
-          </div>
+        <div id="full-report-content" className="space-y-6">
+          {/* ── Overall verdict — the most important section after the hero,
+              per the requested "final decision workspace" hierarchy. ────── */}
+          <VCard
+            icon={VERDICT_ICON[data.verdict] ?? AlertTriangle}
+            title={<NumberedTitle n="01">Overall Verdict</NumberedTitle>}
+            badge={{ text: data.verdict, tone: VERDICT_BADGE_TONE[data.verdict] ?? "slate" }}
+          >
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Overall Validation Verdict</div>
+                <div className={`mt-1 text-3xl font-extrabold tracking-tight ${VERDICT_TEXT_TONE[data.verdict] ?? "text-slate-900"}`}>
+                  {data.verdict}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-start gap-6 rounded-xl border border-slate-100 bg-slate-50/60 px-5 py-3">
+                <VerdictStat label="High" value={data.high_count} tone="rose" />
+                <VerdictStat label="Medium" value={data.medium_count} tone="amber" />
+                <VerdictStat label="Total" value={data.total_count} tone="slate" />
+              </div>
+            </div>
 
-          <div id="full-report-content" className="space-y-6">
-          {/* Model identity */}
-          <VCard icon={FileText} title="1. Model Identity">
-            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-              <div><strong className="text-slate-900">Model:</strong> <span className="text-slate-600">{ij.model_name ?? "N/A"}</span></div>
-              <div><strong className="text-slate-900">Type:</strong> <span className="text-slate-600">{ij.model_type ?? "N/A"}</span></div>
-              <div><strong className="text-slate-900">Risk tier:</strong> <span className="text-slate-600">{data.model_tier}</span></div>
-              <div><strong className="text-slate-900">Validator:</strong> <span className="text-slate-600">{signOff.validator || "—"}</span></div>
-              <div><strong className="text-slate-900">Validation date:</strong> <span className="text-slate-600">{todayLabel()}</span></div>
+            <div className="mt-5 space-y-3 border-t border-slate-100 pt-4">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Decision Rationale</div>
+                <p className="mt-1 text-sm text-slate-700">{data.verdict_desc}</p>
+              </div>
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Key Evidence</div>
+                <p className="mt-1 text-sm font-medium text-slate-900">{verdictReasoning(data)}</p>
+              </div>
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Validation Context</div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Model: {ij.model_name ?? "N/A"} · Type: {ij.model_type ?? "N/A"} · Tier: {data.model_tier} · Date: {todayLabel()}
+                </p>
+              </div>
             </div>
           </VCard>
 
-          {/* Overall verdict banner */}
-          <div className={`rounded-2xl border-2 ${verdictStyle.border} ${verdictStyle.bg} p-6 shadow-sm`}>
-            <h3 className="text-sm font-semibold text-slate-900">2. Overall Verdict</h3>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <div className={`text-2xl font-extrabold ${verdictStyle.text}`}>
-                {verdictStyle.icon} {data.verdict}
-              </div>
-              <div className="text-right text-sm">
-                <span className="font-bold text-red-600">HIGH: {data.high_count}</span>{" "}
-                <span className="font-bold text-amber-600">MEDIUM: {data.medium_count}</span>{" "}
-                <span className="text-slate-500">Total findings: {data.total_count}</span>
-              </div>
+          {/* ── Model identity — compact info grid instead of a tall card. ── */}
+          <VCard icon={FileText} title={<NumberedTitle n="02">Model Identity</NumberedTitle>}>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+              <InfoField label="Model" value={ij.model_name ?? "N/A"} />
+              <InfoField label="Type" value={ij.model_type ?? "N/A"} />
+              <InfoField label="Risk Tier" value={data.model_tier} />
+              <InfoField label="Validator" value={signOff.validator || "—"} />
+              <InfoField label="Validation Date" value={todayLabel()} />
             </div>
-            <p className="mt-3 text-sm text-slate-700">{data.verdict_desc}</p>
-            <p className="mt-2 text-sm font-medium text-slate-900">{verdictReasoning(data)}</p>
-            <p className="mt-2 text-xs text-slate-500">
-              Model: {ij.model_name ?? "N/A"} · Type: {ij.model_type ?? "N/A"} · Tier: {data.model_tier} · Date: {todayLabel()}
-            </p>
-          </div>
+          </VCard>
 
-          {/* Findings tracker */}
-          <section className="space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">3. Findings Summary</h3>
-              <p className="text-xs text-slate-500">
-                Auto-compiled from Stages 1–7. All HIGH findings must be resolved before model deployment.
-              </p>
-            </div>
-
+          {/* ── Findings tracker ─────────────────────────────────────────── */}
+          <VCard
+            icon={ClipboardList}
+            title={<NumberedTitle n="03">Findings Summary</NumberedTitle>}
+            sub="Auto-compiled from Stages 1–7. All HIGH findings must be resolved before model deployment."
+          >
             {findings.length === 0 ? (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
-                ✅ No findings raised across all validation stages — model is fully compliant.
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                No findings raised across all validation stages — model is fully compliant.
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <div className="rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total Findings</div>
-                    <div className="mt-2 text-2xl font-semibold text-slate-900">{data.total_count}</div>
-                  </div>
-                  <div className="rounded-xl border border-red-200 bg-red-50 p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">🔴 HIGH</div>
-                    <div className="mt-2 text-2xl font-semibold text-red-600">{data.high_count}</div>
-                  </div>
-                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">🟡 MEDIUM</div>
-                    <div className="mt-2 text-2xl font-semibold text-amber-600">{data.medium_count}</div>
-                  </div>
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">🟢 LOW</div>
-                    <div className="mt-2 text-2xl font-semibold text-emerald-600">{data.low_count}</div>
-                  </div>
-                </div>
+                <KpiStrip
+                  tiles={[
+                    { icon: ClipboardList, label: "Total Findings", value: data.total_count, tone: "slate" },
+                    { icon: XCircle, label: "High", value: data.high_count, tone: "rose" },
+                    { icon: AlertTriangle, label: "Medium", value: data.medium_count, tone: "amber" },
+                    { icon: CheckCircle2, label: "Low", value: data.low_count, tone: "emerald" },
+                  ]}
+                />
 
-                <div className="no-print space-y-6">
+                <div className="no-print mt-6 space-y-6">
                   {groupedFindings.map(({ stage, items }) => (
                     <div key={stage}>
                       <div className="mb-2 flex items-center gap-2">
@@ -479,22 +589,22 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                       </div>
                       <div className="overflow-hidden rounded-xl border border-slate-200">
                         <table className="w-full text-sm">
-                          <thead className="bg-slate-50 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
-                            <tr>
+                          <thead>
+                            <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
                               <th className="w-10 px-3 py-2 text-left">S.No</th>
                               <th className="px-3 py-2 text-left">Finding</th>
                               <th className="px-3 py-2 text-left">Severity</th>
                               <th className="px-3 py-2 text-left">Status</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-100">
+                          <tbody className="divide-y divide-slate-50">
                             {items.map((f) => {
                               const s = severityStyle(f.severity);
                               const expanded = Boolean(expandedFindings[f._sno]);
                               return (
                                 <React.Fragment key={f._sno}>
                                   <tr
-                                    className="cursor-pointer hover:bg-slate-50"
+                                    className="cursor-pointer hover:bg-slate-50/60"
                                     onClick={() => toggleFinding(f._sno)}
                                   >
                                     <td className="px-3 py-2 align-top text-slate-400">{f._sno}</td>
@@ -505,19 +615,21 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                                       </div>
                                     </td>
                                     <td className="px-3 py-2 align-top">
-                                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${s.badge}`}>
+                                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${s.badge}`}>
                                         {f.severity}
                                       </span>
                                     </td>
-                                    <td className="px-3 py-2 align-top text-xs font-bold text-slate-500">{f.status}</td>
+                                    <td className="px-3 py-2 align-top">
+                                      <StatusPill tone={statusTone(f.status)}>{f.status}</StatusPill>
+                                    </td>
                                   </tr>
                                   {expanded && (
                                     <tr className={`${s.bg}`}>
                                       <td className="px-3 py-3" />
                                       <td colSpan={3} className="px-3 py-3">
-                                        <div className="text-sm text-slate-800">📌 {f.finding}</div>
-                                        <div className="mt-2 text-sm text-slate-500">💡 {f.recommendation}</div>
-                                        <div className="mt-1 text-xs text-slate-500">📋 {f.regulation}</div>
+                                        <div className="text-sm text-slate-800">{f.finding}</div>
+                                        <div className="mt-2 text-sm text-slate-500">{f.recommendation}</div>
+                                        <div className="mt-1 text-xs text-slate-500">{f.regulation}</div>
                                       </td>
                                     </tr>
                                   )}
@@ -533,7 +645,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
 
                 {/* Print-only: full findings detail, always expanded, since a
                     static PDF has no click-to-expand affordance. */}
-                <div className="print-only space-y-6">
+                <div className="print-only mt-6 space-y-6">
                   {groupedFindings.map(({ stage, items }) => (
                     <div key={`print-${stage}`}>
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">{stage}</h4>
@@ -545,9 +657,9 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                               <div className="text-sm font-semibold text-slate-900">
                                 {f._sno}. {f.check} — <span className="uppercase">{f.severity}</span> ({f.status})
                               </div>
-                              <div className="mt-1 text-sm text-slate-800">📌 {f.finding}</div>
-                              <div className="mt-1 text-sm text-slate-500">💡 {f.recommendation}</div>
-                              <div className="mt-1 text-xs text-slate-500">📋 {f.regulation}</div>
+                              <div className="mt-1 text-sm text-slate-800">{f.finding}</div>
+                              <div className="mt-1 text-sm text-slate-500">{f.recommendation}</div>
+                              <div className="mt-1 text-xs text-slate-500">{f.regulation}</div>
                             </div>
                           );
                         })}
@@ -555,87 +667,100 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     </div>
                   ))}
                 </div>
-
-                {/* Remediation log — an internal working tool for tracking
-                    owners/deadlines, not part of the formal PDF report. */}
-                <div className="no-print">
-                  <h3 className="text-sm font-semibold text-slate-900">📝 Remediation Action Log</h3>
-                  <p className="text-xs text-slate-500">Add owners and deadlines for each finding before sign-off.</p>
-                  <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200">
-                    <table className="w-full text-sm">
-                      <thead className="bg-slate-50 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
-                        <tr>
-                          <th className="px-3 py-2 text-left">#</th>
-                          <th className="px-3 py-2 text-left">Finding</th>
-                          <th className="px-3 py-2 text-left">Severity</th>
-                          <th className="px-3 py-2 text-left">Owner</th>
-                          <th className="px-3 py-2 text-left">Target Date</th>
-                          <th className="px-3 py-2 text-left">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {remediation.map((r, i) => (
-                          <tr key={r.finding + i}>
-                            <td className="px-3 py-2 align-top text-slate-400">{i + 1}</td>
-                            <td className="px-3 py-2 align-top">
-                              <div className="font-medium text-slate-900">{r.finding}</div>
-                              <div className="text-xs text-slate-500">{r.detail}</div>
-                            </td>
-                            <td className="px-3 py-2 align-top">
-                              <select
-                                value={r.severity}
-                                onChange={(e) => updateRemediation(i, { severity: e.target.value })}
-                                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                              >
-                                <option>HIGH</option>
-                                <option>MEDIUM</option>
-                                <option>LOW</option>
-                              </select>
-                            </td>
-                            <td className="px-3 py-2 align-top">
-                              <input
-                                value={r.owner}
-                                onChange={(e) => updateRemediation(i, { owner: e.target.value })}
-                                placeholder="Owner"
-                                className="w-32 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                              />
-                            </td>
-                            <td className="px-3 py-2 align-top">
-                              <input
-                                value={r.targetDate}
-                                onChange={(e) => updateRemediation(i, { targetDate: e.target.value })}
-                                placeholder="e.g. 31 Aug 2026"
-                                className="w-32 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                              />
-                            </td>
-                            <td className="px-3 py-2 align-top">
-                              <select
-                                value={r.status}
-                                onChange={(e) => updateRemediation(i, { status: e.target.value })}
-                                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                              >
-                                <option>Open</option>
-                                <option>In Progress</option>
-                                <option>Resolved</option>
-                                <option>Risk Accepted</option>
-                              </select>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
               </>
             )}
-          </section>
+          </VCard>
 
-          {/* Performance metrics vs regulatory thresholds */}
-          <VCard icon={Gauge} title="4. Performance Metrics vs Regulatory Thresholds" sub="Replicated (Stage 3/4) metrics evaluated against the minimum required by regulation.">
+          {/* ── Remediation action plan — its own section now (previously
+              nested inside Findings Summary), scrollable so a long tracker
+              never stretches the whole page. Internal working tool, not part
+              of the formal PDF report (kept no-print, as before). ────────── */}
+          <VCard
+            icon={RefreshCw}
+            title={<NumberedTitle n="04">Remediation Action Log</NumberedTitle>}
+            sub="Add owners and deadlines for each finding before sign-off."
+            className="no-print"
+          >
+            {remediation.length === 0 ? (
+              <div className="text-sm text-slate-500">No findings to remediate.</div>
+            ) : (
+              <div className="max-h-[420px] overflow-y-auto overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 z-10">
+                    <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                      <th className="px-3 py-2 text-left">#</th>
+                      <th className="px-3 py-2 text-left">Finding</th>
+                      <th className="px-3 py-2 text-left">Severity</th>
+                      <th className="px-3 py-2 text-left">Owner</th>
+                      <th className="px-3 py-2 text-left">Target Date</th>
+                      <th className="px-3 py-2 text-left">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {remediation.map((r, i) => (
+                      <tr key={r.finding + i} className="hover:bg-slate-50/60">
+                        <td className="px-3 py-2 align-top text-slate-400">{i + 1}</td>
+                        <td className="px-3 py-2 align-top">
+                          <div className="font-medium text-slate-900">{r.finding}</div>
+                          <div className="text-xs text-slate-500">{r.detail}</div>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select
+                            value={r.severity}
+                            onChange={(e) => updateRemediation(i, { severity: e.target.value })}
+                            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                          >
+                            <option>HIGH</option>
+                            <option>MEDIUM</option>
+                            <option>LOW</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            value={r.owner}
+                            onChange={(e) => updateRemediation(i, { owner: e.target.value })}
+                            placeholder="Owner"
+                            className="w-32 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            value={r.targetDate}
+                            onChange={(e) => updateRemediation(i, { targetDate: e.target.value })}
+                            placeholder="e.g. 31 Aug 2026"
+                            className="w-32 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select
+                            value={r.status}
+                            onChange={(e) => updateRemediation(i, { status: e.target.value })}
+                            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                          >
+                            <option>Open</option>
+                            <option>In Progress</option>
+                            <option>Resolved</option>
+                            <option>Risk Accepted</option>
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </VCard>
+
+          {/* ── Performance metrics vs regulatory thresholds ────────────── */}
+          <VCard
+            icon={Gauge}
+            title={<NumberedTitle n="05">Performance Metrics vs Regulatory Thresholds</NumberedTitle>}
+            sub="Replicated (Stage 3/4) metrics evaluated against the minimum required by regulation."
+          >
             <div className="overflow-x-auto rounded-xl border border-slate-200">
               <table className="w-full text-sm">
-                <thead className="bg-slate-50 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
-                  <tr>
+                <thead>
+                  <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
                     <th className="px-3 py-2 text-left">Metric</th>
                     <th className="px-3 py-2 text-left">Value</th>
                     <th className="px-3 py-2 text-left">Threshold</th>
@@ -643,9 +768,9 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     <th className="px-3 py-2 text-left">Result</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-slate-50">
                   {metricRows.map((row) => (
-                    <tr key={row.metric}>
+                    <tr key={row.metric} className="hover:bg-slate-50/60">
                       <td className="px-3 py-2 align-top font-medium text-slate-900">{row.metric}</td>
                       <td className="px-3 py-2 align-top text-slate-700">{row.value !== null ? row.value.toFixed(4) : "N/A"}</td>
                       <td className="px-3 py-2 align-top text-slate-500">{row.op} {row.threshold}</td>
@@ -653,10 +778,8 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                       <td className="px-3 py-2 align-top">
                         {row.pass === null ? (
                           <span className="text-slate-400">N/A</span>
-                        ) : row.pass ? (
-                          <span className="rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-bold uppercase text-white">Pass</span>
                         ) : (
-                          <span className="rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-bold uppercase text-white">Fail</span>
+                          <StatusPill tone={row.pass ? "pass" : "fail"}>{row.pass ? "Pass" : "Fail"}</StatusPill>
                         )}
                       </td>
                     </tr>
@@ -666,40 +789,38 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
             </div>
           </VCard>
 
-          {/* Monitoring & revalidation */}
-          <section>
-            <h3 className="text-sm font-semibold text-slate-900">5. Monitoring &amp; Revalidation Recommendations</h3>
-            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="text-xs font-bold text-blue-600">MONITORING FREQUENCY</div>
+          {/* ── Monitoring & revalidation — lightweight, two compact cards. ── */}
+          <VCard icon={RefreshCw} title={<NumberedTitle n="06">Monitoring &amp; Revalidation Recommendations</NumberedTitle>}>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-blue-600">Monitoring Frequency</div>
                 <div className="mt-1 text-xl font-bold text-slate-900">{data.monitoring_frequency}</div>
                 <div className="mt-1 text-xs text-slate-500">Based on {data.model_tier}</div>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="text-xs font-bold text-blue-600">REVALIDATION TRIGGER</div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-blue-600">Revalidation Trigger</div>
                 <div className="mt-1 text-base font-bold text-slate-900">{data.revalidation_trigger}</div>
                 <div className="mt-1 text-xs text-slate-500">SS1/23 P4.4</div>
               </div>
             </div>
-          </section>
+          </VCard>
 
-          {/* Executive summary */}
-          <section>
-            <h3 className="text-sm font-semibold text-slate-900">6. Executive Summary</h3>
-            <p className="text-xs text-slate-500 no-print">Auto-generated from validation findings. Edit before final sign-off.</p>
-            <textarea
-              value={execSummary}
-              onChange={(e) => setExecSummary(e.target.value)}
-              rows={14}
-              className="no-print mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs leading-relaxed text-slate-800"
-            />
-            <pre className="print-only mt-3 whitespace-pre-wrap font-mono text-xs leading-relaxed">{execSummary}</pre>
-          </section>
+          {/* ── Executive summary — document-styled, still fully editable. ── */}
+          <VCard icon={FileText} title={<NumberedTitle n="07">Executive Summary</NumberedTitle>} sub="Auto-generated from validation findings. Edit before final sign-off.">
+            <div className="no-print rounded-xl border border-slate-200 bg-slate-50/40 p-1">
+              <textarea
+                value={execSummary}
+                onChange={(e) => setExecSummary(e.target.value)}
+                rows={14}
+                className="w-full rounded-lg border border-transparent bg-white px-3 py-2.5 font-mono text-xs leading-relaxed text-slate-800 focus:border-slate-200"
+              />
+            </div>
+            <pre className="print-only whitespace-pre-wrap font-mono text-xs leading-relaxed">{execSummary}</pre>
+          </VCard>
 
-          {/* Downloads */}
-          <section className="no-print">
-            <h3 className="text-sm font-semibold text-slate-900">📥 Download Evidence Pack</h3>
-            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* ── Evidence pack — CSV + PDF downloads together, horizontal. ── */}
+          <VCard icon={Download} title="Evidence Pack" className="no-print">
+            <div className="flex flex-wrap gap-3">
               <button
                 type="button"
                 disabled={findings.length === 0}
@@ -709,7 +830,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     findings,
                   )
                 }
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:border-blue-300 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Download className="h-4 w-4" />
                 Download Findings Report (CSV)
@@ -740,17 +861,25 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     { Section: "Executive Summary", Value: execSummary },
                   ])
                 }
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:border-blue-300"
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
               >
                 <Download className="h-4 w-4" />
                 Download Full Validation Report (CSV)
               </button>
+              <button
+                type="button"
+                onClick={downloadFullReportPdf}
+                className="inline-flex items-center gap-2 rounded-lg bg-[#2f67ff] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6]"
+              >
+                <Printer className="h-4 w-4" />
+                Download Full Report (PDF)
+              </button>
             </div>
-          </section>
+          </VCard>
 
-          {/* Sign-off */}
-          <VCard icon={Users} title="7. Sign-off">
-            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+          {/* ── Sign-off ─────────────────────────────────────────────────── */}
+          <VCard icon={Users} title={<NumberedTitle n="08">Sign-off</NumberedTitle>}>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               {(
                 [
                   ["Validator", "validator", "Risk Validation"],
@@ -758,7 +887,7 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                   ["Committee", "committee", "Model Risk Committee"],
                 ] as const
               ).map(([role, key, sub]) => (
-                <div key={role} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+                <div key={role} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{role}</div>
                   <input
                     value={signOff[key]}
@@ -767,21 +896,20 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
                     className="no-print mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-sm font-semibold text-slate-900"
                   />
                   <div className="print-only mt-1 border-b border-slate-400 pb-1 text-sm font-semibold">
-                    {signOff[key] || " "}
+                    {signOff[key] || " "}
                   </div>
                   <div className="mt-1 text-xs text-slate-500">{sub}</div>
                 </div>
               ))}
             </div>
           </VCard>
-          </div>
-        </>
+        </div>
       ) : null}
 
       <div className="flex items-center justify-between">
         <Link
           to="/validation/regulatory"
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:border-blue-300"
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
         >
           ← Back to Stage 6: Explainability and Fairness
         </Link>

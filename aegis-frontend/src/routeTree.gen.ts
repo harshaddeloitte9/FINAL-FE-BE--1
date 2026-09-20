@@ -23,6 +23,7 @@ import { Route as ExplainabilityRouteImport } from './routes/explainability'
 import { Route as EvaluationRouteImport } from './routes/evaluation'
 import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as DataUploadRouteImport } from './routes/data-upload'
+import { Route as DataQualityRouteImport } from './routes/data-quality'
 import { Route as DataPreparationRouteImport } from './routes/data-preparation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardRouteImport } from './routes/dashboard'
@@ -102,6 +103,11 @@ const DataUploadRoute = DataUploadRouteImport.update({
   path: '/data-upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DataQualityRoute = DataQualityRouteImport.update({
+  id: '/data-quality',
+  path: '/data-quality',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DataPreparationRoute = DataPreparationRouteImport.update({
   id: '/data-preparation',
   path: '/data-preparation',
@@ -177,6 +183,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activity-log': typeof ActivityLogRoute
   '/data-preparation': typeof DataPreparationRoute
+  '/data-quality': typeof DataQualityRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
@@ -205,6 +212,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activity-log': typeof ActivityLogRoute
   '/data-preparation': typeof DataPreparationRoute
+  '/data-quality': typeof DataQualityRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
@@ -233,6 +241,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/activity-log': typeof ActivityLogRoute
   '/data-preparation': typeof DataPreparationRoute
+  '/data-quality': typeof DataQualityRoute
   '/data-upload': typeof DataUploadRoute
   '/development': typeof DevelopmentRoute
   '/evaluation': typeof EvaluationRoute
@@ -264,6 +273,7 @@ export interface FileRouteTypes {
     | '/activity-log'
     | '/dashboard'
     | '/data-preparation'
+    | '/data-quality'
     | '/data-upload'
     | '/development'
     | '/evaluation'
@@ -293,6 +303,7 @@ export interface FileRouteTypes {
     | '/activity-log'
     | '/dashboard'
     | '/data-preparation'
+    | '/data-quality'
     | '/data-upload'
     | '/development'
     | '/evaluation'
@@ -321,6 +332,7 @@ export interface FileRouteTypes {
     | '/activity-log'
     | '/dashboard'
     | '/data-preparation'
+    | '/data-quality'
     | '/data-upload'
     | '/development'
     | '/evaluation'
@@ -350,6 +362,7 @@ export interface RootRouteChildren {
   ActivityLogRoute: typeof ActivityLogRoute
   DashboardRoute: typeof DashboardRoute
   DataPreparationRoute: typeof DataPreparationRoute
+  DataQualityRoute: typeof DataQualityRoute
   DataUploadRoute: typeof DataUploadRoute
   DevelopmentRoute: typeof DevelopmentRoute
   EvaluationRoute: typeof EvaluationRoute
@@ -473,6 +486,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DataPreparationRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/data-quality': {
+      id: '/data-quality'
+      path: '/data-quality'
+      fullPath: '/data-quality'
+      preLoaderRoute: typeof DataQualityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/model-training-evaluation': {
       id: '/model-training-evaluation'
       path: '/model-training-evaluation'
@@ -593,6 +613,7 @@ const rootRouteChildren: RootRouteChildren = {
   ActivityLogRoute: ActivityLogRoute,
   DashboardRoute: DashboardRoute,
   DataPreparationRoute: DataPreparationRoute,
+  DataQualityRoute: DataQualityRoute,
   DataUploadRoute: DataUploadRoute,
   DevelopmentRoute: DevelopmentRoute,
   EvaluationRoute: EvaluationRoute,

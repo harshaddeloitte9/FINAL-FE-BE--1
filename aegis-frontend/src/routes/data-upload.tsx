@@ -128,10 +128,20 @@ function DataUpload() {
   }, []);
 
   useEffect(() => {
-    if (!profile || hasExplicitDataset) return;
-    setUploadResult(null, null);
-    setExplicitDatasetActive(false);
-  }, [profile, hasExplicitDataset, setUploadResult]);
+    if (!profile) {
+      if (hasExplicitDataset) {
+        setExplicitDatasetActive(false);
+      }
+      return;
+    }
+
+    // The shared dataset/profile is the source of truth; the local session flag
+    // should reflect that fact rather than clearing the profile when this route
+    // remounts or restores from the persisted dataset state.
+    if (!hasExplicitDataset) {
+      setExplicitDatasetActive(true);
+    }
+  }, [profile, hasExplicitDataset]);
 
   // ── Macroeconomic data (FRED) ───────────────────────────────────────────────
   const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
@@ -626,10 +636,10 @@ function DataUpload() {
           <div className="flex justify-end gap-3">
             <button
               type="button"
-              onClick={() => navigate({ to: "/profiling" })}
+              onClick={() => navigate({ to: "/data-quality" })}
               className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
             >
-              Proceed to Data Profiling
+              Proceed to Data Quality
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
