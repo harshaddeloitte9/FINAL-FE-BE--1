@@ -211,7 +211,7 @@ export function buildIssues(profile: any): IssueRow[] {
         issue: `${pct(p)} missing`,
         column: col,
         recordsAffected: typeof info?.count === "number" ? info.count.toLocaleString() : "—",
-        action: "Review in Data Preparation",
+        action: "Review Treatment",
       });
     });
 

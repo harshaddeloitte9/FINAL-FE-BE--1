@@ -36,6 +36,7 @@ type TrainingResult = {
   feature_engineering_summary?: Record<string, any> | null;
   evaluation_metrics?: Record<string, any> | null;
   evaluation_data?: Record<string, any> | null;
+  preprocessing_contract?: Record<string, any> | null;
   model_artifact?: string;
 };
 

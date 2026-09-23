@@ -32,6 +32,7 @@ export const Route = createFileRoute("/data-preparation")({
   component: DataPreparation,
   validateSearch: (search: Record<string, unknown>) => ({
     tab: search.tab === "preprocessing" ? "preprocessing" : "profiling",
+    focusMissing: typeof search.focusMissing === "string" ? search.focusMissing : undefined,
   }),
 });
 
@@ -69,7 +70,10 @@ function DataPreparation() {
         </TabsContent>
 
         <TabsContent value="preprocessing" className="space-y-8 pt-4">
-          <PreprocessingFeaturesTab onBackToProfiling={() => setTab("profiling")} />
+          <PreprocessingFeaturesTab
+            onBackToProfiling={() => setTab("profiling")}
+            focusMissingColumn={typeof search.focusMissing === "string" ? search.focusMissing : null}
+          />
         </TabsContent>
       </Tabs>
     </div>
@@ -1011,10 +1015,11 @@ type TransformRecommendation = {
 const TREATMENT_LABELS: Record<string, string> = {
   unknown_category: "Unknown category",
   zero_fill: "Zero-fill",
-  statistical: "Statistical",
+  statistical: "Statistical imputation",
   review_flag: "Review (sparse)",
 };
 const TREATMENT_OPTIONS = ["unknown_category", "zero_fill", "statistical", "review_flag"];
+const SUPPORTED_MISSING_TREATMENT_SET = new Set(TREATMENT_OPTIONS);
 
 const TRANSFORM_LABELS: Record<string, string> = {
   none: "None",
@@ -1525,7 +1530,13 @@ function FeatureImportanceBars({ items, metricLabel }: { items: Array<{ name: st
   );
 }
 
-function PreprocessingFeaturesTab({ onBackToProfiling }: { onBackToProfiling: () => void }) {
+function PreprocessingFeaturesTab({
+  onBackToProfiling,
+  focusMissingColumn,
+}: {
+  onBackToProfiling: () => void;
+  focusMissingColumn?: string | null;
+}) {
   const { profile } = useDataset();
 
   if (!profile) {
@@ -1539,13 +1550,19 @@ function PreprocessingFeaturesTab({ onBackToProfiling }: { onBackToProfiling: ()
 
   return (
     <div className="space-y-8">
-      <PreprocessingSection onBackToProfiling={onBackToProfiling} />
+      <PreprocessingSection onBackToProfiling={onBackToProfiling} focusMissingColumn={focusMissingColumn} />
       <FeaturesSection />
     </div>
   );
 }
 
-function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => void }) {
+function PreprocessingSection({
+  onBackToProfiling,
+  focusMissingColumn,
+}: {
+  onBackToProfiling: () => void;
+  focusMissingColumn?: string | null;
+}) {
   const { profile, file, preprocessingResult, setPreprocessingResult } = useDataset();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1577,6 +1594,8 @@ function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => 
   const [dropCols, setDropCols] = useState<Record<string, boolean>>({});
   const [transformChoices, setTransformChoices] = useState<Record<string, string>>({});
   const [strategyOverride, setStrategyOverride] = useState<string | null>(null);
+  const [treatmentApplyState, setTreatmentApplyState] = useState<Record<string, { applied: boolean; treatment: string; beforeMissingPct: number; beforeMissingCount: number; afterMissingPct: number; afterMissingCount: number }>>({});
+  const [applyingTreatmentFor, setApplyingTreatmentFor] = useState<string | null>(null);
   const initializedDefaults = useRef(false);
 
   // ── On-demand "impact of dropping this feature" analysis (review_flag
@@ -1586,6 +1605,73 @@ function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => 
   const [dropImpactLoading, setDropImpactLoading] = useState<Record<string, boolean>>({});
   const [dropImpactError, setDropImpactError] = useState<Record<string, string>>({});
   const [dropImpact, setDropImpact] = useState<Record<string, any>>({});
+
+  const applyTreatmentForColumn = async (col: string) => {
+    if (!profile || !file) {
+      setError("No dataset is available to apply missing-value treatment.");
+      return;
+    }
+    const targetCol =
+      profile?.target_col ??
+      (Array.isArray(profile?.target_candidates) && profile.target_candidates.length > 0 ? profile.target_candidates[0] : null);
+    if (!targetCol) {
+      setError("Could not determine a target column for preprocessing.");
+      return;
+    }
+
+    const chosenTreatment = treatmentOverrides[col] ?? preprocess?.missing_treatment_proposal?.[col]?.treatment ?? null;
+    if (!chosenTreatment || !SUPPORTED_MISSING_TREATMENT_SET.has(chosenTreatment)) {
+      setError(`Unsupported missing-value treatment for ${col}. Select one of the backend-supported options.`);
+      return;
+    }
+
+    setApplyingTreatmentFor(col);
+    setError(null);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("target_col", targetCol);
+      form.append("test_size", String(testSize));
+      form.append("val_size", String(valSize));
+      form.append("random_seed", String(randomSeed));
+      form.append("treatment_overrides", JSON.stringify({ ...treatmentOverrides, [col]: chosenTreatment }));
+      form.append(
+        "drop_cols",
+        JSON.stringify(Object.entries(dropCols).filter(([, v]) => v).map(([k]) => k)),
+      );
+      form.append("transform_choices", JSON.stringify(transformChoices));
+      if (strategyOverride) {
+        form.append("strategy_override", strategyOverride);
+      }
+
+      const result = await formUpload("/data/preprocess", form);
+      setPreprocess(result);
+      setPreprocessingResult(result);
+
+      const beforeStats = (result as any)?.missing_before_after?.[col] ?? null;
+      const beforeCount = Number(beforeStats?.before_missing_count ?? profile?.missing_by_column?.[col]?.count ?? 0);
+      const beforePct = Number(beforeStats?.before_missing_pct ?? profile?.missing_by_column?.[col]?.percentage ?? 0);
+      const afterCount = Number(beforeStats?.after_missing_count ?? 0);
+      const afterPct = Number(beforeStats?.after_missing_pct ?? 0);
+      setTreatmentApplyState((prev) => ({
+        ...prev,
+        [col]: {
+          applied: true,
+          treatment: chosenTreatment,
+          beforeMissingPct: beforePct,
+          beforeMissingCount: beforeCount,
+          afterMissingPct: afterPct,
+          afterMissingCount: afterCount,
+        },
+      }));
+    } catch (err: any) {
+      setError(err?.body?.detail ?? err?.message ?? "Failed to apply the missing-value treatment.");
+      setTreatmentApplyState((prev) => ({ ...prev, [col]: { ...((prev[col] ?? { beforeMissingPct: 0, beforeMissingCount: 0, afterMissingPct: 0, afterMissingCount: 0 }), { applied: false, treatment: chosenTreatment, beforeMissingPct: prev[col]?.beforeMissingPct ?? 0, beforeMissingCount: prev[col]?.beforeMissingCount ?? 0, afterMissingPct: prev[col]?.afterMissingPct ?? 0, afterMissingCount: prev[col]?.afterMissingCount ?? 0 }) } }));
+    } finally {
+      setApplyingTreatmentFor(null);
+    }
+  };
 
   const fetchDropImpact = async (col: string) => {
     if (!file || !preprocess?.target_col) return;
@@ -1812,6 +1898,15 @@ function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => 
   //    found — i.e. every column that actually has missing values) ──
   const missingProposal: Record<string, TreatmentInfo> = preprocess?.missing_treatment_proposal ?? {};
   const missingProposalEntries = Object.entries(missingProposal);
+
+  useEffect(() => {
+    if (!focusMissingColumn) return;
+    const target = document.getElementById(`missing-treatment-${focusMissingColumn}`);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focusMissingColumn, missingProposalEntries.length]);
+
   const imputationStrategy = preprocess?.imputation_strategy;
   const recalibratedColumns: Array<{ column: string; treatment: string }> = preprocess?.recalibrated_columns ?? [];
   const reviewMissingThreshold: number = preprocess?.review_missing_threshold ?? 0.4;
@@ -2039,11 +2134,13 @@ function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => 
                         const currentTreatment = treatmentOverrides[col] ?? info.treatment;
                         const missingPct = info.evidence?.missing_pct ?? 0;
                         const isReviewFlag = info.treatment === "review_flag";
+                        const isFocused = focusMissingColumn === col;
 
                         return (
                           <div
+                            id={`missing-treatment-${col}`}
                             key={col}
-                            className={`rounded-xl border p-3 ${isReviewFlag ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-slate-50"}`}
+                            className={`rounded-xl border p-3 transition-all ${isFocused ? "border-blue-500 bg-blue-50 ring-2 ring-blue-200 ring-offset-2" : isReviewFlag ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-slate-50"}`}
                           >
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="font-medium text-sm text-slate-900">{col}</span>
@@ -2057,6 +2154,62 @@ function PreprocessingSection({ onBackToProfiling }: { onBackToProfiling: () => 
                                 </span>
                               )}
                             </div>
+                            <div className="mt-2 grid gap-3 md:grid-cols-2">
+                              <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Detected issue</div>
+                                <div className="mt-1 text-sm font-semibold text-slate-800">
+                                  {missingPct * 100 >= 0.1 ? `${(missingPct * 100).toFixed(1)}% missing` : "Missing values detected"}
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  {typeof profile?.missing_by_column?.[col]?.count === "number" ? `${profile.missing_by_column[col].count.toLocaleString()} records` : `${Math.max(1, Math.round(missingPct * (profile?.shape?.[0] ?? 0))).toLocaleString()} records`}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Recommended treatment</div>
+                                <div className="mt-1 text-sm font-semibold text-slate-800">{TREATMENT_LABELS[info.treatment] ?? info.treatment}</div>
+                                <div className="mt-1 text-xs text-slate-500">{info.reason}</div>
+                              </div>
+                            </div>
+                            <div className="mt-3 flex items-center gap-2">
+                              <span className="text-xs text-slate-500">Treatment selection</span>
+                              <Select
+                                value={currentTreatment}
+                                onValueChange={(value) => {
+                                  if (SUPPORTED_MISSING_TREATMENT_SET.has(value)) {
+                                    setTreatmentOverrides((prev) => ({ ...prev, [col]: value }));
+                                  }
+                                }}
+                              >
+                                <SelectTrigger className="h-8 w-[220px] border-primary bg-primary text-xs text-primary-foreground hover:bg-primary/90 focus:ring-primary data-[placeholder]:text-primary-foreground [&>span]:text-primary-foreground [&_svg]:text-primary-foreground [&_svg]:opacity-80">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {TREATMENT_OPTIONS.map((opt) => (
+                                    <SelectItem key={opt} value={opt}>{TREATMENT_LABELS[opt] ?? opt}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Button
+                                size="sm"
+                                onClick={() => void applyTreatmentForColumn(col)}
+                                disabled={applyingTreatmentFor === col || !SUPPORTED_MISSING_TREATMENT_SET.has(currentTreatment)}
+                                className="ml-auto"
+                              >
+                                {applyingTreatmentFor === col ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                                {applyingTreatmentFor === col ? "Applying…" : "Apply Treatment"}
+                              </Button>
+                            </div>
+                            {treatmentApplyState[col]?.applied && (
+                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                                <div className="font-semibold">✓ Treatment applied</div>
+                                <div className="mt-1">Column: {col}</div>
+                                <div>Treatment: {TREATMENT_LABELS[treatmentApplyState[col].treatment] ?? treatmentApplyState[col].treatment}</div>
+                                <div className="mt-1 grid gap-1 sm:grid-cols-2">
+                                  <div>Before: {(treatmentApplyState[col].beforeMissingPct * 100).toFixed(1)}% missing ({treatmentApplyState[col].beforeMissingCount.toLocaleString()} rows)</div>
+                                  <div>After: {(treatmentApplyState[col].afterMissingPct * 100).toFixed(1)}% missing ({treatmentApplyState[col].afterMissingCount.toLocaleString()} rows)</div>
+                                </div>
+                              </div>
+                            )}
                             <div className="mt-2 flex items-center gap-2">
                               <MiniBar fraction={missingPct} colorClass={missingSeverityColor(missingPct).bar} />
                             </div>

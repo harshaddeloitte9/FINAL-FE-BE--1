@@ -62,6 +62,37 @@ from preprocessing_new import (
     REVIEW_MISSING_THRESHOLD, MISSING_VALUE_LIMITATION_NOTE,
     estimate_drop_impact,
 )
+
+
+def _parse_json_field(raw: Optional[str], default):
+    if raw is None or raw == "":
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {exc}")
+
+
+def _resolve_treatment_map(raw_treatment_map: Any) -> Dict[str, str]:
+    if not isinstance(raw_treatment_map, dict):
+        return {}
+    resolved: Dict[str, str] = {}
+    for column, value in raw_treatment_map.items():
+        if isinstance(value, dict):
+            treatment = value.get("treatment") or value.get("resolved_treatment")
+        else:
+            treatment = value
+        if treatment:
+            resolved[str(column)] = str(treatment)
+    return resolved
+
+
+def _coalesce_contract_value(payload: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in payload and payload[key] not in (None, ""):
+            return payload[key]
+    return None
+
 from feature_engineering import (
     analyze_for_feature_engineering, apply_feature_engineering,
     compute_univariate_gini, resolve_ead_configuration,
@@ -2044,6 +2075,7 @@ async def preprocess_data(
 
     # ── Phase 4: fit SemanticImputer on TRAIN only, apply unchanged to val/test ──
     col_types_for_fit = {k: [c for c in v if c not in _drop_cols] for k, v in col_types.items()}
+    X_train_before_treatment = X_train.copy()
     imputer = SemanticImputer(
         col_types=col_types_for_fit, treatment_map=treatment_map, strategy_choice=imputation_strategy,
     )
@@ -2051,6 +2083,19 @@ async def preprocess_data(
     X_train = imputer.transform(X_train)
     X_val = imputer.transform(X_val)
     X_test = imputer.transform(X_test)
+
+    missing_before_after: Dict[str, Dict[str, Any]] = {}
+    for col in X_train_before_treatment.columns:
+        before_count = int(X_train_before_treatment[col].isna().sum())
+        if before_count == 0:
+            continue
+        after_count = int(X_train[col].isna().sum()) if col in X_train.columns else 0
+        missing_before_after[col] = {
+            "before_missing_count": before_count,
+            "before_missing_pct": round(float(X_train_before_treatment[col].isna().mean()), 6),
+            "after_missing_count": after_count,
+            "after_missing_pct": round(float(X_train[col].isna().mean()), 6) if col in X_train.columns else 0.0,
+        }
 
     _drop_cols_present = [c for c in _drop_cols if c in X_train.columns]
     if _drop_cols_present:
@@ -2180,6 +2225,7 @@ async def preprocess_data(
         "imputation_strategy": _json_safe(imputation_strategy),
         "recalibrated_columns": recalibrated_cols,
         "dropped_columns": _drop_cols_present,
+        "missing_before_after": _json_safe(missing_before_after),
         "transform_recommendations": _json_safe(prep_report.get("transform_recommendations", {})),
         "applied_transform_choices": _transform_choices,
         "missing_value_limitation_note": MISSING_VALUE_LIMITATION_NOTE,
@@ -2605,10 +2651,40 @@ async def train_model_endpoint(
     use_oot: bool = Form(False),
     date_col: Optional[str] = Form(None),
     threshold: Optional[float] = Form(None),
+    treatment_overrides: Optional[str] = Form(None),
+    drop_cols: Optional[str] = Form(None),
+    transform_choices: Optional[str] = Form(None),
+    strategy_override: Optional[str] = Form(None),
+    preprocessing_contract: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
     if target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+
+    contract_payload = _parse_json_field(preprocessing_contract, {}) if preprocessing_contract else {}
+    if not isinstance(contract_payload, dict):
+        raise HTTPException(status_code=400, detail="preprocessing_contract must be a JSON object.")
+
+    direct_treatment_overrides = _parse_json_field(treatment_overrides, {}) if treatment_overrides else {}
+    direct_drop_cols = _parse_json_field(drop_cols, []) if drop_cols else []
+    direct_transform_choices = _parse_json_field(transform_choices, {}) if transform_choices else {}
+
+    contract_treatment_map = _resolve_treatment_map(_coalesce_contract_value(contract_payload, "applied_treatment_map", "treatment_map"))
+    contract_drop_cols = _coalesce_contract_value(contract_payload, "dropped_columns", "drop_cols") or []
+    contract_transform_choices = _coalesce_contract_value(contract_payload, "applied_transform_choices", "transform_choices") or {}
+    contract_strategy_override = _coalesce_contract_value(contract_payload, "strategy_override")
+
+    combined_treatment_overrides = {
+        **_resolve_treatment_map(direct_treatment_overrides),
+        **contract_treatment_map,
+    }
+    combined_drop_cols = list(dict.fromkeys([
+        *([c for c in direct_drop_cols if isinstance(c, str)]),
+        *([c for c in contract_drop_cols if isinstance(c, str)]),
+    ]))
+    combined_transform_choices = {**(direct_transform_choices if isinstance(direct_transform_choices, dict) else {}), **(contract_transform_choices if isinstance(contract_transform_choices, dict) else {})}
+    combined_strategy_override = contract_strategy_override or strategy_override
+
     col_types = detect_column_types(df)
     task_type = detect_task_type(df[target_col])
     X, y, _ = finalize_xy(df, col_types, target_col)
@@ -2616,6 +2692,65 @@ async def train_model_endpoint(
         X, y, test_size=test_size, val_size=val_size,
         task_type=task_type, random_state=random_seed,
     )
+
+    effective_preprocessing_contract = {
+        "source": "data_preparation" if combined_treatment_overrides or combined_drop_cols or combined_transform_choices or combined_strategy_override else "fallback",
+        "applied_treatment_map": {
+            **(contract_payload.get("applied_treatment_map") or {}),
+            **(contract_payload.get("treatment_map") or {}),
+        },
+        "treatment_overrides": combined_treatment_overrides,
+        "drop_cols": combined_drop_cols,
+        "dropped_columns": combined_drop_cols,
+        "transform_choices": combined_transform_choices,
+        "applied_transform_choices": combined_transform_choices,
+        "strategy_override": combined_strategy_override,
+        "imputation_strategy": None,
+    }
+
+    if combined_drop_cols:
+        X_train = X_train.drop(columns=[c for c in combined_drop_cols if c in X_train.columns], errors="ignore")
+        X_val = X_val.drop(columns=[c for c in combined_drop_cols if c in X_val.columns], errors="ignore")
+        X_test = X_test.drop(columns=[c for c in combined_drop_cols if c in X_test.columns], errors="ignore")
+
+    if combined_treatment_overrides or combined_transform_choices or combined_strategy_override:
+        treatment_map: Dict[str, Dict[str, Any]] = {}
+        for col, treatment in combined_treatment_overrides.items():
+            if not isinstance(treatment, str):
+                continue
+            treatment_map[col] = {
+                "treatment": treatment,
+                "reason": "Applied from Data Preparation preprocessing contract.",
+                "evidence": {},
+            }
+        if not treatment_map and isinstance(contract_payload.get("applied_treatment_map"), dict):
+            for col, value in contract_payload["applied_treatment_map"].items():
+                if isinstance(value, dict):
+                    treatment_map[col] = {
+                        "treatment": value.get("treatment") or "statistical",
+                        "reason": value.get("reason") or "Applied from Data Preparation preprocessing contract.",
+                        "evidence": value.get("evidence") or {},
+                    }
+        if treatment_map:
+            statistical_cols = [c for c, v in treatment_map.items() if v.get("treatment") == "statistical"]
+            imputation_strategy = select_imputation_strategy(X_train, statistical_cols)
+            if combined_strategy_override in ("mice", "knn", "median") and statistical_cols:
+                imputation_strategy = {
+                    "method": combined_strategy_override,
+                    "reason": "Manually overridden by Data Preparation contract.",
+                    "diagnostics": imputation_strategy.get("diagnostics", {}),
+                }
+            effective_preprocessing_contract["imputation_strategy"] = imputation_strategy
+            col_types_for_fit = {k: [c for c in v if c not in combined_drop_cols] for k, v in col_types.items()}
+            semantic_imputer = SemanticImputer(
+                col_types=col_types_for_fit,
+                treatment_map=treatment_map,
+                strategy_choice=imputation_strategy,
+            )
+            semantic_imputer.fit(X_train)
+            X_train = semantic_imputer.transform(X_train)
+            X_val = semantic_imputer.transform(X_val)
+            X_test = semantic_imputer.transform(X_test)
 
     # ── Origination/observation date for Out-of-Time (OOT) validation ──
     # Use the reviewer-selected date column if provided and valid, otherwise
@@ -2639,7 +2774,12 @@ async def train_model_endpoint(
             dates_test = df.loc[X_test.index, origination_date_col]
         except Exception:
             dates_test = None
-    prep_report = build_preprocessing_report(X_train.assign(**{target_col: y_train}), col_types, target_col)
+    prep_report = build_preprocessing_report(
+        X_train.assign(**{target_col: y_train}),
+        col_types,
+        target_col,
+        transform_choices=combined_transform_choices if isinstance(combined_transform_choices, dict) else {},
+    )
     fe_summary = None
     plan = None
     if use_feature_engineering:
@@ -2716,6 +2856,10 @@ async def train_model_endpoint(
         class_distribution = None
 
     preprocessing_summary = prep_report if isinstance(prep_report, dict) else None
+    training_contract = {
+        **effective_preprocessing_contract,
+        "contract_applied": effective_preprocessing_contract["source"] == "data_preparation",
+    }
 
     encoding = {}
     scaling = {}
@@ -2752,11 +2896,15 @@ async def train_model_endpoint(
             "use_oot": use_oot,
             "date_col": origination_date_col,
         },
-        "training_info": training_info,
+        "training_info": {
+            **training_info,
+            "preprocessing_contract_used": training_contract,
+        },
         "split_stats": split_stats,
         "feature_engineering_summary": fe_summary,
         "feature_selection": feature_selection,
         "preprocessing_summary": preprocessing_summary,
+        "preprocessing_contract": training_contract,
         "encoding": encoding,
         "scaling": scaling,
         "low_iv_columns": plan.get("low_iv_cols", []) if plan else [],
@@ -2930,7 +3078,7 @@ async def train_model_endpoint(
                     "feature_selection": feature_selection,
                     "feature_importances": feature_importances,
                     "top_model_drivers": top_model_drivers,
-                    "training_config": training_config,
+                    "training_config": result.get("training_config", {}),
                 },
                 dataset_payload={
                     "file_name": getattr(file, "filename", None) or "uploaded_dataset",

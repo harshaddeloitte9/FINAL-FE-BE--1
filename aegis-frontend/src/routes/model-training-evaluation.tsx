@@ -637,6 +637,36 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
       throw new Error("Missing profile or file");
     }
 
+    const treatmentOverrides = preprocessingResult?.applied_treatment_map
+      ? Object.fromEntries(
+          Object.entries(preprocessingResult.applied_treatment_map).map(([col, value]) => [
+            col,
+            typeof value === "object" && value && "treatment" in value ? String((value as any).treatment) : String(value),
+          ]),
+        )
+      : {};
+    const dropCols = Array.isArray(preprocessingResult?.dropped_columns)
+      ? preprocessingResult.dropped_columns.filter((col: any) => typeof col === "string")
+      : [];
+    const transformChoices = preprocessingResult?.applied_transform_choices && typeof preprocessingResult.applied_transform_choices === "object"
+      ? preprocessingResult.applied_transform_choices
+      : {};
+    const strategyOverride = preprocessingResult?.imputation_strategy?.method ?? null;
+    const preprocessingContract = preprocessingResult
+      ? {
+          source: "data_preparation",
+          applied_treatment_map: preprocessingResult.applied_treatment_map ?? {},
+          treatment_overrides: treatmentOverrides,
+          dropped_columns: dropCols,
+          drop_cols: dropCols,
+          applied_transform_choices: transformChoices,
+          transform_choices: transformChoices,
+          strategy_override: strategyOverride,
+          imputation_strategy: preprocessingResult.imputation_strategy ?? null,
+          split_config: preprocessingResult.split_config ?? { test_size: config.test_size, val_size: config.val_size, random_seed: config.random_seed },
+        }
+      : null;
+
     const trainForm = new FormData();
     trainForm.append("file", file);
     trainForm.append("target_col", profile.target_col || "loan_status");
@@ -669,6 +699,21 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
     trainForm.append("development_date", developmentDate);
     trainForm.append("status", status);
     trainForm.append("documentation_path", documentationPath);
+    if (preprocessingContract) {
+      trainForm.append("preprocessing_contract", JSON.stringify(preprocessingContract));
+      if (Object.keys(treatmentOverrides).length > 0) {
+        trainForm.append("treatment_overrides", JSON.stringify(treatmentOverrides));
+      }
+      if (dropCols.length > 0) {
+        trainForm.append("drop_cols", JSON.stringify(dropCols));
+      }
+      if (Object.keys(transformChoices).length > 0) {
+        trainForm.append("transform_choices", JSON.stringify(transformChoices));
+      }
+      if (strategyOverride) {
+        trainForm.append("strategy_override", strategyOverride);
+      }
+    }
     // PD classification cut-off. Omitted entirely when "Auto" is on, so the
     // backend (main.py's _build_evaluation_data, threshold=None) auto-selects
     // the F1-maximizing threshold. Only send an explicit value when the
@@ -690,6 +735,7 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
       training_info: trainResponse.training_info,
       split_stats: trainResponse.split_stats,
       feature_engineering_summary: trainResponse.feature_engineering_summary ?? null,
+      preprocessing_contract: trainResponse.preprocessing_contract ?? null,
       model_artifact: trainResponse.model_artifact,
       evaluation_metrics: trainResponse.evaluation_metrics ?? null,
       evaluation_data: trainResponse.evaluation_data ?? null,
@@ -738,6 +784,7 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
         feature_engineering_summary: result.feature_engineering_summary,
         evaluation_metrics: result.evaluation_metrics,
         evaluation_data: result.evaluation_data,
+        preprocessing_contract: result.preprocessing_contract ?? null,
         model_artifact: result.model_artifact,
       });
     } catch (err: any) {
