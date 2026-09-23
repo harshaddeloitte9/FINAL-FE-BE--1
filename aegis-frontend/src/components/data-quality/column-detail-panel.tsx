@@ -72,7 +72,14 @@ export function ColumnDetailPanel({ profile, column }: { profile: any; column: s
           <>
             <DetailRow label="Date range" value={`${detail.dateInfo.minDate} → ${detail.dateInfo.maxDate}`} />
             <DetailRow label="Future / pre-1900 dates" value={`${detail.dateInfo.futureCount} / ${detail.dateInfo.ancientCount}`} />
+            <DetailRow label="Unparseable dates" value={detail.dateInfo.unparseableCount.toLocaleString()} />
           </>
+        )}
+        {detail.numericFormatError && (
+          <DetailRow
+            label="Format errors"
+            value={`${detail.numericFormatError.count.toLocaleString()} (${detail.numericFormatError.percentage.toFixed(1)}%)`}
+          />
         )}
         {detail.sampleValues && <DetailRow label="Sample values" value={detail.sampleValues} />}
       </div>

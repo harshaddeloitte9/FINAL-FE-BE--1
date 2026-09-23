@@ -50,7 +50,7 @@ function HealthTile({
 export function DatasetHealthStrip({ profile }: { profile: any }) {
   const completeness = getCompleteness(profile);
   const uniqueness = getUniqueness(profile);
-  const validity = getValidity();
+  const validity = getValidity(profile);
   const schema = getSchemaHealth(profile);
   const timeliness = getTimeliness(profile);
   const targetHealth = getTargetHealth(profile);
@@ -76,14 +76,14 @@ export function DatasetHealthStrip({ profile }: { profile: any }) {
         status={uniqueness.status}
         animate={duplicateRows !== null ? { value: duplicateRows } : undefined}
       />
-      {/* Copy override only, same as the Quality Dimensions panel — status
-          and headline still come straight from getValidity() (always
-          "not_evaluated"); only the displayed sentence changes here. */}
+      {/* Real numeric-format/date-parse evidence from getValidity(), with a
+          fixed trailing note (same wording as the Quality Dimensions panel)
+          for the range/allowed-value checks that remain not evaluated. */}
       <HealthTile
         icon={ShieldQuestion}
         label="Validity"
         headline={validity.headline}
-        evidence="Range, format, and allowed-value validation is planned as a future enhancement to the Data Quality framework."
+        evidence={`${validity.evidence} Range/allowed-value not evaluated — no business rules configured.`}
         status={validity.status}
       />
       <HealthTile icon={Layers} label="Schema" headline={schema.headline} evidence={schema.evidence} status={schema.status} />

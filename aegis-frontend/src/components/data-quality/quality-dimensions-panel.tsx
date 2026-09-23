@@ -9,19 +9,24 @@ import {
 } from "./selectors";
 
 // The six industry-standard dimensions from the Data Quality proposal
-// (slide 6). Completeness/Uniqueness/Timeliness/Statistical are derived
-// from real profile fields; Validity/Consistency are always "Not evaluated"
-// because Aegis does not implement those checks yet (Phase 2) — this panel
-// must never upgrade them to a fabricated status.
+// (slide 6). Completeness/Uniqueness/Timeliness/Statistical/Validity are
+// derived from real profile fields; Consistency is always "Not evaluated"
+// because Aegis does not implement cross-column consistency checks yet
+// (Phase 2) — this panel must never upgrade it to a fabricated status.
 export function QualityDimensionsPanel({ profile }: { profile: any }) {
+  const validity = getValidity(profile);
   const dimensions = [
     { name: "Completeness", ...getCompleteness(profile) },
     { name: "Uniqueness", ...getUniqueness(profile) },
-    // Copy override only — status/headline still come straight from
-    // getValidity()/getConsistency() (always "not_evaluated"); only the
-    // displayed explanatory sentence is replaced here, without touching
-    // selectors.ts.
-    { name: "Validity", ...getValidity(), evidence: "Range, format, and allowed-value validation is planned as a future enhancement to the Data Quality framework." },
+    // Real numeric-format/date-parse checks come straight from getValidity().
+    // Range and allowed-value validation are business rules with no
+    // authoritative source in this dataset, so that limitation is appended
+    // as a fixed trailing note rather than replacing the real evidence.
+    {
+      name: "Validity",
+      ...validity,
+      evidence: `${validity.evidence} Range and allowed-value validation not evaluated — no business-defined ranges or category lists are configured for this dataset.`,
+    },
     { name: "Consistency", ...getConsistency(), evidence: "Cross-column consistency validation is planned as a future enhancement to the Data Quality framework." },
     { name: "Timeliness", ...getTimeliness(profile) },
     { name: "Statistical", ...getStatistical(profile) },

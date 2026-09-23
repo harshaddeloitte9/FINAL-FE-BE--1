@@ -62,12 +62,56 @@ export function getUniqueness(profile: any): DimensionResult {
   };
 }
 
-export function getValidity(): DimensionResult {
-  return {
-    status: "not_evaluated",
-    headline: "Not evaluated",
-    evidence: "Range, format, and allowed-value checks are not yet implemented in Aegis (Phase 2 of the Data Quality proposal).",
-  };
+// Validity — implemented checks only: numeric-format parsing and date
+// parsing, both objective/derivable straight from the data (a value either
+// parses as a number/date or it doesn't). Range validity ("is this value
+// within a valid range") and allowed-value validity ("is this category
+// permitted") are business rules that require an authoritative schema this
+// dataset does not carry — they are never inferred here and must stay
+// "not_evaluated" until such configuration exists.
+export function getValidity(profile: any): DimensionResult {
+  const numericFormatErrors =
+    profile?.numeric_format_errors && typeof profile.numeric_format_errors === "object" ? profile.numeric_format_errors : {};
+  const dateIntegrity = profile?.date_integrity && typeof profile.date_integrity === "object" ? profile.date_integrity : {};
+
+  const numericEntries = Object.entries(numericFormatErrors as Record<string, any>);
+  const dateEntries = Object.entries(dateIntegrity as Record<string, any>).filter(
+    ([, info]) => typeof info?.unparseable_count === "number"
+  );
+
+  const checkedCount = numericEntries.length + dateEntries.length;
+  if (checkedCount === 0) {
+    return {
+      status: "not_evaluated",
+      headline: "Not evaluated",
+      evidence: "No numeric or date columns available for format validity checks in this dataset.",
+    };
+  }
+
+  const flaggedNumeric = numericEntries.filter(([, info]) => (info?.count ?? 0) > 0);
+  const flaggedDate = dateEntries.filter(([, info]) => (info?.unparseable_count ?? 0) > 0);
+  const flaggedCount = flaggedNumeric.length + flaggedDate.length;
+  const status: DqStatus = flaggedCount > 0 ? "review" : "healthy";
+
+  const parts: string[] = [];
+  flaggedNumeric.forEach(([col, info]) => {
+    parts.push(`${col}: ${info.count.toLocaleString()} non-numeric value${info.count === 1 ? "" : "s"} (${pct(info.percentage)})`);
+  });
+  flaggedDate.forEach(([col, info]) => {
+    parts.push(
+      `${col}: ${info.unparseable_count.toLocaleString()} unparseable date${info.unparseable_count === 1 ? "" : "s"} (${pct(
+        info.unparseable_percentage
+      )})`
+    );
+  });
+
+  const headline = flaggedCount > 0 ? `${flaggedCount} column${flaggedCount === 1 ? "" : "s"} flagged` : "No format issues flagged";
+  const evidence =
+    flaggedCount > 0
+      ? `Format validity checked on ${checkedCount} column${checkedCount === 1 ? "" : "s"} — ${parts.join("; ")}.`
+      : `Format validity checked on ${checkedCount} column${checkedCount === 1 ? "" : "s"} (numeric parsing, date parsing) — none flagged.`;
+
+  return { status, headline, evidence };
 }
 
 export function getConsistency(): DimensionResult {
@@ -288,6 +332,43 @@ export function buildIssues(profile: any): IssueRow[] {
     }
   });
 
+  // Validity — numeric format errors. Separate id/dimension from the
+  // Timeliness date-integrity issues above; this block never touches
+  // future_count/ancient_count.
+  const numericFormatErrors =
+    profile?.numeric_format_errors && typeof profile.numeric_format_errors === "object" ? profile.numeric_format_errors : {};
+  Object.entries(numericFormatErrors as Record<string, any>)
+    .filter(([, info]) => (info?.count ?? 0) > 0)
+    .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+    .forEach(([col, info]) => {
+      issues.push({
+        id: `numeric-format-${col}`,
+        severity: (info?.percentage ?? 0) > 5 ? "WARNING" : "INFO",
+        dimension: "Validity",
+        issue: `${info.count.toLocaleString()} non-numeric value${info.count === 1 ? "" : "s"}`,
+        column: col,
+        recordsAffected: info.count.toLocaleString(),
+        action: "Review numeric values",
+      });
+    });
+
+  // Validity — date parse failures (raw values that never parsed as a date
+  // at all), distinct from the future/ancient Timeliness issue above.
+  Object.entries(dateIntegrity as Record<string, any>)
+    .filter(([, info]) => ((info as any)?.unparseable_count ?? 0) > 0)
+    .forEach(([col, info]) => {
+      const unparseable = (info as any).unparseable_count;
+      issues.push({
+        id: `date-format-${col}`,
+        severity: ((info as any)?.unparseable_percentage ?? 0) > 5 ? "WARNING" : "INFO",
+        dimension: "Validity",
+        issue: `${unparseable.toLocaleString()} unparseable date${unparseable === 1 ? "" : "s"}`,
+        column: col,
+        recordsAffected: unparseable.toLocaleString(),
+        action: "Review date values",
+      });
+    });
+
   const { flags } = getComplianceState(profile);
   flags.forEach((flag: any, i: number) => {
     const sev: IssueRow["severity"] = flag?.severity === "high" ? "CRITICAL" : flag?.severity === "medium" ? "WARNING" : "INFO";
@@ -319,7 +400,8 @@ export interface ColumnDiagnostic {
   sampleValues: string;
   outlier: { count: number; fraction: number; hasOutliers: boolean } | null;
   outlierApplicable: boolean;
-  dateInfo: { minDate: string; maxDate: string; futureCount: number; ancientCount: number } | null;
+  dateInfo: { minDate: string; maxDate: string; futureCount: number; ancientCount: number; unparseableCount: number } | null;
+  numericFormatError: { count: number; percentage: number } | null;
   isIdColumn: boolean;
   isLeakageRisk: boolean;
   complianceNote: string | null;
@@ -334,6 +416,8 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
   const dataDictionary: any[] = Array.isArray(profile?.data_dictionary) ? profile.data_dictionary : [];
   const outlierAnalysis = profile?.outlier_analysis && typeof profile.outlier_analysis === "object" ? profile.outlier_analysis : {};
   const dateIntegrity = profile?.date_integrity && typeof profile.date_integrity === "object" ? profile.date_integrity : {};
+  const numericFormatErrors =
+    profile?.numeric_format_errors && typeof profile.numeric_format_errors === "object" ? profile.numeric_format_errors : {};
   const numericCols: string[] = Array.isArray(profile?.col_types?.numeric) ? profile.col_types.numeric : [];
   const idCols = new Set(getIdColumns(profile));
   const { cols: leakageCols } = getLeakageEvaluation(profile);
@@ -345,16 +429,26 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
     const isNumeric = numericCols.includes(col);
     const outlierInfo = outlierAnalysis[col];
     const dInfo = dateIntegrity[col];
+    const numericFormatInfo = numericFormatErrors[col];
     const missingPct = typeof row["Missing %"] === "number" ? row["Missing %"] : null;
     const isId = idCols.has(col);
     const isLeakage = leakageSet.has(col);
     const hasOutlierIssue = Boolean(outlierInfo?.has_outliers);
+    const hasNumericFormatIssue = Boolean(numericFormatInfo && numericFormatInfo.count > 0);
+    const hasDateParseIssue = Boolean(dInfo && (dInfo.unparseable_count ?? 0) > 0);
     const matchingFlag = flags.find((f: any) => {
       const observed = f?.observed_value;
       return Array.isArray(observed) ? observed.includes(col) : observed === col;
     });
     const status: DqStatus =
-      (missingPct !== null && missingPct > 5) || hasOutlierIssue || isLeakage || Boolean(matchingFlag) ? "review" : "healthy";
+      (missingPct !== null && missingPct > 5) ||
+      hasOutlierIssue ||
+      hasNumericFormatIssue ||
+      hasDateParseIssue ||
+      isLeakage ||
+      Boolean(matchingFlag)
+        ? "review"
+        : "healthy";
 
     return {
       column: col,
@@ -371,8 +465,15 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
         : null,
       outlierApplicable: isNumeric,
       dateInfo: dInfo
-        ? { minDate: dInfo.min_date, maxDate: dInfo.max_date, futureCount: dInfo.future_count ?? 0, ancientCount: dInfo.ancient_count ?? 0 }
+        ? {
+            minDate: dInfo.min_date,
+            maxDate: dInfo.max_date,
+            futureCount: dInfo.future_count ?? 0,
+            ancientCount: dInfo.ancient_count ?? 0,
+            unparseableCount: dInfo.unparseable_count ?? 0,
+          }
         : null,
+      numericFormatError: numericFormatInfo ? { count: numericFormatInfo.count, percentage: numericFormatInfo.percentage } : null,
       isIdColumn: isId,
       isLeakageRisk: isLeakage,
       complianceNote: matchingFlag?.suggestion ?? null,

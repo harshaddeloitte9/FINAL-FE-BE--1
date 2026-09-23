@@ -1127,6 +1127,7 @@ def _build_data_profile(
     date_integrity: Dict[str, Any] = {}
     for dt_col in col_types.get("datetime", []):
         try:
+            raw_non_null = int(df[dt_col].notna().sum())
             parsed = pd.to_datetime(df[dt_col], errors="coerce")
             valid = parsed.dropna()
             if valid.empty:
@@ -1134,12 +1135,38 @@ def _build_data_profile(
             today = pd.Timestamp.today().normalize()
             future_count = int((valid > today).sum())
             ancient_count = int((valid.dt.year < 1900).sum())
+            # Values that are non-null in the raw column but failed to parse as
+            # a date at all (distinct from future/ancient, which are valid
+            # dates with an implausible value). Objective/derivable from the
+            # data itself — no business rule involved.
+            unparseable_count = int(raw_non_null - len(valid))
+            unparseable_percentage = round((unparseable_count / raw_non_null * 100) if raw_non_null else 0.0, 4)
             date_integrity[dt_col] = {
                 "min_date": str(valid.min().date()),
                 "max_date": str(valid.max().date()),
                 "future_count": future_count,
                 "ancient_count": ancient_count,
+                "unparseable_count": unparseable_count,
+                "unparseable_percentage": unparseable_percentage,
             }
+        except Exception:
+            continue
+
+    # Validity — numeric format check: non-null values in columns detected as
+    # numeric that fail pd.to_numeric coercion. Objective/derivable from the
+    # data itself (a value either parses as a number or it doesn't) — no
+    # invented range or threshold involved. Checked across every numeric
+    # column (not sampled/capped) since the operation is cheap.
+    numeric_format_errors: Dict[str, Any] = {}
+    for col in col_types.get("numeric", []):
+        try:
+            non_null = df[col].dropna()
+            if non_null.empty:
+                continue
+            parsed_numeric = pd.to_numeric(non_null, errors="coerce")
+            fail_count = int(parsed_numeric.isna().sum())
+            fail_pct = round((fail_count / len(non_null) * 100) if len(non_null) else 0.0, 4)
+            numeric_format_errors[col] = {"count": fail_count, "percentage": fail_pct}
         except Exception:
             continue
 
@@ -1299,6 +1326,7 @@ def _build_data_profile(
         "dataset_name": dataset_name,
         "leakage_risk_cols": leakage_risk_cols,
         "date_integrity": date_integrity,
+        "numeric_format_errors": numeric_format_errors,
         "missing_cells": missing_cells,
         "missing_percentage": missing_percentage,
         "missing_by_column": missing_by_column,
