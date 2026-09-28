@@ -106,6 +106,7 @@ import evaluate_new as eval_engine
 import fred_client
 import data_integration as di
 import persistence
+import business_rules
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -2566,6 +2567,32 @@ async def macro_fetch(
         "preview": _serialize_dataframe(df_with_macro, max_rows=5)["preview"],
         "shape": list(df_with_macro.shape),
     }
+
+
+@app.post("/data/business-rules/discover")
+async def business_rules_discover(
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """Phase 1 of LLM-assisted business-rule validation (Data Quality).
+
+    Ollama (local only — see business_rules._call_ollama_for_rule_discovery,
+    which deliberately does not use llm_providers.complete_with_fallback)
+    proposes candidate rules from this dataset's schema/summary metadata only.
+    Every proposal is Pydantic-validated and safety-gated before a
+    deterministic pandas engine (business_rules._evaluate_rule) — never the
+    LLM — computes real rows_checked/violation_count/violation_percentage.
+    High-confidence, executable rules are applied automatically; everything
+    else is returned as "suggested" or "invalid" for auditability, never
+    silently dropped. Fails soft (empty rule set, ollama_available=False) if
+    Ollama is unreachable, so this never breaks /data/upload or the Data
+    Quality page.
+    """
+    df = await _read_dataframe(file=file, csv_text=csv_text)
+    try:
+        return business_rules.discover_and_evaluate_rules(df)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Business rule discovery failed: {e}")
 
 
 @app.get("/models/list")

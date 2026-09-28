@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowRight, Database, UploadCloud } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { useDataset } from "@/lib/app-context";
+import { formUpload } from "@/lib/api";
 import { DatasetHealthStrip } from "@/components/data-quality/dataset-health-strip";
 import { QualityDimensionsPanel } from "@/components/data-quality/quality-dimensions-panel";
 import { TargetClassBalance } from "@/components/data-quality/target-class-balance";
@@ -25,9 +26,71 @@ export const Route = createFileRoute("/data-quality")({
 // stays out of scope here; every actionable item links back to Data
 // Preparation, which continues to answer "how should I fix it?".
 function DataQuality() {
-  const { profile, file } = useDataset();
+  const { profile, file, businessRulesResult, setBusinessRulesResult, beginBusinessRuleDiscovery } = useDataset();
   const navigate = useNavigate();
   const [selectedColumn, setSelectedColumn] = React.useState<string | null>(null);
+  const [isDiscoveringRules, setIsDiscoveringRules] = React.useState(false);
+
+  // Non-blocking follow-up to the existing profile flow (Phase 2 of business-
+  // rule validation) — mirrors the same file-or-csv_text + formUpload +
+  // context-setter pattern Data Preparation's own retarget-reprofile effect
+  // already uses. Runs at most once per dataset: a stored businessRulesResult
+  // (success OR a soft "unavailable" result) short-circuits it, and it never
+  // blocks or alters anything else this page renders. _build_data_profile()
+  // itself is never touched by this — it only calls the separate, additive
+  // POST /data/business-rules/discover endpoint.
+  //
+  // Dispatch dedup lives in DatasetProvider (beginBusinessRuleDiscovery), not
+  // in a ref on this component. This call is expensive (a blocking,
+  // multi-minute Ollama round trip on the backend), and its AbortController
+  // can only ever cancel the browser's own interest in the response — it
+  // cannot guarantee the backend never started the work. A component-local
+  // ref isn't enough to prevent a second dispatch: React 19 Strict Mode
+  // verifies real unmounts the same way it verifies mounts (disconnect ->
+  // reconnect -> disconnect), and that reconnect pass re-runs this effect
+  // against a freshly-initialized ref that has no memory of the earlier
+  // dispatch. DatasetProvider mounts once for the whole app session, so its
+  // ref survives every mount, Strict Mode double-invoke, unmount/reconnect
+  // cycle, and real remount of this route — giving "dispatched at most once
+  // per dataset" a place to live that actually outlasts this component.
+  React.useEffect(() => {
+    if (!profile || businessRulesResult) return;
+    const csvText = typeof profile.csv_text === "string" ? profile.csv_text : null;
+    const datasetKey: File | string | null = file ?? csvText;
+    if (!datasetKey) return;
+
+    const controller = beginBusinessRuleDiscovery(datasetKey);
+    if (!controller) return; // already dispatched (or in flight, or completed) for this exact dataset
+
+    setIsDiscoveringRules(true);
+    const form = new FormData();
+    if (file) {
+      form.append("file", file);
+    } else if (csvText) {
+      form.append("csv_text", csvText);
+    }
+
+    formUpload<Record<string, any>>("/data/business-rules/discover", form, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return; // superseded by a newer dataset
+        setBusinessRulesResult(result);
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return; // superseded — a later run will set the real result
+        setBusinessRulesResult({
+          rules: [],
+          applied_count: 0,
+          suggested_count: 0,
+          invalid_count: 0,
+          ollama_available: false,
+          error: err instanceof Error ? err.message : "Business rule discovery failed to run.",
+        });
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsDiscoveringRules(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, file]);
 
   if (!profile) {
     return (
@@ -111,12 +174,12 @@ function DataQuality() {
           shorter Target Class Balance card never gets stretched into a
           tall block of empty space to match its taller sibling. ────────── */}
       <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-2">
-        <QualityDimensionsPanel profile={profile} />
+        <QualityDimensionsPanel profile={profile} businessRulesResult={businessRulesResult} isDiscoveringRules={isDiscoveringRules} />
         <TargetClassBalance profile={profile} />
       </div>
 
       {/* ── Issues requiring attention ────────────────────────────────── */}
-      <IssuesTable profile={profile} />
+      <IssuesTable profile={profile} businessRulesResult={businessRulesResult} />
 
       {/* ── Column diagnostics + drill-down — stacked below xl so the
           table always gets the full content width up to that point
@@ -124,8 +187,13 @@ function DataQuality() {
           splits into a side-by-side layout once there's genuinely enough
           room for both. ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[2fr_1fr]">
-        <ColumnDiagnosticsTable profile={profile} selectedColumn={selectedColumn} onSelectColumn={setSelectedColumn} />
-        <ColumnDetailPanel profile={profile} column={selectedColumn} />
+        <ColumnDiagnosticsTable
+          profile={profile}
+          businessRulesResult={businessRulesResult}
+          selectedColumn={selectedColumn}
+          onSelectColumn={setSelectedColumn}
+        />
+        <ColumnDetailPanel profile={profile} businessRulesResult={businessRulesResult} column={selectedColumn} />
       </div>
 
       {/* ── Navigation — same Button component and Back/Continue pairing

@@ -50,15 +50,20 @@ export async function api<T = unknown>(
 
 /**
  * Upload a FormData payload. Does not override Content-Type so the browser
- * can set multipart boundaries correctly.
+ * can set multipart boundaries correctly. `signal` is optional and lets a
+ * caller abort an in-flight request (e.g. from a React effect's cleanup, so
+ * StrictMode's dev-mode double-invoke — or a real unmount/param change —
+ * cancels the superseded request instead of leaving two concurrent calls
+ * in flight against a backend that can only usefully handle one).
  */
-export async function formUpload<T = unknown>(path: string, form: FormData): Promise<T> {
+export async function formUpload<T = unknown>(path: string, form: FormData, signal?: AbortSignal): Promise<T> {
   const url = `${EFFECTIVE_BASE}${path}`;
   console.log("formUpload: POST", url);
   try {
     const res = await fetch(url, {
       method: "POST",
       body: form,
+      signal,
     });
     console.log("formUpload: response status", res.status);
     const text = await res.text();

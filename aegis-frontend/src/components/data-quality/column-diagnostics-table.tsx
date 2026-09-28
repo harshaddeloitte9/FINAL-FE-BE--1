@@ -9,14 +9,16 @@ import { buildColumnDiagnostics } from "./selectors";
 // could be mistaken for "checked and clean".
 export function ColumnDiagnosticsTable({
   profile,
+  businessRulesResult,
   selectedColumn,
   onSelectColumn,
 }: {
   profile: any;
+  businessRulesResult?: any;
   selectedColumn: string | null;
   onSelectColumn: (column: string) => void;
 }) {
-  const columns = buildColumnDiagnostics(profile);
+  const columns = buildColumnDiagnostics(profile, businessRulesResult);
 
   if (columns.length === 0) {
     return (

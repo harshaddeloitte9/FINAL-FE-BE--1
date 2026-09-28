@@ -10,11 +10,12 @@ const SEVERITY_STYLES: Record<IssueRow["severity"], string> = {
   INFO: "bg-slate-100 text-slate-600 border-slate-200",
 };
 
-// Every row here comes from a real signal already present on the profile
-// (see selectors.ts::buildIssues) — never an example/placeholder row, and
-// never a fabricated record count.
-export function IssuesTable({ profile }: { profile: any }) {
-  const issues = buildIssues(profile);
+// Every row here comes from a real signal already present on the profile, or
+// (for Consistency rows) from an applied, deterministically-evaluated
+// business rule on businessRulesResult — see selectors.ts::buildIssues.
+// Never an example/placeholder row, and never a fabricated record count.
+export function IssuesTable({ profile, businessRulesResult }: { profile: any; businessRulesResult?: any }) {
+  const issues = buildIssues(profile, businessRulesResult);
   const navigate = useNavigate();
 
   return (
@@ -22,7 +23,7 @@ export function IssuesTable({ profile }: { profile: any }) {
       <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-6 py-4">
         <div>
           <h3 className="text-base font-semibold text-slate-900">Issues Requiring Attention</h3>
-          <p className="mt-0.5 text-[13px] text-slate-500">Derived from this dataset's real completeness, uniqueness, target, leakage, date, and compliance signals.</p>
+          <p className="mt-0.5 text-[13px] text-slate-500">Derived from this dataset's real completeness, uniqueness, target, leakage, date, business-rule, and compliance signals.</p>
         </div>
         {issues.length > 0 && (
           <span className="whitespace-nowrap rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-blue-700">
@@ -38,7 +39,7 @@ export function IssuesTable({ profile }: { profile: any }) {
           </div>
           <div className="text-sm font-semibold text-slate-900">No data quality issues detected</div>
           <p className="max-w-sm text-sm text-slate-500">
-            None of the completeness, uniqueness, target, leakage, date, or compliance signals Aegis currently checks found a problem in this dataset.
+            None of the completeness, uniqueness, target, leakage, date, business-rule, or compliance signals Aegis currently checks found a problem in this dataset.
           </p>
         </div>
       ) : (

@@ -48,6 +48,7 @@ type DatasetState = {
   compareModels?: string[] | null;
   preprocessingResult?: Record<string, any> | null;
   featureEngineeringResult?: Record<string, any> | null;
+  businessRulesResult?: Record<string, any> | null;
   trainingConfig?: TrainingConfig | null;
   trainingResult?: TrainingResult | null;
   comparisonResults?: ComparisonResult[] | null;
@@ -69,6 +70,10 @@ type DatasetState = {
   setSelectedModel: (model: ModelRecommendation | null) => void;
   setPreprocessingResult: (result: Record<string, any> | null) => void;
   setFeatureEngineeringResult: (result: Record<string, any> | null) => void;
+  setBusinessRulesResult: (result: Record<string, any> | null) => void;
+  // Single source of truth for "has business-rule discovery already been
+  // dispatched for this dataset" — see beginBusinessRuleDiscovery below.
+  beginBusinessRuleDiscovery: (datasetKey: File | string) => AbortController | null;
   setTrainingConfig: (config: TrainingConfig | null) => void;
   setTrainingResult: (result: TrainingResult | null) => void;
   setComparisonResults: (results: ComparisonResult[] | null) => void;
@@ -101,6 +106,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
   const [compareModels, setCompareModelsState] = React.useState<string[] | null>(null);
   const [preprocessingResult, setPreprocessingResultState] = React.useState<Record<string, any> | null>(null);
   const [featureEngineeringResult, setFeatureEngineeringResultState] = React.useState<Record<string, any> | null>(null);
+  const [businessRulesResult, setBusinessRulesResultState] = React.useState<Record<string, any> | null>(null);
   const [trainingConfig, setTrainingConfigState] = React.useState<TrainingConfig | null>(null);
   const [trainingResult, setTrainingResultState] = React.useState<TrainingResult | null>(null);
   const [comparisonResults, setComparisonResultsState] = React.useState<ComparisonResult[] | null>(null);
@@ -136,6 +142,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
         recommendations?: ModelRecommendation[] | null;
         preprocessingResult?: Record<string, any> | null;
         featureEngineeringResult?: Record<string, any> | null;
+        businessRulesResult?: Record<string, any> | null;
         trainingConfig?: TrainingConfig | null;
         trainingResult?: TrainingResult | null;
         comparisonResults?: ComparisonResult[] | null;
@@ -171,6 +178,9 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       }
       if (parsed.featureEngineeringResult) {
         setFeatureEngineeringResultState(parsed.featureEngineeringResult);
+      }
+      if (parsed.businessRulesResult) {
+        setBusinessRulesResultState(parsed.businessRulesResult);
       }
       if (parsed.trainingConfig) {
         setTrainingConfigState(parsed.trainingConfig);
@@ -246,6 +256,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       recommendations,
       preprocessingResult,
       featureEngineeringResult,
+      businessRulesResult,
       trainingConfig,
       trainingResult: trainingResult ? trainingResultToPersist : null,
       comparisonResults,
@@ -277,6 +288,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     recommendations,
     preprocessingResult,
     featureEngineeringResult,
+    businessRulesResult,
     trainingConfig,
     trainingResult,
     comparisonResults,
@@ -305,6 +317,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setCompareModelsState(null);
     setPreprocessingResultState(null);
     setFeatureEngineeringResultState(null);
+    setBusinessRulesResultState(null);
     setTrainingConfigState(null);
     setTrainingResultState(null);
     setComparisonResultsState(null);
@@ -329,6 +342,42 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
 
   const setFeatureEngineeringResult = React.useCallback((result: Record<string, any> | null) => {
     setFeatureEngineeringResultState(result);
+  }, []);
+
+  const setBusinessRulesResult = React.useCallback((result: Record<string, any> | null) => {
+    setBusinessRulesResultState(result);
+  }, []);
+
+  // Owns the business-rule discovery dispatch lifecycle for the current
+  // dataset. This has to live here (in the provider, which mounts once for
+  // the whole app session) rather than as a useRef inside the DataQuality
+  // route component: React 19 Strict Mode verifies real unmounts the same
+  // way it verifies mounts (disconnect -> reconnect -> disconnect), and that
+  // reconnect pass runs the route component's effect against a genuinely
+  // fresh set of hooks — a component-instance-local ref has no way to know
+  // about a dispatch made by a prior instance. A ref owned by this
+  // never-unmounted provider is what actually gives "dispatched at most once
+  // per dataset" a stable place to live across every mount, Strict Mode
+  // double-invoke, unmount/reconnect cycle, and real remount.
+  //
+  // The AbortController itself is deliberately kept in this ref rather than
+  // in state — it's a mutable, non-serializable runtime handle, not
+  // something a re-render should ever depend on.
+  const businessRuleDiscoveryRef = React.useRef<{ key: File | string; controller: AbortController } | null>(null);
+
+  const beginBusinessRuleDiscovery = React.useCallback((datasetKey: File | string): AbortController | null => {
+    if (businessRuleDiscoveryRef.current?.key === datasetKey) {
+      // Already dispatched (or in flight, or completed) for this exact
+      // dataset. Leave whatever is already tracked alone — do not dispatch
+      // again and do not abort it.
+      return null;
+    }
+    // A genuinely different dataset: whatever was tracked for the previous
+    // one is now stale, so cancel it before starting the new one.
+    businessRuleDiscoveryRef.current?.controller.abort();
+    const controller = new AbortController();
+    businessRuleDiscoveryRef.current = { key: datasetKey, controller };
+    return controller;
   }, []);
 
   const setTrainingConfig = React.useCallback((config: TrainingConfig | null) => {
@@ -399,6 +448,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     setCompareModelsState(null);
     setPreprocessingResultState(null);
     setFeatureEngineeringResultState(null);
+    setBusinessRulesResultState(null);
     setTrainingConfigState(null);
     setTrainingResultState(null);
     setComparisonResultsState(null);
@@ -433,6 +483,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       compareModels,
       preprocessingResult,
       featureEngineeringResult,
+      businessRulesResult,
       trainingConfig,
       trainingResult,
       comparisonResults,
@@ -456,6 +507,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setCompareModels,
       setPreprocessingResult,
       setFeatureEngineeringResult,
+      setBusinessRulesResult,
+      beginBusinessRuleDiscovery,
       setTrainingConfig,
       setTrainingResult,
       setComparisonResults,
@@ -480,6 +533,7 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       compareModels,
       preprocessingResult,
       featureEngineeringResult,
+      businessRulesResult,
       trainingConfig,
       trainingResult,
       comparisonResults,
@@ -502,6 +556,8 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
       setCompareModels,
       setPreprocessingResult,
       setFeatureEngineeringResult,
+      setBusinessRulesResult,
+      beginBusinessRuleDiscovery,
       setTrainingConfig,
       setTrainingResult,
       setComparisonResults,

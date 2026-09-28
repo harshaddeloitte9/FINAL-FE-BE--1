@@ -114,11 +114,135 @@ export function getValidity(profile: any): DimensionResult {
   return { status, headline, evidence };
 }
 
-export function getConsistency(): DimensionResult {
+// ── Business rules (Phase 2) — LLM-discovered, deterministically evaluated ──
+// Ollama only ever PROPOSES a rule from this dataset's schema/metadata (see
+// 24-06/business_rules.py::summarize_dataframe_for_llm). The violation
+// numbers below (rows_checked/violation_count/violation_percentage) are
+// computed exclusively by that module's deterministic pandas evaluator and
+// echoed back verbatim by POST /data/business-rules/discover — nothing here
+// recomputes or second-guesses them, exactly like every other selector in
+// this file treats the backend profile as the sole source of truth.
+export type BusinessRuleStatus = "applied" | "suggested" | "invalid";
+
+export interface BusinessRule {
+  rule_id: string;
+  type: string | null;
+  columns: string[];
+  operator: Record<string, any> | null;
+  condition_display: string;
+  rationale: string;
+  confidence: number | null;
+  source: string;
+  status: BusinessRuleStatus;
+  reason: string | null;
+  applied: boolean;
+  rows_checked: number | null;
+  violation_count: number | null;
+  violation_percentage: number | null;
+  sample_violation_indices?: number[] | null;
+  evaluated_at: string;
+}
+
+export interface BusinessRulesState {
+  evaluated: boolean;
+  ollamaAvailable: boolean;
+  rules: BusinessRule[];
+  appliedRules: BusinessRule[];
+  suggestedRules: BusinessRule[];
+  invalidRules: BusinessRule[];
+  violatedRules: BusinessRule[];
+  error: string | null;
+}
+
+const EMPTY_BUSINESS_RULES_STATE: BusinessRulesState = {
+  evaluated: false,
+  ollamaAvailable: false,
+  rules: [],
+  appliedRules: [],
+  suggestedRules: [],
+  invalidRules: [],
+  violatedRules: [],
+  error: null,
+};
+
+// businessRulesResult is the raw JSON POST /data/business-rules/discover
+// returned (stored as-is on DatasetState.businessRulesResult) — `undefined`/
+// `null` means discovery simply hasn't run yet for this dataset, which is
+// deliberately distinct from "ran and found nothing" or "ran and failed".
+export function getBusinessRulesState(businessRulesResult: any): BusinessRulesState {
+  if (!businessRulesResult || typeof businessRulesResult !== "object") {
+    return EMPTY_BUSINESS_RULES_STATE;
+  }
+  const rules: BusinessRule[] = Array.isArray(businessRulesResult.rules) ? businessRulesResult.rules : [];
+  const appliedRules = rules.filter((r) => r?.status === "applied");
+  const suggestedRules = rules.filter((r) => r?.status === "suggested");
+  const invalidRules = rules.filter((r) => r?.status === "invalid");
+  const violatedRules = appliedRules.filter((r) => (r.violation_count ?? 0) > 0);
   return {
-    status: "not_evaluated",
-    headline: "Not evaluated",
-    evidence: "Cross-column consistency checks are not yet implemented in Aegis (Phase 2 of the Data Quality proposal).",
+    evaluated: true,
+    ollamaAvailable: Boolean(businessRulesResult.ollama_available),
+    rules,
+    appliedRules,
+    suggestedRules,
+    invalidRules,
+    violatedRules,
+    error: typeof businessRulesResult.error === "string" ? businessRulesResult.error : null,
+  };
+}
+
+// Consistency — home for cross-column LLM-discovered business rules (e.g.
+// issue_date <= expiry_date). Only APPLIED rules (high confidence, passed the
+// backend's safety gate, deterministically evaluated) ever move this
+// dimension's status off "not_evaluated" — suggested/invalid rules are
+// surfaced in the UI but never imply a pass or fail here, matching the same
+// "not_evaluated is not healthy" discipline already used by getValidity().
+export function getConsistency(businessRulesResult: any, isDiscovering?: boolean): DimensionResult {
+  if (isDiscovering) {
+    return {
+      status: "not_evaluated",
+      headline: "Discovering…",
+      evidence: "Discovering cross-column business rules for this dataset…",
+    };
+  }
+
+  const state = getBusinessRulesState(businessRulesResult);
+
+  if (!state.evaluated) {
+    return {
+      status: "not_evaluated",
+      headline: "Not evaluated",
+      evidence: "Cross-column business-rule discovery has not run for this dataset yet.",
+    };
+  }
+
+  if (!state.ollamaAvailable) {
+    return {
+      status: "not_evaluated",
+      headline: "Not evaluated",
+      evidence: "Business-rule discovery unavailable. No business-rule evaluation was performed.",
+    };
+  }
+
+  if (state.appliedRules.length === 0) {
+    return {
+      status: "not_evaluated",
+      headline: "Not evaluated",
+      evidence: "No applicable cross-column business rules were identified for this dataset.",
+    };
+  }
+
+  const ruleCount = state.appliedRules.length;
+  const ruleLabel = `${ruleCount} business rule${ruleCount === 1 ? "" : "s"} evaluated`;
+
+  if (state.violatedRules.length === 0) {
+    return { status: "healthy", headline: ruleLabel, evidence: `${ruleLabel} — no violations detected.` };
+  }
+
+  const totalViolations = state.violatedRules.reduce((sum, r) => sum + (r.violation_count ?? 0), 0);
+  return {
+    status: "review",
+    headline: ruleLabel,
+    evidence: `${ruleLabel} — ${totalViolations.toLocaleString()} violation${totalViolations === 1 ? "" : "s"} detected.`,
   };
 }
 
@@ -236,8 +360,11 @@ export interface IssueRow {
 const SEVERITY_ORDER: Record<IssueRow["severity"], number> = { CRITICAL: 0, HIGH: 1, WARNING: 2, INFO: 3 };
 
 // Builds real issue rows only from signals the profile actually contains —
-// no example/placeholder rows, no invented record counts.
-export function buildIssues(profile: any): IssueRow[] {
+// no example/placeholder rows, no invented record counts. `businessRulesResult`
+// is optional and, when provided, contributes only APPLIED rules that actually
+// have real (backend-computed) violations — suggested/invalid rules never
+// appear here, matching getConsistency()'s same rule.
+export function buildIssues(profile: any, businessRulesResult?: any): IssueRow[] {
   const issues: IssueRow[] = [];
   const rows = getRows(profile);
   const rowsLabel = rows !== null ? rows.toLocaleString() : "—";
@@ -369,6 +496,25 @@ export function buildIssues(profile: any): IssueRow[] {
       });
     });
 
+  // Business rules — cross-column rules the LLM discovered and Python
+  // deterministically applied. Only rules with real (non-zero) violation
+  // counts become issues; a rule applied with zero violations is good news,
+  // not something requiring attention.
+  const { violatedRules } = getBusinessRulesState(businessRulesResult);
+  violatedRules.forEach((rule) => {
+    const p = rule.violation_percentage ?? 0;
+    const count = rule.violation_count ?? 0;
+    issues.push({
+      id: `business-rule-${rule.rule_id}`,
+      severity: p > 5 ? "WARNING" : "INFO",
+      dimension: "Consistency",
+      issue: `${count.toLocaleString()} record${count === 1 ? "" : "s"} violate: ${rule.condition_display}`,
+      column: rule.columns.join(", "),
+      recordsAffected: count.toLocaleString(),
+      action: "Review in Data Preparation",
+    });
+  });
+
   const { flags } = getComplianceState(profile);
   flags.forEach((flag: any, i: number) => {
     const sev: IssueRow["severity"] = flag?.severity === "high" ? "CRITICAL" : flag?.severity === "medium" ? "WARNING" : "INFO";
@@ -405,6 +551,7 @@ export interface ColumnDiagnostic {
   isIdColumn: boolean;
   isLeakageRisk: boolean;
   complianceNote: string | null;
+  businessRules: BusinessRule[];
   status: DqStatus;
 }
 
@@ -412,7 +559,9 @@ export interface ColumnDiagnostic {
 // record _build_data_profile already returns), cross-referenced against
 // outlier_analysis / date_integrity / col_types / leakage_risk_cols /
 // agent2_flags_data for the same column name — never a second calculation.
-export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
+// `businessRulesResult` (optional) adds a third source, POST /data/business-
+// rules/discover, cross-referenced the same way by column name.
+export function buildColumnDiagnostics(profile: any, businessRulesResult?: any): ColumnDiagnostic[] {
   const dataDictionary: any[] = Array.isArray(profile?.data_dictionary) ? profile.data_dictionary : [];
   const outlierAnalysis = profile?.outlier_analysis && typeof profile.outlier_analysis === "object" ? profile.outlier_analysis : {};
   const dateIntegrity = profile?.date_integrity && typeof profile.date_integrity === "object" ? profile.date_integrity : {};
@@ -423,6 +572,7 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
   const { cols: leakageCols } = getLeakageEvaluation(profile);
   const leakageSet = new Set(leakageCols);
   const { flags } = getComplianceState(profile);
+  const { appliedRules } = getBusinessRulesState(businessRulesResult);
 
   return dataDictionary.map((row) => {
     const col = row.Column as string;
@@ -436,6 +586,8 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
     const hasOutlierIssue = Boolean(outlierInfo?.has_outliers);
     const hasNumericFormatIssue = Boolean(numericFormatInfo && numericFormatInfo.count > 0);
     const hasDateParseIssue = Boolean(dInfo && (dInfo.unparseable_count ?? 0) > 0);
+    const columnBusinessRules = appliedRules.filter((r) => Array.isArray(r.columns) && r.columns.includes(col));
+    const hasBusinessRuleViolation = columnBusinessRules.some((r) => (r.violation_count ?? 0) > 0);
     const matchingFlag = flags.find((f: any) => {
       const observed = f?.observed_value;
       return Array.isArray(observed) ? observed.includes(col) : observed === col;
@@ -445,6 +597,7 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
       hasOutlierIssue ||
       hasNumericFormatIssue ||
       hasDateParseIssue ||
+      hasBusinessRuleViolation ||
       isLeakage ||
       Boolean(matchingFlag)
         ? "review"
@@ -477,6 +630,7 @@ export function buildColumnDiagnostics(profile: any): ColumnDiagnostic[] {
       isIdColumn: isId,
       isLeakageRisk: isLeakage,
       complianceNote: matchingFlag?.suggestion ?? null,
+      businessRules: columnBusinessRules,
       status,
     };
   });

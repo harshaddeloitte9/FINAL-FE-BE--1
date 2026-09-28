@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight, Columns3, Fingerprint, ShieldAlert } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { StatusBadge } from "./status-badge";
 import { buildColumnDiagnostics } from "./selectors";
 
@@ -17,8 +18,16 @@ function DetailRow({ label, value }: { label: string; value: ReactNode }) {
 // actually contains for it. No recommendation is invented: the only
 // suggestion ever shown is a real agent2 compliance-flag suggestion that
 // names this column, when one exists.
-export function ColumnDetailPanel({ profile, column }: { profile: any; column: string | null }) {
-  const columns = buildColumnDiagnostics(profile);
+export function ColumnDetailPanel({
+  profile,
+  businessRulesResult,
+  column,
+}: {
+  profile: any;
+  businessRulesResult?: any;
+  column: string | null;
+}) {
+  const columns = buildColumnDiagnostics(profile, businessRulesResult);
   const detail = column ? columns.find((c) => c.column === column) : null;
 
   if (!detail) {
@@ -105,6 +114,25 @@ export function ColumnDetailPanel({ profile, column }: { profile: any; column: s
         <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/60 p-3 text-[13px] leading-snug text-blue-800">
           <span className="font-semibold">Compliance suggestion: </span>
           {detail.complianceNote}
+        </div>
+      )}
+
+      {detail.businessRules.length > 0 && (
+        <div className="mt-4">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Business Rules</div>
+          <div className="mt-2 space-y-2">
+            {detail.businessRules.map((rule) => {
+              const violationCount = rule.violation_count ?? 0;
+              return (
+                <div key={rule.rule_id} className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-[12.5px]">
+                  <div className="font-mono text-slate-700">{rule.condition_display}</div>
+                  <div className={cn("mt-1", violationCount > 0 ? "text-amber-700" : "text-emerald-700")}>
+                    Status: {violationCount > 0 ? `${violationCount.toLocaleString()} violation${violationCount === 1 ? "" : "s"}` : "No violations"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
