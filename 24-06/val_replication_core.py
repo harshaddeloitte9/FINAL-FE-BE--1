@@ -18,7 +18,26 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, roc_curve
 
 from utils import detect_column_types, detect_target_candidates, detect_task_type
-from preprocessing_new import prepare_data, rebuild_preprocessor_for
+from preprocessing_new import build_preprocessing_report, prepare_data, rebuild_preprocessor_for
+import split_integrity as si
+import stability_checks as stability
+
+
+def _temporal_evidence(df: pd.DataFrame, y_test, y_proba, criteria: Dict[str, Any], date_col: Optional[str] = None) -> Dict[str, Any]:
+    """Time-based performance of the model's own test predictions, when the
+    data has a usable date column (same detection the stress suite uses)."""
+    try:
+        from validation_stress_core import _detect_date_column
+        col = _detect_date_column(df, hint=date_col)
+        if col is None:
+            return {"available": False, "reason": "No date column in the evaluation data."}
+        dates = df.loc[y_test.index, col] if hasattr(y_test, "index") else None
+        result = stability.temporal_performance(np.asarray(y_test), np.asarray(y_proba), dates, criteria)
+        result["date_col"] = col
+        return result
+    except Exception as exc:
+        # A failure here must not discard the rest of the stability evidence.
+        return {"available": False, "reason": f"Time-based comparison failed: {type(exc).__name__}: {exc}"}
 from feature_engineering import analyze_for_feature_engineering, apply_feature_engineering
 from train_new import split_data, compute_split_stats, train_model
 from evaluate_new import compute_binary_metrics
@@ -249,6 +268,7 @@ def _fit_core(
         # replicated feature set matches what the real model was built on.
         X_train, X_val, X_test_eng = X_train_raw, X_val_raw, X_test_raw
         fe_summary = None
+        fe_plan = None
         prep_report_fe = prep_report
 
     model_cls, default_params = _resolve_model_class(model_name)
@@ -306,7 +326,60 @@ def _fit_core(
         "metrics": metrics, "split_stats": split_stats,
         "use_feature_engineering": use_feature_engineering,
         "model_params_used": merged_params,
+        # Evidence for R4.7 (split_integrity): the validation split, the
+        # pre-feature-engineering splits and the FE plan actually used.
+        "X_val": X_val, "y_val": y_val,
+        "X_train_raw": X_train_raw, "X_test_raw": X_test_raw,
+        "fe_plan": fe_plan,
     }
+
+
+def unregistered_split_integrity(fit: Dict[str, Any], target_col: str, test_size: float,
+                                 val_size: float, random_seed: int) -> Dict[str, Any]:
+    """R4.7 evidence for an unregistered refit (see split_integrity.py).
+
+    S3 is the important one on this path: prepare_data() derives the
+    preprocessing DESIGN (transform/encoding choices) from the full dataset
+    before splitting. S3 rebuilds the design from the training rows only and
+    checks the resulting test-set transform is identical — i.e. the test
+    rows did not change any preprocessing decision."""
+    X_train, X_test, y_train, y_test = fit["X_train"], fit["X_test"], fit["y_train"], fit["y_test"]
+    pipeline, col_types, task_type = fit["pipeline"], fit["col_types"], fit["task_type"]
+
+    def _training_only_design_transform():
+        report = build_preprocessing_report(fit["X_train_raw"].assign(**{target_col: y_train}), col_types, target_col)
+        live = set(X_train.columns)
+        report["numeric"] = {c: v for c, v in report.get("numeric", {}).items() if c in live}
+        report["categorical"] = {c: v for c, v in report.get("categorical", {}).items() if c in live}
+        return rebuild_preprocessor_for(X_train, col_types, target_col, report).fit(X_train, y_train).transform(X_test)
+
+    def _training_only_model_scores():
+        refit, _, _ = train_model(
+            X_train, y_train, col_types=col_types, target_col=target_col, prep_report=fit["prep_report_fe"],
+            model=fit["model_cls"](**fit["model_params_used"]), use_cv=False, task_type=task_type,
+        )
+        return refit.predict_proba(X_test)[:, 1]
+
+    subchecks = [
+        si.check_disjoint(X_train.index, fit["X_val"].index, X_test.index),
+        si.check_duplicate_records(fit["X_train_raw"], y_train, fit["X_test_raw"], y_test),
+        si.check_component("S3", "Preprocessing depends on training rows only",
+                           lambda: pipeline.named_steps["preprocessor"].transform(X_test),
+                           _training_only_design_transform, "Preprocessing (design and fitted statistics)"),
+        si.check_component("S4", "Model fitted on training rows only",
+                           lambda: pipeline.predict_proba(X_test)[:, 1],
+                           _training_only_model_scores, "The model's predicted probabilities"),
+        si.check_fe_plan(fit["fe_plan"],
+                         (lambda: analyze_for_feature_engineering(fit["X_train_raw"], y_train, col_types, task_type))
+                         if fit["fe_plan"] is not None else None,
+                         bool(fit["use_feature_engineering"])),
+        si.check_split_reproducible(
+            X_test.index,
+            lambda: split_data(fit["X"], fit["y"], test_size=test_size, val_size=val_size,
+                               task_type=task_type, random_state=random_seed)[2].index,
+        ),
+    ]
+    return si.build_r47(subchecks)
 
 
 def run_replication(
@@ -322,6 +395,7 @@ def run_replication(
     use_feature_engineering: bool = False,
     model_params: Optional[Dict[str, Any]] = None,
     compute_seed_stability: bool = True,
+    compute_split_integrity: bool = True,
 ) -> Dict[str, Any]:
     # Wraps the original _run_replication but returns JSON-serializable outputs
     out = {
@@ -329,6 +403,10 @@ def run_replication(
         "error": None,
         "metrics": {},
         "seed_aucs": [],
+        "seed_runs": [],
+        "ablation_runs": [],
+        "split_integrity": None,
+        "stability": None,
         "cv_mean_auc": None,
         "split_stats": {},
         "timing_s": 0.0,
@@ -392,8 +470,17 @@ def run_replication(
             "prep_report": prep_report,
             "prep_report_fe": prep_report_fe,
         })
+        if compute_split_integrity:
+            try:
+                out["split_integrity"] = unregistered_split_integrity(fit, target_col, test_size, val_size, random_seed)
+            except Exception as exc:
+                out["split_integrity"] = si.r47_not_assessed(f"Split evidence could not be evaluated: {type(exc).__name__}: {exc}")
 
-        seed_aucs = []
+        # Seed stability: one independent execution per seed — a fresh split
+        # with that seed, a fresh model instance, a fresh fit — each recorded
+        # (seed, status, AUC or error). Failed executions are reported, not
+        # silently dropped; seed_aucs keeps the completed AUCs for display.
+        seed_runs: List[Dict[str, Any]] = []
         # Seed-stability re-training is only consumed by the Replication
         # tab's own report (seed_aucs/cv_mean_auc) — the Stress & Backtesting
         # endpoints reuse this function purely for the fitted pipeline +
@@ -401,51 +488,80 @@ def run_replication(
         # compute_seed_stability=False to skip these `len(seeds)` extra full
         # model trainings (previously run and thrown away on every stress
         # suite request, which is why that page was slow).
+        def _seed_execution(s: int) -> Dict[str, Any]:
+            """One independent repeated run: stratified re-split with seed s,
+            fresh feature engineering, fresh model, fresh fit; then the R4.5 /
+            R4.6 evidence on that run's held-out rows (stability_checks)."""
+            Xtr_s, Xv_s, Xte_s, ytr_s, yv_s, yte_s = split_data(
+                X, y,
+                test_size=test_size,
+                val_size=val_size,
+                task_type=task_type,
+                random_state=s,
+            )
+            if use_feature_engineering:
+                fe_plan_s = analyze_for_feature_engineering(
+                    Xtr_s, ytr_s, col_types, task_type
+                )
+                Xtr_fe_s, _ = apply_feature_engineering(Xtr_s, fe_plan_s)
+                Xte_fe_s, _ = apply_feature_engineering(Xte_s, fe_plan_s)
+
+                live_s = set(Xtr_fe_s.columns)
+                prep_report_s = _copy.deepcopy(prep_report)
+                prep_report_s["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_s}
+                prep_report_s["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_s}
+            else:
+                Xtr_fe_s, Xte_fe_s = Xtr_s, Xte_s
+                prep_report_s = prep_report
+
+            m_s = model_cls(**default_params)
+            pipe_s, _, _ = train_model(
+                Xtr_fe_s, ytr_s,
+                col_types=col_types,
+                target_col=target_col,
+                prep_report=prep_report_s,
+                model=m_s,
+                use_cv=False,
+                task_type=task_type,
+            )
+            if _proba_1d(pipe_s, Xte_fe_s) is None:
+                raise RuntimeError("Model returned no predicted probabilities.")
+            return stability.evaluate_run(s, pipe_s, Xtr_fe_s, Xte_fe_s, yte_s, criteria)
+
         if compute_seed_stability:
+            criteria = stability.load_criteria()
             for s in seeds:
                 try:
-                    Xtr_s, Xv_s, Xte_s, ytr_s, yv_s, yte_s = split_data(
-                        X, y,
-                        test_size=test_size,
-                        val_size=val_size,
-                        task_type=task_type,
-                        random_state=s,
-                    )
-                    if use_feature_engineering:
-                        fe_plan_s = analyze_for_feature_engineering(
-                            Xtr_s, ytr_s, col_types, task_type
-                        )
-                        Xtr_fe_s, _ = apply_feature_engineering(Xtr_s, fe_plan_s)
-                        Xte_fe_s, _ = apply_feature_engineering(Xte_s, fe_plan_s)
+                    seed_runs.append(_seed_execution(s))
+                except Exception as exc:
+                    seed_runs.append(stability.failed_run(s, exc))
+            first_ok = next((r for r in seed_runs if r["status"] == "COMPLETED"), None)
+            repeat = None
+            if first_ok is not None:
+                try:
+                    repeat = _seed_execution(first_ok["seed"])
+                except Exception as exc:
+                    repeat = stability.failed_run(first_ok["seed"], exc)
+            r46c = criteria["r46"]
+            out["stability"] = {
+                "runs": seed_runs,
+                "determinism": stability.determinism_check(first_ok, repeat),
+                # The model's own test-set AUC with a stratified-bootstrap CI.
+                "main_evaluation": stability.stratified_bootstrap_auc(
+                    y_test.values, y_proba, r46c["bootstrap_iterations"], int(r46c["bootstrap_seed"]), float(r46c["confidence_level"])),
+                "temporal": _temporal_evidence(df, y_test, y_proba, criteria),
+            }
+        out["seed_runs"] = seed_runs
+        out["seed_aucs"] = [r["auc"] for r in seed_runs if r["status"] == "COMPLETED"]
 
-                        live_s = set(Xtr_fe_s.columns)
-                        prep_report_s = _copy.deepcopy(prep_report)
-                        prep_report_s["numeric"] = {c: v for c, v in prep_report.get("numeric", {}).items() if c in live_s}
-                        prep_report_s["categorical"] = {c: v for c, v in prep_report.get("categorical", {}).items() if c in live_s}
-                    else:
-                        Xtr_fe_s, Xte_fe_s = Xtr_s, Xte_s
-                        prep_report_s = prep_report
-
-                    m_s = model_cls(**default_params)
-                    pipe_s, _, _ = train_model(
-                        Xtr_fe_s, ytr_s,
-                        col_types=col_types,
-                        target_col=target_col,
-                        prep_report=prep_report_s,
-                        model=m_s,
-                        use_cv=False,
-                        task_type=task_type,
-                    )
-                    proba_s = _proba_1d(pipe_s, Xte_fe_s)
-                    if proba_s is not None:
-                        seed_aucs.append(round(float(roc_auc_score(yte_s.values, proba_s)), 4))
-                except Exception:
-                    pass
-        out["seed_aucs"] = seed_aucs
-
+        # Feature ablation: for every model input feature, drop it, rebuild
+        # the preprocessing for the remaining columns, retrain a fresh model,
+        # re-score the same test rows and take the AUC difference from the
+        # baseline. Every attempt is recorded, including failures.
         feat_cols = list(X_test_eng.columns)
         base_auc = float(metrics.get("roc_auc", 0))
         ablation = {}
+        ablation_runs: List[Dict[str, Any]] = []
         for col in feat_cols:
             try:
                 X_abl = X_test_eng.drop(columns=[col])
@@ -465,12 +581,19 @@ def run_replication(
                     task_type=task_type,
                 )
                 proba_abl = _proba_1d(pipe_abl, X_abl)
-                if proba_abl is not None:
-                    abl_auc = float(roc_auc_score(y_test.values, proba_abl))
-                    ablation[col] = round(base_auc - abl_auc, 4)
-            except Exception:
-                ablation[col] = float("nan")
+                if proba_abl is None:
+                    raise RuntimeError("Model returned no predicted probabilities.")
+                abl_auc = float(roc_auc_score(y_test.values, proba_abl))
+                ablation[col] = round(base_auc - abl_auc, 4)
+                ablation_runs.append({
+                    "feature": col, "status": "COMPLETED", "baseline_auc": round(base_auc, 4),
+                    "auc_without_feature": round(abl_auc, 4), "auc_drop": ablation[col],
+                    "features_used": int(X_tr_abl.shape[1]), "feature_removed": col not in X_tr_abl.columns,
+                })
+            except Exception as exc:
+                ablation_runs.append({"feature": col, "status": "FAILED", "error": f"{type(exc).__name__}: {exc}"})
         out["ablation"] = ablation
+        out["ablation_runs"] = ablation_runs
 
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
@@ -537,9 +660,12 @@ def run_bias_check(
         groups = sorted(bias_vals.unique())
 
         rows = []
+        excluded_groups = []
         for grp in groups:
             mask = (bias_vals == grp).values
             if mask.sum() < 10:
+                # Reported, not silently dropped.
+                excluded_groups.append({"Group": grp, "Count": int(mask.sum()), "reason": "Fewer than 10 test records"})
                 continue
             y_grp = y_test.values[mask]
             p_grp = y_proba[mask]
@@ -557,6 +683,8 @@ def run_bias_check(
 
         out["success"] = True
         out["rows"] = rows
+        out["excluded_groups"] = excluded_groups
+        out["groups_without_auc"] = [r["Group"] for r in rows if r["AUC"] is None]
 
         auc_vals = [r["AUC"] for r in rows if r["AUC"] is not None]
         if len(auc_vals) >= 2:
@@ -585,14 +713,30 @@ def run_bias_check(
                 "threshold": "AUC gap across protected groups < 0.05",
                 "detail": "",
             }
+        if out["check"] and excluded_groups:
+            out["check"]["observed"] += (
+                f"; {len(excluded_groups)} group(s) with fewer than 10 test records not assessed: "
+                + ", ".join(f"{g['Group']} ({g['Count']})" for g in excluded_groups)
+            )
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
 
     return out
 
 
-def evaluate_replication_checks(result: Dict[str, Any], reported: Dict[str, Any], seeds: List[int]) -> List[Dict[str, Any]]:
+def evaluate_replication_checks(
+    result: Dict[str, Any],
+    reported: Dict[str, Any],
+    seeds: List[int],
+    comparator_label: str = "Reported",
+) -> List[Dict[str, Any]]:
+    """`reported` is the comparator R4.2/R4.3/R4.4/R4.8 test against.
+    `comparator_label` names it in the output: "Reported" (developer-reported
+    reference, the default) or "Original model" (registered-model
+    reproduction, where the comparator is the original model's own
+    performance)."""
     checks: List[Dict[str, Any]] = []
+    cmp_label = comparator_label
 
     rep_auc = result.get("metrics", {}).get("roc_auc")
     rep_gini = result.get("metrics", {}).get("gini")
@@ -613,9 +757,9 @@ def evaluate_replication_checks(result: Dict[str, Any], reported: Dict[str, Any]
     if r_auc is not None and rep_auc is not None:
         diff_auc = abs(rep_auc - r_auc)
         status = "PASS" if diff_auc <= 0.03 else ("WARN" if diff_auc <= 0.06 else "FAIL")
-        checks.append({"id": "R4.2", "title": "Replicated AUC within ±0.03", "severity": "high", "status": status, "observed": f"Replicated AUC = {rep_auc:.4f} | Reported = {r_auc:.4f} | Δ = {diff_auc:.4f}", "threshold": "|Δ AUC| ≤ 0.03"})
+        checks.append({"id": "R4.2", "title": "Replicated AUC within ±0.03", "severity": "high", "status": status, "observed": f"Replicated AUC = {rep_auc:.4f} | {cmp_label} = {r_auc:.4f} | Δ = {diff_auc:.4f}", "threshold": "|Δ AUC| ≤ 0.03"})
     else:
-        checks.append({"id": "R4.2", "title": "Replicated AUC within ±0.03", "severity": "high", "status": "WARN", "observed": f"Replicated AUC = {rep_auc if rep_auc else 'N/A'} | Reported AUC not provided", "threshold": "|Δ AUC| ≤ 0.03"})
+        checks.append({"id": "R4.2", "title": "Replicated AUC within ±0.03", "severity": "high", "status": "WARN", "observed": f"Replicated AUC = {rep_auc if rep_auc else 'N/A'} | {cmp_label} AUC not provided", "threshold": "|Δ AUC| ≤ 0.03"})
 
     # R4.3
     r_gini = reported.get("gini")
@@ -631,10 +775,15 @@ def evaluate_replication_checks(result: Dict[str, Any], reported: Dict[str, Any]
         ks_diff = abs(rep_ks - r_ks)
         ks_ok = ks_diff <= 0.03
     if r_gini is None and r_ks is None:
-        checks.append({"id": "R4.3", "title": "Gini within ±0.05 / KS within ±0.03", "severity": "high", "status": "WARN", "observed": f"Replicated Gini = {rep_gini:.4f}, KS = {rep_ks:.4f} | Reported values not provided", "threshold": "|Δ Gini| ≤ 0.05 and |Δ KS| ≤ 0.03"})
+        checks.append({"id": "R4.3", "title": "Gini within ±0.05 / KS within ±0.03", "severity": "high", "status": "WARN", "observed": f"Replicated Gini = {rep_gini:.4f}, KS = {rep_ks:.4f} | {cmp_label} values not provided", "threshold": "|Δ Gini| ≤ 0.05 and |Δ KS| ≤ 0.03"})
     else:
         gini_ks_status = "PASS" if (gini_ok and ks_ok) else "FAIL"
-        checks.append({"id": "R4.3", "title": "Gini within ±0.05 / KS within ±0.03", "severity": "high", "status": gini_ks_status, "observed": f"Gini/Ks comparison", "threshold": "|Δ Gini| ≤ 0.05 and |Δ KS| ≤ 0.03"})
+        parts = []
+        if gini_diff is not None:
+            parts.append(f"Gini {rep_gini:.4f} vs {cmp_label} {r_gini:.4f} (Δ {gini_diff:.4f})")
+        if ks_diff is not None:
+            parts.append(f"KS {rep_ks:.4f} vs {cmp_label} {r_ks:.4f} (Δ {ks_diff:.4f})")
+        checks.append({"id": "R4.3", "title": "Gini within ±0.05 / KS within ±0.03", "severity": "high", "status": gini_ks_status, "observed": " | ".join(parts) or "Gini/KS comparison", "threshold": "|Δ Gini| ≤ 0.05 and |Δ KS| ≤ 0.03"})
 
     # R4.4 simple implementation
     metric_keys_r4 = [("accuracy", "Accuracy"), ("precision", "Precision"), ("recall", "Recall"), ("f1", "F1")]
@@ -666,29 +815,31 @@ def evaluate_replication_checks(result: Dict[str, Any], reported: Dict[str, Any]
         r44_obs = "All reported metrics replicated within ±5%"
     checks.append({"id": "R4.4", "title": "Metrics within ±5% at reported threshold", "severity": "medium", "status": r44_status, "observed": r44_obs, "threshold": "Relative difference ≤ 5% per metric", "_table": r44_rows})
 
-    # R4.5
-    if ablation:
-        max_drop_col = max(ablation, key=lambda k: ablation[k] if not np.isnan(ablation[k]) else -999)
-        max_drop_val = ablation.get(max_drop_col, float("nan"))
-        r45_status = "PASS" if (not np.isnan(max_drop_val) and max_drop_val < 0.05) else "FAIL"
-        checks.append({"id": "R4.5", "title": "Feature removal: AUC degradation < 0.05", "severity": "medium", "status": r45_status, "observed": f"Largest AUC drop: {max_drop_val:.4f} when removing '{max_drop_col}'", "_ablation": ablation})
+    # R4.5 (feature stability) and R4.6 (predictive performance stability) —
+    # redesigned; see stability_checks.py and R4_5_R4_6_METHODOLOGY_REVIEW.md.
+    # Both are computed from the repeated-run evidence in result["stability"];
+    # a result without it (older runs, or seeds not run) is NOT_ASSESSED.
+    stab = result.get("stability")
+    ablation_runs = result.get("ablation_runs") or []
+    if isinstance(stab, dict) and stab.get("runs") is not None:
+        criteria = stability.load_criteria()
+        main_eval = stab.get("main_evaluation") or {}
+        removal = stability.removal_diagnostics(ablation_runs, main_eval.get("se") if main_eval.get("available") else None, criteria)
+        r45 = stability.feature_stability(stab["runs"], criteria, determinism=stab.get("determinism"), removal=removal)
+        r45["_ablation"] = {r["feature"]: r["auc_drop"] for r in ablation_runs if r.get("status") == "COMPLETED"}
+        r45["_ablation_runs"] = ablation_runs
+        checks.append(r45)
+        checks.append(stability.performance_stability(stab["runs"], main_eval, stab.get("temporal"), criteria,
+                                                      determinism=stab.get("determinism")))
     else:
-        checks.append({"id": "R4.5", "title": "Feature removal: AUC degradation < 0.05", "severity": "medium", "status": "SKIP", "observed": "Ablation study not run (no features available)", "threshold": "Max AUC drop per removed feature < 0.05"})
+        checks.append(stability.not_assessed("R4.5", "This run produced no repeated-run evidence (feature stability needs repeated training runs)."))
+        checks.append(stability.not_assessed("R4.6", "This run produced no repeated-run evidence (performance stability needs repeated evaluation runs)."))
 
-    # R4.6
-    if len(seed_aucs) >= 2:
-        std_auc = round(float(np.std(seed_aucs)), 4)
-        mean_auc = round(float(np.mean(seed_aucs)), 4)
-        r46_status = "PASS" if std_auc < 0.02 else "FAIL"
-        checks.append({"id": "R4.6", "title": f"Seed stability: Std(AUC) < 0.02 ({len(seeds)} seeds)", "severity": "medium", "status": r46_status, "observed": f"AUC across {len(seed_aucs)} seeds: mean={mean_auc:.4f}, std={std_auc:.4f}", "_seed_aucs": seed_aucs, "_seeds": seeds})
-    else:
-        checks.append({"id": "R4.6", "title": "Seed stability: Std(AUC) < 0.02", "severity": "medium", "status": "WARN", "observed": f"Only {len(seed_aucs)} seed(s) ran successfully"})
-
-    # R4.7
-    split_stats = result.get("split_stats", {})
-    train_n = split_stats.get("train_n", 0)
-    test_n = split_stats.get("test_n", 0)
-    checks.append({"id": "R4.7", "title": "Split reproducibility — no test contamination", "severity": "high", "status": "PASS", "observed": f"Train={train_n:,} | Val={split_stats.get('val_n',0):,} | Test={test_n:,}", "threshold": "Deterministic split; feature engineering learned on train only"})
+    # R4.7 — built from executed evidence (split_integrity.py); never a
+    # hard-coded PASS. A run that produced no split evidence is NOT_ASSESSED.
+    r47 = result.get("split_integrity")
+    checks.append(dict(r47) if isinstance(r47, dict) and r47.get("id") == "R4.7"
+                  else si.r47_not_assessed("This run did not produce train/test split evidence."))
 
     # R4.8
     cv_mean = result.get("cv_mean_auc")
@@ -696,8 +847,9 @@ def evaluate_replication_checks(result: Dict[str, Any], reported: Dict[str, Any]
     if cv_mean is not None and r_cv is not None:
         diff_cv = abs(cv_mean - r_cv)
         r48_status = "PASS" if diff_cv <= 0.02 else ("WARN" if diff_cv <= 0.04 else "FAIL")
-        checks.append({"id": "R4.8", "title": "CV mean AUC within ±0.02 of reported", "severity": "medium", "status": r48_status, "observed": f"Replicated CV mean AUC = {cv_mean:.4f} | Reported = {r_cv:.4f} | Δ = {diff_cv:.4f}"})
+        checks.append({"id": "R4.8", "title": f"CV mean AUC within ±0.02 of {cmp_label.lower()}", "severity": "medium", "status": r48_status, "observed": f"Replicated CV mean AUC = {cv_mean:.4f} | {cmp_label} = {r_cv:.4f} | Δ = {diff_cv:.4f}"})
     else:
-        checks.append({"id": "R4.8", "title": "CV mean AUC within ±0.02 of reported", "severity": "medium", "status": "SKIP", "observed": "CV not run — enable K-fold cross-validation above"})
+        checks.append({"id": "R4.8", "title": f"CV mean AUC within ±0.02 of {cmp_label.lower()}", "severity": "medium", "status": "SKIP",
+                       "observed": "CV not run — enable K-fold cross-validation above" if cv_mean is None else f"{cmp_label} CV mean AUC not available"})
 
     return checks

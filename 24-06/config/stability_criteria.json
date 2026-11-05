@@ -1,0 +1,31 @@
+{
+  "_about": "Acceptance criteria for R4.5 (feature stability) and R4.6 (predictive performance stability). Every value is configurable. 'kind' says what the value is: 'statistical' values follow from the test design; 'policy' values are provisional defaults that require Model Risk approval before they are relied on. 'approved' records whether Model Risk has signed them off. See R4_5_R4_6_METHODOLOGY_REVIEW.md.",
+  "approved": false,
+  "approved_by": null,
+  "approved_on": null,
+  "repeated_runs": {
+    "min_completed_runs": {"value": 3, "kind": "statistical", "rationale": "Rank agreement needs at least 3 runs (3 pairwise comparisons) and the heterogeneity test needs at least 2 degrees of freedom."}
+  },
+  "r4_5_feature_stability": {
+    "permutation_repeats": {"value": 5, "kind": "statistical", "rationale": "Repeats per feature per run, giving a within-run standard error for each permutation importance."},
+    "importance_significance_z": {"value": 2.0, "kind": "statistical", "rationale": "A feature is 'selected' in a run when its permutation importance exceeds 2 within-run standard errors (≈ one-sided 97.7%). Separates real contributions from permutation noise."},
+    "material_feature_min_selection_share": {"value": 0.5, "kind": "statistical", "rationale": "A feature is 'material' when it is selected in at least half of the runs. Rank stability is judged among material features only: the order of features with no real contribution is noise, not instability."},
+    "min_mean_rank_correlation": {"value": 0.6, "kind": "policy", "rationale": "Provisional. Mean pairwise Spearman correlation of material-feature importance ranks below this is reported (WARN). It is descriptive only: features with statistically equal importance legitimately swap ranks, so a low correlation alone is not proof of instability. 0.6 is the conventional lower bound of 'strong' monotonic agreement. Requires Model Risk approval."},
+    "min_pair_order_consistency": {"value": 0.8, "kind": "policy", "rationale": "Provisional. For two material features whose importances differ significantly across runs (one-sample t-test on the per-run differences, alpha from R4.6), the stronger one must rank above the weaker one in at least this share of runs; more frequent reversals are instability (FAIL). Requires Model Risk approval."},
+    "material_rank_shift_fraction": {"value": 0.25, "kind": "policy", "rationale": "Provisional. A material feature whose rank range across runs reaches max(material_rank_shift_min, this fraction × number of material features) is reported as a material rank change (WARN). Requires Model Risk approval."},
+    "material_rank_shift_min": {"value": 2, "kind": "policy", "rationale": "Provisional. Lower bound for the rank-change rule so that swaps between adjacent features are not flagged. Requires Model Risk approval."},
+    "min_direction_consistency": {"value": 0.8, "kind": "policy", "rationale": "Provisional. Minimum share of runs in which a material numeric feature's effect on predicted PD has the same sign. A flip of direction for a material driver is treated as instability (FAIL). Requires Model Risk approval."},
+    "top_k": {"value": 3, "kind": "policy", "rationale": "Provisional. Size of the 'top driver' set. Reported as top-k selection frequency, and used for the driver-dropout rule: a feature that is a top-k driver in one run but makes no significant contribution in another is instability (FAIL) — the model substitutes drivers between runs. Applied only when there are more material features than k. Requires Model Risk approval."},
+    "removal_improvement_z": {"value": 2.0, "kind": "statistical", "rationale": "Diagnostic only: a feature whose removal raises AUC by more than 2 bootstrap standard errors of the baseline AUC is reported. It does not change R4.5's status."}
+  },
+  "r4_6_performance_stability": {
+    "bootstrap_iterations": {"value": 1000, "kind": "statistical", "rationale": "Stratified bootstrap resamples for the confidence interval of the model's test AUC."},
+    "per_run_bootstrap_iterations": {"value": 200, "kind": "statistical", "rationale": "Stratified bootstrap resamples for each run's AUC standard error (used by the heterogeneity test)."},
+    "bootstrap_seed": {"value": 20240501, "kind": "statistical", "rationale": "Fixed random seed so bootstrap results are reproducible."},
+    "confidence_level": {"value": 0.95, "kind": "statistical", "rationale": "Confidence level of the reported bootstrap interval."},
+    "alpha": {"value": 0.05, "kind": "statistical", "rationale": "Significance level for (a) the heterogeneity test — run-to-run AUC variation beyond what sampling error explains — and (b) deterioration tests for individual runs and time periods. Conventional 5% level; Model Risk may change it."},
+    "min_class_count": {"value": 10, "kind": "policy", "rationale": "Provisional. Minimum defaults and non-defaults in an evaluation sample. Below roughly 10 events per class, AUC standard errors and bootstrap intervals are unreliable, so the sample is not assessed. Requires Model Risk approval."},
+    "max_ci_width": {"value": 0.2, "kind": "policy", "rationale": "Provisional. If the 95% bootstrap interval of the model's AUC is wider than this, the evidence is too imprecise to judge stability and R4.6 is NOT ASSESSED. Requires Model Risk approval."},
+    "temporal_max_periods": {"value": 4, "kind": "statistical", "rationale": "Maximum number of chronological, equal-count periods for the time-based comparison; fewer are used if a period would fall below min_class_count."}
+  }
+}

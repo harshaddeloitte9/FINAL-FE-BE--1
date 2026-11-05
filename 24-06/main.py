@@ -6,6 +6,7 @@ Credit-Risk-Poc-main source-of-truth project.
 """
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -17,7 +18,7 @@ import urllib.error
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple, Union
+from typing import Any, Callable, Dict, Optional, List, Tuple, Union
 
 BACKEND_DIR = Path(__file__).resolve().parent
 SOURCE_OF_TRUTH_DIR = BACKEND_DIR
@@ -107,6 +108,7 @@ import fred_client
 import data_integration as di
 import persistence
 import business_rules
+import model_lineage
 
 compute_binary_metrics = eval_engine.compute_binary_metrics
 compute_regression_metrics = eval_engine.compute_regression_metrics
@@ -143,7 +145,7 @@ _validation_agent2_path = BACKEND_DIR / "validation_agent2.py"
 # ~1462 of that file) so Stage 8's findings compilation checks the MDD with
 # the exact same keyword sets Stage 7's 7.1/7.2 checks use.
 CALIBRATION_KEYWORDS = ["calibrat", "platt", "isotonic", "through the cycle", "ttc"]
-STAGING_KEYWORDS = ["stage 1", "stage 2", "stage 3", "staging", "sicr", "lifetime ecl", "12 month"]
+STAGING_KEYWORDS = ["stage 1", "stage 2", "stage 3", "staging", "sicr", "lifetime ecl"]  # mirrors 7.2 ("12 month" removed in Phase 5)
 
 # Source-of-truth Agent2: the RAG rule-matching agent (rag_store/val_mdd_rules.json,
 # check_for_validation / check_mdd_keywords / check_documents_with_llm). This is a
@@ -162,6 +164,131 @@ def resolve_replication_model_inputs(model_name: Optional[str], algorithm: Optio
     if not estimator_name:
         raise ValueError("Model or algorithm is required.")
     return business_model_name, estimator_name
+
+
+# ── Reference (developer-reported) vs actual (computed) metrics ─────────────
+# Reference metrics are what the developer claims (MDD, development training
+# run, or values a reviewer typed in). They are only ever compared against —
+# they must never replace metrics computed from model predictions. Every
+# reference value carries the source it came from so a saved run can show
+# exactly what each comparison was made against.
+METRIC_PROVENANCE_SCHEMA_VERSION = 2
+REFERENCE_SOURCE_LABELS = {
+    "mdd_upload": "MDD uploaded with this run",
+    "intake_mdd": "MDD parsed at Intake",
+    "demo_intake": "Demo intake snapshot",
+    "development_training_run": "Development training run (evaluation metrics)",
+    "manual_entry": "Entered manually by reviewer",
+    "client_supplied": "Supplied by client (source not stated)",
+}
+_CLIENT_REFERENCE_SOURCES = {"intake_mdd", "demo_intake", "development_training_run", "manual_entry"}
+
+
+def build_reference_metrics(
+    reported_json: Optional[str],
+    reported_sources_json: Optional[str] = None,
+    mdd_metrics: Optional[Dict[str, Any]] = None,
+    mdd_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Merge client-supplied and MDD-extracted reference metrics, keeping a
+    per-key source. MDD values win per key (the MDD is the developer's
+    authoritative document). Unparseable input is reported in `warnings`
+    instead of being silently dropped."""
+    values: Dict[str, float] = {}
+    sources: Dict[str, str] = {}
+    warnings: List[str] = []
+
+    client_sources: Dict[str, Any] = {}
+    if reported_sources_json:
+        try:
+            parsed_sources = json.loads(reported_sources_json)
+            if isinstance(parsed_sources, dict):
+                client_sources = parsed_sources
+            else:
+                warnings.append("reported_sources_json was not an object and was ignored.")
+        except Exception as exc:
+            warnings.append(f"reported_sources_json could not be parsed and was ignored: {exc}")
+
+    def _add(key: str, raw: Any, source: str) -> None:
+        if raw is None:
+            return
+        try:
+            num = float(raw)
+        except (TypeError, ValueError):
+            warnings.append(f"Reference metric '{key}' is not numeric ({raw!r}) and was ignored.")
+            return
+        if not np.isfinite(num):
+            warnings.append(f"Reference metric '{key}' is not finite and was ignored.")
+            return
+        values[key] = num
+        sources[key] = source
+
+    if reported_json:
+        try:
+            parsed = json.loads(reported_json)
+        except Exception as exc:
+            parsed = None
+            warnings.append(f"reported_json could not be parsed and was ignored: {exc}")
+        if isinstance(parsed, dict):
+            for key, raw in parsed.items():
+                claimed = client_sources.get(key)
+                source = claimed if claimed in _CLIENT_REFERENCE_SOURCES else "client_supplied"
+                _add(str(key), raw, source)
+        elif parsed is not None:
+            warnings.append("reported_json was not an object and was ignored.")
+
+    for key, raw in (mdd_metrics or {}).items():
+        _add(str(key), raw, "mdd_upload")
+
+    if mdd_error:
+        warnings.append(f"MDD could not be read; no metrics were taken from it: {mdd_error}")
+
+    return {
+        "values": values,
+        "sources": sources,
+        "source_labels": {k: REFERENCE_SOURCE_LABELS.get(v, v) for k, v in sources.items()},
+        "warnings": warnings,
+    }
+
+
+def dataset_fingerprint(df: pd.DataFrame) -> str:
+    """SHA-256 of the dataset's column names and cell contents (row order
+    included, index excluded). Identical data gives the same fingerprint
+    whether it arrived as an uploaded file or as csv_text."""
+    digest = hashlib.sha256()
+    digest.update("\x1f".join(str(c) for c in df.columns).encode("utf-8"))
+    digest.update(pd.util.hash_pandas_object(df, index=False).values.tobytes())
+    return digest.hexdigest()
+
+
+def registered_run_identity(registered_model_id: Optional[str], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Identity recorded with every validation-stage run so history lookups
+    can match it to the registered model, its CURRENT training, and the exact
+    data used. Unknown/absent model IDs are recorded as given with no
+    training run (such runs are never treated as current for that model)."""
+    model_id = (registered_model_id or "").strip() or None
+    training_run_id = None
+    if model_id:
+        entry = next(
+            (m for m in persistence.load_model_inventory().get("development", [])
+             if isinstance(m, dict) and str(m.get("model_id") or "").strip() == model_id),
+            None,
+        )
+        training_run_id = ((entry or {}).get("lineage_contract") or {}).get("training_run_id")
+    return {
+        "registered_model_id": model_id,
+        "training_run_id": training_run_id,
+        "dataset_sha256": dataset_fingerprint(df) if df is not None else None,
+    }
+
+
+def build_metric_provenance(reference: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "schema_version": METRIC_PROVENANCE_SCHEMA_VERSION,
+        "metrics": "computed_from_model_predictions",
+        "reference_metrics": "developer_reported" if reference.get("values") else "none_supplied",
+        "reference_overrides_computed": False,
+    }
 
 
 _ALLOWED_ORIGINS = [
@@ -525,17 +652,62 @@ async def get_intake_draft(model_name: str) -> Dict[str, Any]:
 
 @app.get("/history/dev")
 async def history_dev() -> Dict[str, Any]:
-    return {"runs": persistence.read_log(persistence.DEV_PIPELINE_LOG)}
+    # Each row is labelled record_status = current | legacy (nothing removed).
+    return {"runs": persistence.list_runs(persistence.DEV_PIPELINE_LOG)}
 
 
 @app.get("/history/validation")
 async def history_validation() -> Dict[str, Any]:
-    return {"runs": persistence.read_log(persistence.VALIDATION_PIPELINE_LOG)}
+    return {"runs": persistence.list_runs(persistence.VALIDATION_PIPELINE_LOG)}
+
+
+def _validate_history_request(log_file: str, stage: Optional[str] = None) -> None:
+    try:
+        persistence.validate_history_request(log_file, stage)
+    except persistence.HistoryRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/history/artifact")
 async def history_artifact(log_file: str, run_id: str) -> Dict[str, Any]:
-    return {"artifact": persistence.get_artifact(log_file, run_id)}
+    _validate_history_request(log_file)
+    run = persistence.get_run(log_file, run_id)
+    return {
+        "artifact": persistence.get_artifact(log_file, run_id),
+        "record_status": run.get("record_status") if run else None,
+        "record_status_reason": run.get("record_status_reason") if run else None,
+    }
+
+
+def _registered_lineage_validator() -> Callable[[Dict[str, Any]], Optional[str]]:
+    """History-row validator for validation-stage runs that name a registered
+    model: the run must belong to the model's CURRENT training (a retrained
+    model has a new lineage contract, which makes earlier runs stale)."""
+    current: Dict[str, Optional[str]] = {}
+    loaded = False
+
+    def _check(row: Dict[str, Any]) -> Optional[str]:
+        nonlocal loaded
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        model_id = summary.get("registered_model_id")
+        if not model_id:
+            return None
+        if not loaded:
+            for entry in persistence.load_model_inventory().get("development", []):
+                if isinstance(entry, dict) and entry.get("model_id"):
+                    current[str(entry["model_id"])] = (entry.get("lineage_contract") or {}).get("training_run_id")
+            loaded = True
+        if str(model_id) not in current:
+            return f"Registered model {model_id} is no longer in the Model Inventory."
+        current_training = current[str(model_id)]
+        if current_training is None:
+            return f"Registered model {model_id} has no recorded training lineage."
+        if summary.get("training_run_id") != current_training:
+            return (f"Registered model {model_id} has been retrained since this run "
+                    f"(run used training {summary.get('training_run_id') or 'unrecorded'}, current is {current_training}).")
+        return None
+
+    return _check
 
 
 @app.get("/history/latest")
@@ -544,18 +716,37 @@ async def history_latest(
     stage: str,
     business_model_name: Optional[str] = None,
     dataset_name: Optional[str] = None,
+    registered_model_id: Optional[str] = None,
+    dataset_sha256: Optional[str] = None,
+    replication_run_id: Optional[str] = None,
+    include_legacy: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    # Both filters are optional and default to the prior unscoped lookup for
-    # every existing caller. When a caller passes them (currently only Model
-    # Replication's resume), the most-recent row is restricted to that exact
-    # model + dataset combination so a more recent run for the same model
-    # against a DIFFERENT dataset — or an unrelated model entirely — is never
-    # resumed under the wrong context.
-    return {
-        "latest": persistence.get_latest(
-            log_file, stage, business_model_name=business_model_name, dataset_name=dataset_name,
-        ),
-    }
+    """Newest VALID run of a stage for the given identity.
+
+    Unknown log files / stage names (including the retired 'benchmarking'
+    name) return 400. On the validation log, legacy rows (written before run
+    identity was recorded) are skipped unless include_legacy=true, and runs
+    for a registered model that has since been retrained are skipped. Every
+    passed-over newer row is reported in `excluded` with its reason. The dev
+    log keeps its previous behaviour (legacy rows allowed, but labelled).
+    """
+    _validate_history_request(log_file, stage)
+    is_validation_log = log_file == persistence.VALIDATION_PIPELINE_LOG
+    if include_legacy is None:
+        include_legacy = not is_validation_log
+    return persistence.find_latest_run(
+        log_file,
+        stage,
+        filters={
+            "business_model_name": business_model_name,
+            "dataset_name": dataset_name,
+            "registered_model_id": registered_model_id,
+            "dataset_sha256": dataset_sha256,
+            "replication_run_id": replication_run_id,
+        },
+        include_legacy=include_legacy,
+        validator=_registered_lineage_validator() if is_validation_log else None,
+    )
 
 
 class InventoryModelRequest(BaseModel):
@@ -1636,7 +1827,10 @@ def _save_upload_to_temp(file: UploadFile, suffix: str = ".db") -> str:
 
 def _save_uploaded_mdd(file: UploadFile) -> str:
     """Persist an uploaded MDD file to a backend-visible path for inventory docs."""
-    target_dir = APP_DATA_DIR / "validation_mdds"
+    # APP_DATA_DIR is defined in persistence, not in this module — referencing
+    # it bare raised NameError, which made POST /validation/parse-mdd always
+    # return 500 (and silently skipped saving the MDD in /validation/replication).
+    target_dir = persistence.APP_DATA_DIR / "validation_mdds"
     target_dir.mkdir(parents=True, exist_ok=True)
     file_name = Path(file.filename or "validation_mdd.txt").name
     if not file_name:
@@ -1646,7 +1840,7 @@ def _save_uploaded_mdd(file: UploadFile) -> str:
     file.file.seek(0)
     with open(target_path, "wb") as out:
         out.write(file.file.read())
-    return str(target_path.relative_to(BACKEND_DIR))
+    return str(target_path.relative_to(persistence.BACKEND_DIR))
 
 
 def _unlink_quietly(path: str) -> None:
@@ -2740,108 +2934,6 @@ async def train_model_endpoint(
     combined_transform_choices = {**(direct_transform_choices if isinstance(direct_transform_choices, dict) else {}), **(contract_transform_choices if isinstance(contract_transform_choices, dict) else {})}
     combined_strategy_override = contract_strategy_override or strategy_override
 
-    col_types = detect_column_types(df)
-    task_type = detect_task_type(df[target_col])
-    X, y, _ = finalize_xy(df, col_types, target_col)
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
-        X, y, test_size=test_size, val_size=val_size,
-        task_type=task_type, random_state=random_seed,
-    )
-
-    effective_preprocessing_contract = {
-        "source": "data_preparation" if combined_treatment_overrides or combined_drop_cols or combined_transform_choices or combined_strategy_override else "fallback",
-        "applied_treatment_map": {
-            **(contract_payload.get("applied_treatment_map") or {}),
-            **(contract_payload.get("treatment_map") or {}),
-        },
-        "treatment_overrides": combined_treatment_overrides,
-        "drop_cols": combined_drop_cols,
-        "dropped_columns": combined_drop_cols,
-        "transform_choices": combined_transform_choices,
-        "applied_transform_choices": combined_transform_choices,
-        "strategy_override": combined_strategy_override,
-        "imputation_strategy": None,
-    }
-
-    if combined_drop_cols:
-        X_train = X_train.drop(columns=[c for c in combined_drop_cols if c in X_train.columns], errors="ignore")
-        X_val = X_val.drop(columns=[c for c in combined_drop_cols if c in X_val.columns], errors="ignore")
-        X_test = X_test.drop(columns=[c for c in combined_drop_cols if c in X_test.columns], errors="ignore")
-
-    if combined_treatment_overrides or combined_transform_choices or combined_strategy_override:
-        treatment_map: Dict[str, Dict[str, Any]] = {}
-        for col, treatment in combined_treatment_overrides.items():
-            if not isinstance(treatment, str):
-                continue
-            treatment_map[col] = {
-                "treatment": treatment,
-                "reason": "Applied from Data Preparation preprocessing contract.",
-                "evidence": {},
-            }
-        if not treatment_map and isinstance(contract_payload.get("applied_treatment_map"), dict):
-            for col, value in contract_payload["applied_treatment_map"].items():
-                if isinstance(value, dict):
-                    treatment_map[col] = {
-                        "treatment": value.get("treatment") or "statistical",
-                        "reason": value.get("reason") or "Applied from Data Preparation preprocessing contract.",
-                        "evidence": value.get("evidence") or {},
-                    }
-        if treatment_map:
-            statistical_cols = [c for c, v in treatment_map.items() if v.get("treatment") == "statistical"]
-            imputation_strategy = select_imputation_strategy(X_train, statistical_cols)
-            if combined_strategy_override in ("mice", "knn", "median") and statistical_cols:
-                imputation_strategy = {
-                    "method": combined_strategy_override,
-                    "reason": "Manually overridden by Data Preparation contract.",
-                    "diagnostics": imputation_strategy.get("diagnostics", {}),
-                }
-            effective_preprocessing_contract["imputation_strategy"] = imputation_strategy
-            col_types_for_fit = {k: [c for c in v if c not in combined_drop_cols] for k, v in col_types.items()}
-            semantic_imputer = SemanticImputer(
-                col_types=col_types_for_fit,
-                treatment_map=treatment_map,
-                strategy_choice=imputation_strategy,
-            )
-            semantic_imputer.fit(X_train)
-            X_train = semantic_imputer.transform(X_train)
-            X_val = semantic_imputer.transform(X_val)
-            X_test = semantic_imputer.transform(X_test)
-
-    # ── Origination/observation date for Out-of-Time (OOT) validation ──
-    # Use the reviewer-selected date column if provided and valid, otherwise
-    # fall back to the first auto-detected datetime column (same detection
-    # `detect_column_types` already exposes via the data-profile endpoint).
-    origination_date_col = date_col if (date_col and date_col in df.columns) else None
-    if origination_date_col is None:
-        datetime_candidates = col_types.get("datetime", [])
-        if datetime_candidates:
-            origination_date_col = datetime_candidates[0]
-
-    dates_train = None
-    if origination_date_col and origination_date_col in df.columns:
-        try:
-            dates_train = df.loc[X_train.index, origination_date_col]
-        except Exception:
-            dates_train = None
-    dates_test = None
-    if origination_date_col and origination_date_col in df.columns:
-        try:
-            dates_test = df.loc[X_test.index, origination_date_col]
-        except Exception:
-            dates_test = None
-    prep_report = build_preprocessing_report(
-        X_train.assign(**{target_col: y_train}),
-        col_types,
-        target_col,
-        transform_choices=combined_transform_choices if isinstance(combined_transform_choices, dict) else {},
-    )
-    fe_summary = None
-    plan = None
-    if use_feature_engineering:
-        plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
-        X_train, fe_summary = apply_feature_engineering(X_train, plan)
-        X_val, _ = apply_feature_engineering(X_val, plan)
-        X_test, _ = apply_feature_engineering(X_test, plan)
     if manual_params:
         try:
             manual_params_dict = json.loads(manual_params)
@@ -2853,35 +2945,46 @@ async def train_model_endpoint(
     business_model_name = model_name.strip()
     estimator_name = (estimator_name or model_name).strip() or model_name
 
-    if manual_params_dict is not None:
-        model = get_model_instance(estimator_name, task_type)
-        valid_keys = set(model.get_params().keys())
-        manual_params_dict = {k: v for k, v in manual_params_dict.items() if k in valid_keys}
-        model = type(model)(**manual_params_dict)
-    else:
-        model = get_model_instance(
-            estimator_name,
-            task_type,
-            scale_pos_weight=scale_pos_weight if estimator_name == "XGBoost" else None,
-        )
-    param_grid = None
-    if use_hyperopt:
-        param_grid = get_hyperparameter_grid(estimator_name, task_type)
-    pipeline, training_info, real_feature_names = train_model(
-        X_train, y_train,
-        col_types=col_types,
+    # The training path itself lives in model_lineage.fit_training_pipeline
+    # (moved verbatim) so registered-model reproduction re-runs exactly the
+    # same code. Everything below consumes the same variables as before.
+    fit = model_lineage.fit_training_pipeline(
+        df,
         target_col=target_col,
-        prep_report=prep_report,
-        model=model,
+        model_name=model_name,
+        estimator_name=estimator_name,
+        test_size=test_size,
+        val_size=val_size,
+        random_seed=random_seed,
         use_cv=use_cv,
         cv_folds=cv_folds,
         use_hyperopt=use_hyperopt,
-        param_grid=param_grid,
-        task_type=task_type,
-        model_name=model_name,
-        dates_train=dates_train,
+        scale_pos_weight=scale_pos_weight,
+        manual_params_dict=manual_params_dict,
+        use_feature_engineering=use_feature_engineering,
         use_oot=use_oot,
+        date_col=date_col,
+        contract_payload=contract_payload,
+        combined_treatment_overrides=combined_treatment_overrides,
+        combined_drop_cols=combined_drop_cols,
+        combined_transform_choices=combined_transform_choices,
+        combined_strategy_override=combined_strategy_override,
     )
+    col_types = fit["col_types"]
+    task_type = fit["task_type"]
+    X_train, X_val, X_test = fit["X_train"], fit["X_val"], fit["X_test"]
+    y_train, y_val, y_test = fit["y_train"], fit["y_val"], fit["y_test"]
+    effective_preprocessing_contract = fit["effective_preprocessing_contract"]
+    origination_date_col = fit["origination_date_col"]
+    dates_test = fit["dates_test"]
+    prep_report = fit["prep_report"]
+    plan = fit["plan"]
+    fe_summary = fit["fe_summary"]
+    manual_params_dict = fit["manual_params_dict"]
+    model = fit["model"]
+    pipeline = fit["pipeline"]
+    training_info = fit["training_info"]
+    real_feature_names = fit["real_feature_names"]
     split_stats = compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test)
 
     # Evaluate on hold-out test set to mirror the original Streamlit training workflow.
@@ -3183,6 +3286,59 @@ async def train_model_endpoint(
             created_entry = next((m for m in store.get("development", []) if m.get("model_id") == mid), None) if mid else None
         except Exception:
             created_entry = None
+
+        # Lineage capture for registered-model reproduction: save the fitted
+        # scoring chain (with SHA-256) and record the full training contract
+        # on the registered inventory entry. On failure the entry carries the
+        # error and NO contract, so a stale contract from an earlier training
+        # of the same model can never be reused for this one.
+        lineage_status: Dict[str, Any] = {"captured": False, "reason": None}
+        try:
+            lineage_model_id = reg_result.get("model_id") if isinstance(reg_result, dict) else None
+            if created_entry is not None and lineage_model_id and run_id:
+                lineage_artifact = model_lineage.save_scoring_bundle(fit, model_id=lineage_model_id, training_run_id=run_id)
+                created_entry["lineage_contract"] = model_lineage.build_lineage_contract(
+                    fit,
+                    model_id=lineage_model_id,
+                    training_run_id=run_id,
+                    business_model_name=business_model_name,
+                    estimator_name=estimator_name,
+                    target_col=target_col,
+                    dataset_name=getattr(file, "filename", None),
+                    dataset_sha256=dataset_fingerprint(df),
+                    dataset_shape=[int(df.shape[0]), int(df.shape[1])],
+                    training_config=result.get("training_config", {}),
+                    threshold=threshold,
+                    development_metrics=metrics,
+                    artifact=lineage_artifact,
+                )
+                created_entry.pop("lineage_contract_error", None)
+                lineage_status = {
+                    "captured": True,
+                    "contract_version": model_lineage.LINEAGE_CONTRACT_VERSION,
+                    "training_run_id": run_id,
+                    "artifact_sha256": lineage_artifact["sha256"],
+                }
+            else:
+                lineage_status["reason"] = "Model was not registered, so its lineage could not be recorded."
+                # A same-named entry may still carry the contract of an EARLIER
+                # training. This retrain was not registered, so that contract no
+                # longer describes the current model — withdraw it rather than
+                # let a later reproduction validate the wrong training.
+                for stale_entry in store.get("development", []):
+                    if isinstance(stale_entry, dict) and str(stale_entry.get("model_name") or "").strip().casefold() == business_model_name.casefold():
+                        if stale_entry.pop("lineage_contract", None) is not None:
+                            stale_entry["lineage_contract_error"] = (
+                                "Model was retrained but the new training could not be registered; the previous "
+                                "lineage contract was withdrawn because it no longer describes the current model."
+                            )
+        except Exception as lineage_exc:
+            if created_entry is not None:
+                created_entry.pop("lineage_contract", None)
+                created_entry["lineage_contract_error"] = f"{type(lineage_exc).__name__}: {lineage_exc}"
+            lineage_status["reason"] = f"Lineage capture failed: {type(lineage_exc).__name__}: {lineage_exc}"
+            print(f"[lineage] capture failed for {business_model_name}: {lineage_exc}")
+        result["lineage"] = lineage_status
 
         # Log inventory path and counts immediately before saving
         try:
@@ -3604,6 +3760,12 @@ def _run_benchmark_comparison(
         bm_scores = eval_engine._to_scores(bm_proba_2d)
         bm_metrics["gini"] = _gini(np.asarray(y_true).astype(int), bm_scores)
         bm_metrics["ks"] = _ks(np.asarray(y_true).astype(int), bm_scores)
+        # The challenger's own ROC / PR curves from its actual predicted
+        # probabilities on the SAME test rows as the champion (the frontend
+        # used to draw a formula line, tpr = fpr × AUC, instead).
+        y_true_int = np.asarray(y_true).astype(int)
+        bm_roc_curve = compute_roc_curve(y_true_int, np.asarray(bm_scores, dtype=float))
+        bm_pr_curve = compute_pr_curve(y_true_int, np.asarray(bm_scores, dtype=float))
     except Exception as e:
         return {
             "model_name": challenger_model_name,
@@ -3625,6 +3787,9 @@ def _run_benchmark_comparison(
     return {
         "model_name": challenger_model_name,
         "status": "OK",
+        "roc_curve": {"points": bm_roc_curve, "auc": bm_auc},
+        "pr_curve": {"points": bm_pr_curve, "average_precision": bm_metrics.get("pr_auc")},
+        "evaluation": {"test_rows": int(len(y_true_int)), "same_test_rows_as_champion": True},
         "metrics": {
             "roc_auc": bm_auc,
             "gini": bm_gini,
@@ -3705,14 +3870,27 @@ def _build_performance_report(
     # does (select_best_threshold, maximizes F1) instead of a fixed 0.5
     # cut-off, so the confusion matrix and its displayed threshold always
     # line up with the threshold actually used to build it.
+    #
+    # When the metrics were computed at a known threshold (threshold_used,
+    # e.g. a registered model's recorded threshold), the confusion matrix is
+    # built at exactly that threshold so the matrix and the displayed
+    # accuracy / precision / recall describe the same predictions.
     threshold_selection = None
     cm = []
+    evaluation_consistency: Dict[str, Any] = {
+        "status": "NOT_ASSESSED",
+        "detail": "No predicted probabilities for the test rows — curves, confusion matrix and threshold metrics were not produced.",
+    }
     if y_true_arr is not None and y_proba_arr is not None:
         threshold_selection = eval_engine.select_best_threshold(y_true_arr, y_proba_arr, metric="f1")
+        metrics_threshold = metrics.get("threshold_used")
+        if isinstance(metrics_threshold, (int, float)) and np.isfinite(float(metrics_threshold)):
+            threshold_selection = {**threshold_selection, "threshold": float(metrics_threshold), "source": "metrics_threshold_used"}
         resolved_threshold = threshold_selection["threshold"]
         y_pred = (y_proba_arr >= resolved_threshold).astype(int)
         cm_matrix = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).tolist()
         cm = {"labels": [0, 1], "matrix": cm_matrix}
+        evaluation_consistency = _evaluation_consistency(y_true_arr, cm_matrix, metrics)
 
     calibration_points = []
     if y_true_arr is not None and y_proba_arr is not None:
@@ -3825,6 +4003,42 @@ def _build_performance_report(
         "metric_checks": performance_checks,
         "compliance_findings": stage5_findings,
         "threshold_analysis": threshold_analysis,
+        # Cross-check that the confusion matrix, the threshold metrics and the
+        # test set they describe agree with each other.
+        "evaluation_consistency": evaluation_consistency,
+    }
+
+
+def _evaluation_consistency(y_true: np.ndarray, cm_matrix: List[List[int]], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute accuracy / precision / recall from the confusion matrix and
+    compare with the reported metrics (which are rounded to 4 decimals), and
+    check the matrix covers exactly the evaluated test rows."""
+    (tn, fp), (fn, tp) = cm_matrix
+    total = tn + fp + fn + tp
+    derived = {
+        "accuracy": (tp + tn) / total if total else None,
+        "precision": tp / (tp + fp) if (tp + fp) else None,
+        "recall": tp / (tp + fn) if (tp + fn) else None,
+    }
+    problems: List[str] = []
+    if total != len(y_true):
+        problems.append(f"confusion matrix covers {total} rows but the test set has {len(y_true)}")
+    if int(tp + fn) != int(np.sum(y_true)):
+        problems.append("confusion-matrix positives do not match the test-set positives")
+    for key, value in derived.items():
+        reported = metrics.get(key)
+        if value is None or reported is None:
+            continue
+        if abs(float(reported) - value) > 5e-4:
+            problems.append(f"{key}: reported {float(reported):.4f} vs {value:.4f} from the confusion matrix")
+    return {
+        "status": "PASS" if not problems else "FAIL",
+        "test_rows": int(len(y_true)),
+        "test_positives": int(np.sum(y_true)),
+        "confusion_matrix_total": int(total),
+        "derived_from_confusion_matrix": {k: (round(v, 4) if v is not None else None) for k, v in derived.items()},
+        "threshold_used": metrics.get("threshold_used"),
+        "detail": "Confusion matrix, threshold metrics and test set agree." if not problems else "; ".join(problems),
     }
 
 
@@ -3843,8 +4057,13 @@ async def validation_performance(
     mdd_file: Optional[UploadFile] = File(None),
     reported_json: Optional[str] = Form(None),
     intake_json: Optional[str] = Form(None),
+    reported_sources_json: Optional[str] = Form(None),
+    registered_model_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Stage 4 — Benchmarking only.
+
+    `registered_model_id` (optional) is recorded with the run so the final
+    verdict can check a benchmark belongs to the same registered model.
 
     The full performance report (ROC/PR curves, confusion matrix,
     calibration, score distribution, metric checks, compliance findings)
@@ -3855,15 +4074,14 @@ async def validation_performance(
     compare against the selected challenger model, and the ROC overlay
     chart needs the champion's ROC points.
 
-    `mdd_file` / `reported_json` (optional, combinable — same precedence as
-    /validation/replication: MDD-extracted values win per-key over
-    `reported_json`) restore what this endpoint used to drop when Stage 3/4
-    were split: wherever the MDD documents a metric for the champion (e.g.
-    recall), that documented value is shown here instead of the freshly
-    re-fit replica's recomputed number, since the champion side of this
-    comparison is meant to reflect what was actually reported for the
-    champion, not a brand-new fit's incidental test-split performance.
-    Metrics the MDD doesn't mention keep the replica's computed value.
+    `mdd_file` / `reported_json` (optional, combinable — MDD-extracted
+    values win per key) are REFERENCE values only. They are returned
+    separately as `report.reference_metrics` (with a per-key source) and
+    never replace the champion metrics, which are always computed from the
+    fitted model's predictions. Every PASS/FAIL in `metric_checks` and the
+    champion side of the champion-vs-challenger comparison use the computed
+    values. (Previously the MDD values overwrote the computed ones before
+    grading — see AEGIS_VALIDATION_REPLICATION_AUDIT.md, finding C1.)
 
     `challenger_model_name` is a real registry model name (see
     GET /models/list) — typically whichever model the reviewer picked
@@ -3890,28 +4108,20 @@ async def validation_performance(
             intake_payload = {}
 
     mdd_text = ""
-    mdd_reported: Dict[str, Any] = {}
-    if reported_json:
-        try:
-            parsed = json.loads(reported_json)
-            if isinstance(parsed, dict):
-                mdd_reported.update({k: v for k, v in parsed.items() if v is not None})
-        except Exception:
-            pass
+    mdd_extracted: Dict[str, Any] = {}
+    mdd_error: Optional[str] = None
     if mdd_file is not None:
         try:
-            # Same sync-file-object bridge /validation/replication uses —
-            # parse_mdd_file expects .name/.seek()/.read(), FastAPI's
-            # UploadFile is async, so reach through to the underlying
-            # SpooledTemporaryFile.
-            mdd_file.file.seek(0)
-            mdd_underlying = mdd_file.file
-            mdd_underlying.name = mdd_file.filename or ""
-            mdd_text = parse_mdd_file(mdd_underlying)
+            # _sync_file_like gives parse_mdd_file the sync .name/.seek()/
+            # .read() object it expects. (Assigning .name directly on the
+            # SpooledTemporaryFile raises on current Python versions, which
+            # used to be swallowed silently, so MDD metrics were never read.)
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
             mdd_extracted = extract_metrics_from_mdd(mdd_text)
-            mdd_reported.update({k: v for k, v in mdd_extracted.items() if v is not None})
-        except Exception:
-            pass
+        except Exception as exc:
+            mdd_error = str(exc)
+
+    reference = build_reference_metrics(reported_json, reported_sources_json, mdd_extracted, mdd_error)
 
     replication_result = run_replication(
         df=df,
@@ -3923,20 +4133,13 @@ async def validation_performance(
         cv_folds=cv_folds,
         reported={},
         seeds=seed_list,
+        compute_split_integrity=False,  # Benchmarking does not report R4.7
+        compute_seed_stability=False,   # ...nor R4.5 / R4.6
     )
 
-    # Champion metrics shown/benchmarked here prefer the MDD-reported value
-    # over the freshly re-fit replica's number, per-key, wherever the MDD
-    # provided one — mutated in place so both the top-level `metrics` below
-    # AND _run_benchmark_comparison's champion_vs_challenger figures
-    # (which reads replication_result["metrics"] directly) stay consistent.
-    if mdd_reported:
-        champion_metrics_raw = dict(replication_result.get("metrics") or {})
-        for key, value in mdd_reported.items():
-            if key in champion_metrics_raw:
-                champion_metrics_raw[key] = value
-        replication_result["metrics"] = champion_metrics_raw
-
+    # Champion metrics stay exactly as computed from the fitted model's
+    # predictions. Reference (developer-reported) values are kept apart in
+    # `reference` and never written into replication_result["metrics"].
     y_true = replication_result.get("y_test")
     y_proba = replication_result.get("y_proba")
     y_true_arr = np.asarray(y_true).astype(int) if y_true is not None else None
@@ -3944,8 +4147,6 @@ async def validation_performance(
 
     metrics = dict(replication_result.get("metrics") or {})
     metrics = {k: _json_safe_scalar(v) for k, v in metrics.items()}
-    if mdd_reported:
-        metrics["mdd_reported"] = mdd_reported
 
     roc_curve = []
     if y_true_arr is not None and y_proba_arr is not None:
@@ -3966,9 +4167,26 @@ async def validation_performance(
         mdd_text=mdd_text,
     )
     performance_report["benchmark"] = benchmark_payload
+    performance_report["reference_metrics"] = reference
+    performance_report["metric_provenance"] = build_metric_provenance(reference)
 
+    run_id = str(uuid.uuid4())
+    dataset_name_for_log = getattr(file, "filename", None) or intake_payload.get("dataset_name") or None
+    run_identity = registered_run_identity(registered_model_id, df)
+    dataset_sha256 = run_identity["dataset_sha256"]
     result = {
         "stage": "performance",
+        "evidence": {
+            "run_id": run_id,
+            "persisted": True,
+            "registered_model_id": run_identity["registered_model_id"],
+            "training_run_id": run_identity["training_run_id"],
+            "algorithm": model_name,
+            "challenger_model_name": challenger_model_name,
+            "dataset_name": dataset_name_for_log,
+            "dataset_sha256": dataset_sha256,
+            "executed_at": pd.Timestamp.now().isoformat(),
+        },
         "report": performance_report,
     }
 
@@ -3976,15 +4194,24 @@ async def validation_performance(
         persistence.log_event(
             persistence.VALIDATION_PIPELINE_LOG,
             stage="performance",
+            run_id=run_id,
             payload={
+                "dataset_name": dataset_name_for_log,
+                "dataset_sha256": dataset_sha256,
+                "registered_model_id": run_identity["registered_model_id"],
+                "training_run_id": run_identity["training_run_id"],
                 "model_name": model_name,
                 "metrics": metrics,
+                "reference_metrics": reference["values"],
+                "reference_sources": reference["sources"],
+                "metric_provenance_version": METRIC_PROVENANCE_SCHEMA_VERSION,
                 "champion_vs_challenger": benchmark_payload.get("status") if isinstance(benchmark_payload, dict) else None,
             },
             full_payload=result,
         )
     except Exception as e:
         print(f"[persistence] failed to log benchmarking: {e}")
+        result["evidence"] = {**result["evidence"], "run_id": None, "persisted": False}
 
     return result
 
@@ -4089,14 +4316,41 @@ async def validation_replication(
     intake_json: Optional[str] = Form(None),
     model_params_json: Optional[str] = Form(None),
     model_params_source: Optional[str] = Form(None),
+    reported_sources_json: Optional[str] = Form(None),
+    registered_model_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Run backend replication checks. Returns {'flags', 'report'} to match existing shapes.
+
+    Two methodologies (recorded in `report.replication.result.methodology`):
+
+    * `registered_model_id` given → registered-model reproduction. The
+      model's recorded lineage contract (Model Inventory) drives everything:
+      algorithm, fitted hyperparameters, features, preprocessing, split and
+      seed. Form fields describing configuration (algorithm, model_params_*,
+      test_size, val_size, random_seed, target_col) are ignored and listed in
+      `ignored_inputs`. It performs A) exact artifact reproduction and
+      B) independent training reproduction (see model_lineage.py), and R4.x
+      compare the reproduction against the ORIGINAL model's performance;
+      developer-reported values stay reference-only. If the lineage,
+      artifact, or original data is unavailable, the run reports that and
+      does not substitute anything. An unknown model ID returns 404.
+
+    * no `registered_model_id` → the previous behaviour, kept for API
+      compatibility: an independent refit from the configuration supplied in
+      the request. It is labelled `unregistered_independent_refit` and is
+      not a reproduction of a registered model (the final verdict will not
+      accept it as replication evidence).
 
     `reported` (the developer-reported metrics R4.2/R4.3/R4.4/R4.8 compare against)
     can come from two places, combinable: `reported_json` (e.g. pulled from an
     already-completed training run's evaluation_metrics) and/or an uploaded MDD
     file. When both are present, values extracted from the MDD take precedence
     per-key, since the MDD is the authoritative developer documentation.
+    `reported_sources_json` optionally labels where each `reported_json`
+    value came from (intake_mdd / development_training_run / manual_entry /
+    demo_intake). The exact reference values used for the checks, with a
+    per-key source, are returned as `report.reference_metrics` and saved
+    with the run, so the UI shows what was actually compared.
 
     This now also returns the full performance report (`report.metrics`,
     `report.roc_curve`, `report.pr_curve`, `report.confusion_matrix`,
@@ -4131,10 +4385,41 @@ async def validation_replication(
     except Exception:
         seed_list = [random_seed]
 
-    try:
-        business_model_name, estimator_name = resolve_replication_model_inputs(model_name, algorithm)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    registered_entry: Optional[Dict[str, Any]] = None
+    ignored_inputs: List[str] = []
+    if registered_model_id and registered_model_id.strip():
+        registered_model_id = registered_model_id.strip()
+        registered_entry = next(
+            (m for m in persistence.load_model_inventory().get("development", [])
+             if isinstance(m, dict) and str(m.get("model_id") or "").strip() == registered_model_id),
+            None,
+        )
+        if registered_entry is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Registered model '{registered_model_id}' was not found in the Model Inventory. Replication was not run.",
+            )
+        contract = registered_entry.get("lineage_contract") or {}
+        business_model_name = str(registered_entry.get("model_name") or "").strip()
+        estimator_name = str(contract.get("estimator_name") or registered_entry.get("algorithm") or "").strip()
+        if contract.get("target_col"):
+            if target_col != contract["target_col"]:
+                ignored_inputs.append(f"target_col ('{target_col}' — the registered model's target '{contract['target_col']}' is used)")
+            target_col = contract["target_col"]
+        for name, value in (("algorithm", algorithm), ("model_params_json", model_params_json),
+                            ("model_params_source", model_params_source)):
+            if value:
+                ignored_inputs.append(name)
+        if (model_name or "").strip() and (model_name or "").strip() != business_model_name:
+            ignored_inputs.append(f"model_name ('{model_name}' — the registered name '{business_model_name}' is used)")
+        model_params_json = None
+        model_params_source = None
+    else:
+        registered_model_id = None
+        try:
+            business_model_name, estimator_name = resolve_replication_model_inputs(model_name, algorithm)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Developer configuration for the model being replicated — see the
     # docstring above. `replication_config_source` is derived entirely from
@@ -4148,7 +4433,9 @@ async def validation_replication(
                 model_params = parsed_model_params
         except Exception:
             model_params = None
-    if model_params:
+    if registered_entry is not None:
+        replication_config_source = "registered_lineage_contract"
+    elif model_params:
         replication_config_source = (
             model_params_source
             if model_params_source in ("developer_hyperopt_best_params", "developer_training_config")
@@ -4164,15 +4451,9 @@ async def validation_replication(
         except Exception:
             intake_payload = {}
 
-    reported: Dict[str, Any] = {}
     mdd_text = ""
-    if reported_json:
-        try:
-            parsed = json.loads(reported_json)
-            if isinstance(parsed, dict):
-                reported.update({k: v for k, v in parsed.items() if v is not None})
-        except Exception:
-            pass
+    mdd_extracted: Dict[str, Any] = {}
+    mdd_error: Optional[str] = None
     if mdd_file is not None:
         try:
             if not intake_payload.get("mdd_document_path"):
@@ -4181,19 +4462,21 @@ async def validation_replication(
             pass
         try:
             # parse_mdd_file was ported from Streamlit and expects a sync
-            # file-like object with .name/.seek()/.read(). FastAPI's
-            # UploadFile itself is async (.filename, async .read()/.seek()),
-            # so we reach through to the underlying SpooledTemporaryFile the
-            # same way _read_dataframe() does elsewhere, and attach the
-            # filename it needs for extension sniffing (.pdf/.docx/.txt).
-            mdd_file.file.seek(0)
-            mdd_underlying = mdd_file.file
-            mdd_underlying.name = mdd_file.filename or ""
-            mdd_text = parse_mdd_file(mdd_underlying)
-            mdd_reported = extract_metrics_from_mdd(mdd_text)
-            reported.update({k: v for k, v in mdd_reported.items() if v is not None})
-        except Exception:
-            pass
+            # file-like object with .name/.seek()/.read(). _sync_file_like
+            # provides that (and seeks to 0, since _save_uploaded_mdd above
+            # already read the stream). Assigning .name directly on the
+            # SpooledTemporaryFile raises on current Python versions — that
+            # used to be swallowed silently, so MDD metrics were never read.
+            mdd_text = parse_mdd_file(_sync_file_like(mdd_file))
+            mdd_extracted = extract_metrics_from_mdd(mdd_text)
+        except Exception as exc:
+            mdd_error = str(exc)
+
+    # Reference (developer-reported) metrics for R4.2/R4.3/R4.4/R4.8, with a
+    # per-key source. Only ever compared against — never merged into the
+    # computed replication metrics.
+    reference = build_reference_metrics(reported_json, reported_sources_json, mdd_extracted, mdd_error)
+    reported: Dict[str, Any] = dict(reference["values"])
 
     # The dataset identity used to scope replication resume (see the
     # /history/latest call below) — the same filename/intake fallback the
@@ -4206,6 +4489,10 @@ async def validation_replication(
     # name is known, so two different nameless uploads can never be
     # mistaken for the same dataset by the resume filter.
     dataset_name_for_log = getattr(file, "filename", None) or intake_payload.get("dataset_name") or None
+    # Content fingerprint of the exact data this run used — part of the
+    # evidence Stage 7 (final verdict) verifies before trusting this run.
+    dataset_sha256 = dataset_fingerprint(df)
+    validation_model_id: Optional[str] = None
 
     # Ensure the Model Inventory is updated from real validation uploads/intake.
     try:
@@ -4222,11 +4509,14 @@ async def validation_replication(
             "uploaded_by": intake_payload.get("model_owner") or "user",
             "uploaded_at": pd.Timestamp.now().isoformat(),
         }
-        persistence.register_validation_run(
+        registration = persistence.register_validation_run(
             store=store,
             business_model_name=inventory_model_name,
             estimator_name=estimator_name,
             intake_payload={
+                # Links the validation engagement to the registered
+                # development model (related_model_id) when reproducing one.
+                "model_id": registered_model_id,
                 "model_type": intake_payload.get("model_type") or "PD (Probability of Default)",
                 "model_purpose": intake_payload.get("model_purpose") or intake_payload.get("business_purpose"),
                 "model_owner": intake_payload.get("model_owner") or intake_payload.get("owner") or "Unknown",
@@ -4243,27 +4533,53 @@ async def validation_replication(
             user=intake_payload.get("model_owner") or "user",
         )
         persistence.save_model_inventory(store)
+        validation_model_id = (registration or {}).get("model_id")
     except Exception as e:
         print(f"[persistence] failed to update inventory from replication: {e}")
 
-    result = run_replication(
-        df=df,
-        target_col=target_col,
-        model_name=estimator_name,
-        test_size=test_size,
-        val_size=val_size,
-        random_seed=random_seed,
-        cv_folds=cv_folds,
-        reported=reported,
-        seeds=seed_list,
-        model_params=model_params,
-    )
-
-    checks = []
-    try:
-        checks = evaluate_replication_checks(result, reported, seed_list)
-    except Exception:
+    if registered_entry is not None:
+        # Registered-model reproduction: configuration from the lineage
+        # contract; R4.x compare against the ORIGINAL model's performance
+        # (the re-scored artifact, or the metrics recorded at training if the
+        # artifact is unavailable — the methodology says which).
+        result = model_lineage.run_registered_replication(
+            df, registered_entry, dataset_sha256=dataset_sha256, seeds=seed_list,
+        )
+        comparator = result.get("original_metrics") or {}
         checks = []
+        try:
+            checks = evaluate_replication_checks(result, comparator, seed_list, comparator_label="Original model")
+        except Exception:
+            checks = []
+        # R4.7 comes from result["split_integrity"] (built by
+        # model_lineage.registered_split_integrity), like every other mode.
+    else:
+        result = run_replication(
+            df=df,
+            target_col=target_col,
+            model_name=estimator_name,
+            test_size=test_size,
+            val_size=val_size,
+            random_seed=random_seed,
+            cv_folds=cv_folds,
+            reported=reported,
+            seeds=seed_list,
+            model_params=model_params,
+        )
+        result["methodology"] = {
+            "mode": model_lineage.REPLICATION_MODE_UNREGISTERED,
+            "registered_model_id": None,
+            "detail": "Independent refit from the configuration supplied in this request (algorithm, split sizes, "
+                      "optional parameters). It is NOT a reproduction of a registered model: no registered "
+                      "artifact, recorded hyperparameters, preprocessing or dataset lineage were used.",
+            "limitations": ["Not linked to a registered model — cannot serve as replication evidence for a final verdict."],
+        }
+        checks = []
+        try:
+            checks = evaluate_replication_checks(result, reported, seed_list)
+        except Exception:
+            checks = []
+    result.setdefault("methodology", {})["ignored_inputs"] = ignored_inputs
 
     # Build flags similar to Agent2: list of failing check ids
     flags = [c["id"] for c in checks if c.get("status") in ("FAIL",)]
@@ -4279,12 +4595,38 @@ async def validation_replication(
 
     performance_report = _build_performance_report(df, result, intake_payload, mdd_text)
 
+    # Identity of this exact execution. Stage 7 (final verdict) reloads the
+    # run from the log by run_id and checks every field below, so a verdict
+    # can only rest on a replication that really ran, for this model, on
+    # this data.
+    run_id = str(uuid.uuid4())
+    methodology = result.get("methodology") or {}
+    evidence = {
+        "run_id": run_id,
+        "persisted": True,
+        "replication_mode": methodology.get("mode"),
+        "registered_model_id": registered_model_id,
+        "training_run_id": methodology.get("training_run_id"),
+        "execution_status": "COMPLETED" if result.get("success") else "FAILED",
+        "validation_model_id": validation_model_id,
+        "business_model_name": business_model_name,
+        "algorithm": estimator_name,
+        "dataset_name": dataset_name_for_log,
+        "dataset_sha256": dataset_sha256,
+        "dataset_rows": int(df.shape[0]),
+        "target_col": target_col,
+        "executed_at": pd.Timestamp.now().isoformat(),
+    }
+
     response_payload = {
         "stage": "replication",
         "flags": flags,
+        "evidence": evidence,
         "report": {
             "replication": {"result": safe_result, "checks": checks},
             **performance_report,
+            "reference_metrics": reference,
+            "metric_provenance": build_metric_provenance(reference),
         },
     }
 
@@ -4297,14 +4639,28 @@ async def validation_replication(
                 "algorithm": estimator_name,
                 "model_name": estimator_name,
                 "dataset_name": dataset_name_for_log,
+                "dataset_sha256": dataset_sha256,
+                "validation_model_id": validation_model_id,
+                "registered_model_id": registered_model_id,
+                "training_run_id": methodology.get("training_run_id"),
+                "replication_mode": methodology.get("mode"),
+                "execution_status": "COMPLETED" if result.get("success") else "FAILED",
+                "exact_artifact_reproduction": (methodology.get("exact_artifact_reproduction") or {}).get("status"),
+                "independent_training_reproduction": (methodology.get("independent_training_reproduction") or {}).get("status"),
                 "replication_config_source": replication_config_source,
                 "metrics": performance_report.get("metrics"),
+                "reference_metrics": reference["values"],
+                "reference_sources": reference["sources"],
+                "metric_provenance_version": METRIC_PROVENANCE_SCHEMA_VERSION,
                 "flags": flags,
             },
             full_payload=response_payload,
+            run_id=run_id,
         )
     except Exception as e:
         print(f"[persistence] failed to log replication: {e}")
+        # Not saved, so it cannot serve as verifiable evidence later.
+        response_payload["evidence"] = {**evidence, "run_id": None, "persisted": False}
 
     return response_payload
 
@@ -4321,8 +4677,12 @@ async def validation_stage7_bias_check(
     val_size: float = Form(0.15),
     random_seed: int = Form(42),
     cv_folds: int = Form(5),
+    registered_model_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Stage 7 Fair Lending Bias Check (Explainability & Fairness tab).
+
+    `registered_model_id` (optional) is only recorded with the saved run, so
+    history can be scoped to the registered model under validation.
 
     Mirrors app.py's render_val_regulatory() Tab 2 bias-check button. The
     backend is stateless (no persisted Stage 4 session), so this reruns the
@@ -4364,6 +4724,7 @@ async def validation_stage7_bias_check(
             persistence.VALIDATION_PIPELINE_LOG,
             stage="fair_lending_bias",
             payload={
+                **registered_run_identity(registered_model_id, df),
                 "model_name": resolved_model_name,
                 "protected_col": protected_col,
                 "success": result.get("success"),
@@ -4391,8 +4752,12 @@ async def validation_stress_run(
     cv_folds: int = Form(5),
     freq: Optional[str] = Form("quarterly"),
     date_col: Optional[str] = Form(None),
+    registered_model_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Stage 6 — Stress Testing & Backtesting.
+
+    `registered_model_id` (optional) is only recorded with the saved run, so
+    history can be scoped to the registered model under validation.
 
     Runs everything from validation_stress_core.run_stress_suite() in one call:
     ablation-based sensitivity (6.1), macro stress scenarios (6.2), PSI score
@@ -4427,6 +4792,7 @@ async def validation_stress_run(
         reported={},
         seeds=seed_list,
         compute_seed_stability=False,
+        compute_split_integrity=False,
     )
 
     suite = run_stress_suite(rep_result, val_df=df, freq_key=freq or "quarterly", date_col=date_col)
@@ -4437,6 +4803,7 @@ async def validation_stress_run(
             persistence.VALIDATION_PIPELINE_LOG,
             stage="stress_testing",
             payload={
+                **registered_run_identity(registered_model_id, df),
                 "model_name": resolved_model_name,
                 "scenarios": list(suite.keys()) if isinstance(suite, dict) else None,
             },
@@ -4495,6 +4862,7 @@ async def validation_stress_shock(
         reported={},
         seeds=seed_list,
         compute_seed_stability=False,
+        compute_split_integrity=False,
     )
 
     try:
@@ -4589,9 +4957,20 @@ def _normalize_finding(f: dict) -> dict:
 
 
 def _derive_feature_importance_payload(report: dict, df=None, model_file: Optional[UploadFile] = None, intake: Optional[dict] = None) -> dict:
-    """Build a frontend-friendly feature importance payload from available artifacts."""
+    """Feature importance of the actual model, with its source stated.
+
+    Only two sources are used: an uploaded model artifact, or the
+    importances ValidationAgent2's own replication produced. The previous
+    fallback — a Logistic Regression fitted on whatever column looked like a
+    binary target, using raw coefficient size on unscaled features — is
+    removed: the target could be guessed wrongly, and unscaled coefficients
+    reflect units rather than relevance, so it was not the model's feature
+    relevance. When neither source is available, nothing is returned and
+    `importance_source` says why."""
     replicated = report.get("replicated_importances", {}) or {}
     importance_df = None
+    importance_source = "unavailable"
+    importance_note = "No model artifact was supplied and no replication importances were produced, so feature relevance was not assessed."
 
     if model_file is not None:
         try:
@@ -4601,36 +4980,9 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
             df_imp = extract_feature_importance(pipeline)
             if df_imp is not None:
                 importance_df = df_imp.to_dict(orient="records")
-        except Exception:
-            importance_df = None
-
-    if importance_df is None and df is not None and not getattr(df, "empty", True):
-        try:
-            target_col = None
-            if intake:
-                target_col = intake.get("target_col") or intake.get("target") or intake.get("default_col")
-            if target_col and target_col in df.columns:
-                target_series = df[target_col]
-            else:
-                target_candidates = [c for c in df.columns if df[c].nunique(dropna=True) <= 2]
-                target_col = target_candidates[0] if target_candidates else None
-                target_series = df[target_col] if target_col else None
-            if target_col and target_series is not None:
-                feature_candidates = [c for c in df.columns if c != target_col and pd.api.types.is_numeric_dtype(df[c])]
-                if feature_candidates:
-                    X = df[feature_candidates].fillna(df[feature_candidates].median())
-                    y = target_series.astype(int).fillna(0)
-                    if y.nunique() >= 2:
-                        model = LogisticRegression(max_iter=1000, random_state=42)
-                        model.fit(X, y)
-                        coef_abs = np.abs(model.coef_).mean(axis=0)
-                        importance_series = pd.Series(coef_abs, index=feature_candidates).sort_values(ascending=False)
-                        importance_df = [
-                            {"Feature": feature, "Importance": float(score)}
-                            for feature, score in importance_series.items()
-                        ]
-        except Exception:
-            importance_df = None
+                importance_source, importance_note = "uploaded_model_artifact", "Importances of the uploaded model artifact."
+        except Exception as exc:
+            importance_note = f"The uploaded model artifact could not be read: {type(exc).__name__}: {exc}"
 
     if importance_df is None and replicated:
         try:
@@ -4638,6 +4990,7 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
                 {"Feature": feature, "Importance": float(score)}
                 for feature, score in sorted(replicated.items(), key=lambda item: item[1], reverse=True)
             ]
+            importance_source, importance_note = "validation_agent2_replication", "Importances of ValidationAgent2's replicated model."
         except Exception:
             importance_df = None
 
@@ -4646,6 +4999,8 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
         "replicated_importances": replicated,
         "importance_df": importance_df,
         "top_drivers": top_drivers,
+        "importance_source": importance_source,
+        "importance_note": importance_note,
     }
 
 
@@ -4877,6 +5232,11 @@ def _group_stage3(report: dict, rag_results: Optional[List[dict]] = None, df=Non
     }
 
 
+# Placeholder text for LLM-reviewed rules when the MDD is present but the
+# (slow) LLM call is deferred to the follow-up /llm-check request.
+_LLM_QUEUED_REASON = "LLM review not run yet — queued as a follow-up request for the uploaded MDD."
+
+
 @app.post("/validation/stage2/run")
 async def validation_stage2_run(
     file: Optional[UploadFile] = File(None),
@@ -4938,7 +5298,10 @@ async def validation_stage2_run(
         # LLM verdicts are fetched afterward by the frontend via
         # /validation/stage2/llm-check (see mapped["llm_pending"] below).
         try:
-            rag_results.extend(source_agent.check_documents_with_llm({}, stage="data_validation", frameworks=selected_frameworks))
+            rag_results.extend(source_agent.check_documents_with_llm(
+                {}, stage="data_validation", frameworks=selected_frameworks,
+                skip_reason=_LLM_QUEUED_REASON if mdd_text else "No document uploaded yet.",
+            ))
         except Exception:
             pass
 
@@ -5032,7 +5395,10 @@ async def validation_stage3_run(
         # frontend via /validation/stage3/llm-check (see
         # mapped["llm_pending"] below).
         try:
-            rag_results.extend(source_agent.check_documents_with_llm({}, stage="conceptual_soundness", frameworks=selected_frameworks))
+            rag_results.extend(source_agent.check_documents_with_llm(
+                {}, stage="conceptual_soundness", frameworks=selected_frameworks,
+                skip_reason=_LLM_QUEUED_REASON if mdd_text else "No document uploaded yet.",
+            ))
         except Exception:
             pass
 
@@ -5049,6 +5415,9 @@ async def validation_stage3_run(
             persistence.VALIDATION_PIPELINE_LOG,
             stage="conceptual_soundness",
             payload={
+                # Registered model chosen at Intake (intake_json), so the
+                # Data & Model Soundness resume can be scoped to it.
+                **registered_run_identity((intake or {}).get("registered_model_id") if isinstance(intake, dict) else None, df),
                 "summary": mapped.get("summary"),
                 "verdict": mapped.get("regulatoryAlignment", {}).get("verdict"),
             },
@@ -5138,6 +5507,247 @@ async def validation_parse_mdd(
     return {"mdd_text": mdd_text, "metrics": metrics, "mdd_document_path": mdd_document_path}
 
 
+# ── Final-verdict evidence gate ──────────────────────────────────────────────
+# The final verdict may only rest on a Model Replication run that the server
+# itself reloads from the validation log and verifies: it really ran, for
+# this model, on this exact dataset, with every mandatory check executed.
+# Metrics posted by the browser are never trusted for the verdict, and
+# developer-reported values are only ever the comparator inside R4.2/R4.3.
+VERDICT_POLICY_VERSION = 4  # 4: R4.5 / R4.6 redesigned (stability_checks.py)
+MANDATORY_REPLICATION_CHECKS: Dict[str, str] = {
+    "R4.1": "End-to-end training",
+    "R4.2": "Reproduced AUC vs original model",
+    "R4.3": "Reproduced Gini / KS vs original model",
+    "R4.5": "Feature stability across repeated runs",
+    "R4.6": "Predictive performance stability across repeated runs",
+    "R4.7": "Train/test separation (no contamination)",
+}
+# Registered-model reproduction requirements (Phase 3): both reproductions
+# must succeed, and every lineage check except library versions must pass.
+REQUIRED_REPRODUCTION_STATUS = {
+    "exact_artifact_reproduction": "REPRODUCED",
+    "independent_training_reproduction": "REPRODUCED",
+}
+NON_BLOCKING_LINEAGE_CHECKS = {"L8"}  # library versions: WARN is disclosed, not blocking
+# R4.7 used to be a hard-coded PASS (audit finding H1) and was excluded here.
+# It is now built from executed evidence (split_integrity.py) and is
+# mandatory, so nothing is excluded. Kept (empty) for API compatibility.
+EXCLUDED_REPLICATION_CHECKS: Dict[str, str] = {}
+REQUIRED_REPLICATION_METRICS = ("roc_auc", "gini", "ks")
+# Must match exactly. The registered Model Inventory ID is the primary model
+# identity (names are informational); dataset_name is recorded for the report
+# only — the content fingerprint (dataset_sha256) is the dataset identity.
+_IDENTITY_FIELDS = ("registered_model_id", "dataset_sha256")
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return value is not None and not isinstance(value, bool) and bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any]) -> Dict[str, Any]:
+    """Status is one of:
+    PASS          — verified run, all mandatory checks executed and passed
+    FAIL          — verified run, at least one mandatory check FAILED
+    INCONCLUSIVE  — a run was supplied but cannot be trusted or is incomplete
+    NOT_ASSESSED  — no replication run was supplied at all
+    """
+    out: Dict[str, Any] = {
+        "status": None, "run_id": run_id or None, "reasons": [], "execution_failed": False,
+        "identity": {}, "metrics": {}, "reference_metrics": {}, "mandatory_checks": [],
+        "failed_mandatory_checks": [], "failed_other_checks": [], "executed_at": None,
+    }
+
+    def _done(status: str, *reasons: str) -> Dict[str, Any]:
+        out["status"] = status
+        out["reasons"].extend(r for r in reasons if r)
+        return out
+
+    if not run_id:
+        return _done("NOT_ASSESSED", "No Model Replication run was supplied — replication has not been executed for this validation.")
+
+    run = persistence.get_run(persistence.VALIDATION_PIPELINE_LOG, run_id)
+    if run is None:
+        return _done("INCONCLUSIVE", f"Replication run {run_id} was not found in the validation log.")
+    if run.get("stage") != "replication":
+        return _done("INCONCLUSIVE", f"Run {run_id} is a '{run.get('stage')}' run, not a Model Replication run, so it cannot serve as replication evidence.")
+    out["executed_at"] = run.get("timestamp")
+    if run.get("record_status") == "legacy":
+        return _done("INCONCLUSIVE", f"Replication run {run_id} is a legacy record: {run.get('record_status_reason')} Re-run Model Replication.")
+
+    payload = run.get("full_payload") or {}
+    report = payload.get("report") or {}
+    if not payload or not report:
+        return _done("INCONCLUSIVE", f"The saved record for replication run {run_id} is missing.")
+    if int((report.get("metric_provenance") or {}).get("schema_version") or 0) < METRIC_PROVENANCE_SCHEMA_VERSION:
+        return _done("INCONCLUSIVE", f"Replication run {run_id} predates metric provenance recording (legacy run) and cannot be verified. Re-run Model Replication.")
+    if (payload.get("evidence") or {}).get("run_id") != run_id:
+        return _done("INCONCLUSIVE", f"The saved record for run {run_id} does not carry a matching run identity.")
+
+    # Identity: what the run logged must equal what this validation claims.
+    summary = run.get("summary") or {}
+    identity_problems: List[str] = []
+    out["identity"]["dataset_name"] = {"replication_run": summary.get("dataset_name"), "current_validation": claimed.get("dataset_name")}
+    out["identity"]["business_model_name"] = {"replication_run": summary.get("business_model_name"), "current_validation": claimed.get("business_model_name")}
+    out["identity"]["dataset_identity_source"] = claimed.get("dataset_identity_source")
+    for field in _IDENTITY_FIELDS:
+        logged = summary.get(field)
+        current = claimed.get(field)
+        out["identity"][field] = {"replication_run": logged, "current_validation": current}
+        if current in (None, ""):
+            identity_problems.append(f"Current validation did not supply {field}, so the run cannot be matched to it.")
+        elif logged in (None, ""):
+            identity_problems.append(f"Replication run {run_id} did not record {field}.")
+        elif str(logged).strip() != str(current).strip():
+            identity_problems.append(f"{field} mismatch: replication ran on '{logged}', current validation is '{current}'.")
+
+    # Optional secondary identity: the validation engagement record.
+    if claimed.get("validation_model_id") and summary.get("validation_model_id") \
+            and str(claimed["validation_model_id"]).strip() != str(summary["validation_model_id"]).strip():
+        identity_problems.append(
+            f"validation_model_id mismatch: replication recorded '{summary['validation_model_id']}', "
+            f"current validation is '{claimed['validation_model_id']}'."
+        )
+
+    result = (report.get("replication") or {}).get("result") or {}
+    methodology = result.get("methodology") or {}
+    out["methodology"] = {
+        "mode": methodology.get("mode"),
+        "registered_model_id": methodology.get("registered_model_id"),
+        "training_run_id": methodology.get("training_run_id"),
+        "exact_artifact_reproduction": (methodology.get("exact_artifact_reproduction") or {}).get("status"),
+        "independent_training_reproduction": (methodology.get("independent_training_reproduction") or {}).get("status"),
+        "original_metrics_source": methodology.get("original_metrics_source"),
+        "lineage_checks": methodology.get("lineage_checks") or [],
+        "limitations": methodology.get("limitations") or [],
+    }
+    if methodology.get("mode") != model_lineage.REPLICATION_MODE_REGISTERED:
+        identity_problems.append(
+            "This run was an independent refit from configuration supplied on screen, not a reproduction of a "
+            "registered model, so it cannot serve as replication evidence. Re-run replication for the registered model."
+        )
+
+    # The registered model must still exist and still be the same training
+    # (a retrained model has a new contract; earlier reproductions are stale).
+    reg_id = summary.get("registered_model_id")
+    if reg_id and methodology.get("mode") == model_lineage.REPLICATION_MODE_REGISTERED:
+        reg_entry = next(
+            (m for m in persistence.load_model_inventory().get("development", [])
+             if isinstance(m, dict) and str(m.get("model_id") or "").strip() == str(reg_id).strip()),
+            None,
+        )
+        current_training_run = ((reg_entry or {}).get("lineage_contract") or {}).get("training_run_id")
+        if reg_entry is None:
+            identity_problems.append(f"Registered model {reg_id} is no longer in the Model Inventory.")
+        elif methodology.get("training_run_id") and current_training_run != methodology.get("training_run_id"):
+            identity_problems.append(
+                f"Registered model {reg_id} has been retrained since this replication "
+                f"(replicated training run {methodology.get('training_run_id')}, current {current_training_run}). Re-run replication."
+            )
+    if identity_problems:
+        return _done("INCONCLUSIVE", *identity_problems)
+
+    if result.get("success") is not True:
+        out["execution_failed"] = True
+        return _done("INCONCLUSIVE", f"Model replication did not complete: {result.get('error') or 'unknown error'}.")
+
+    # Reproduction outcomes. A reproduction that ran and disagreed is a
+    # failure of the model's reproducibility (FAIL); one that could not run
+    # (artifact or configuration unavailable) leaves the question open.
+    reproduction_failures: List[str] = []
+    reproduction_gaps: List[str] = []
+    for key, required in REQUIRED_REPRODUCTION_STATUS.items():
+        step = methodology.get(key) or {}
+        status = step.get("status")
+        label = key.replace("_", " ").capitalize()
+        if status == required:
+            continue
+        if status in ("MISMATCH", "DIVERGED"):
+            reproduction_failures.append(f"{label}: {status} — {step.get('detail')}")
+        else:
+            reproduction_gaps.append(f"{label}: {status or 'NOT RUN'} — {step.get('detail') or 'not performed'}")
+    for check in methodology.get("lineage_checks") or []:
+        if check.get("id") not in NON_BLOCKING_LINEAGE_CHECKS and check.get("status") != "PASS":
+            reproduction_gaps.append(f"Lineage check {check.get('id')} ({check.get('title')}): {check.get('status')} — {check.get('detail')}")
+
+    metrics = result.get("metrics") or {}
+    missing_metrics = [k for k in REQUIRED_REPLICATION_METRICS if not _is_finite_number(metrics.get(k))]
+    out["metrics"] = {k: v for k, v in metrics.items() if _is_finite_number(v)}
+    out["reference_metrics"] = dict((report.get("reference_metrics") or {}).get("values") or {})
+    if missing_metrics:
+        return _done("INCONCLUSIVE", f"Replication produced no valid value for: {', '.join(missing_metrics)}.")
+
+    checks = {c.get("id"): c for c in (report.get("replication") or {}).get("checks") or [] if isinstance(c, dict)}
+    not_executed: List[str] = []
+    for check_id, title in MANDATORY_REPLICATION_CHECKS.items():
+        check = checks.get(check_id)
+        status = (check or {}).get("status") or "MISSING"
+        out["mandatory_checks"].append({"id": check_id, "title": title, "status": status, "observed": (check or {}).get("observed")})
+        if status == "FAIL":
+            out["failed_mandatory_checks"].append({"id": check_id, "title": title, "observed": check.get("observed")})
+        elif status != "PASS":
+            reason = "not present in the run" if check is None else f"{status}: {check.get('observed') or 'not executed'}"
+            not_executed.append(f"Mandatory check {check_id} ({title}) was not completed — {reason}.")
+    for check_id, check in checks.items():
+        if check_id not in MANDATORY_REPLICATION_CHECKS and check_id not in EXCLUDED_REPLICATION_CHECKS and check.get("status") == "FAIL":
+            out["failed_other_checks"].append({"id": check_id, "title": check.get("title"), "observed": check.get("observed")})
+
+    if out["failed_mandatory_checks"] or reproduction_failures:
+        return _done(
+            "FAIL",
+            *reproduction_failures,
+            *[f"Mandatory check {c['id']} ({c['title']}) failed: {c['observed']}" for c in out["failed_mandatory_checks"]],
+            *reproduction_gaps, *not_executed,
+        )
+    if reproduction_gaps or not_executed:
+        return _done("INCONCLUSIVE", *reproduction_gaps, *not_executed)
+    return _done("PASS", "Registered model reproduced exactly from its artifact and independently retrained from its recorded "
+                         "configuration; all mandatory replication checks executed and passed on the verified run.")
+
+
+def assess_benchmark_evidence(run_id: Optional[str], claimed: Dict[str, Any]) -> Dict[str, Any]:
+    """Benchmarking is optional for the verdict, but a supplied benchmark is
+    only used if it is a current-format Benchmarking run on the same data."""
+    if not run_id:
+        return {"status": "NOT_SUPPLIED", "run_id": None, "reasons": [], "metrics": {}}
+    out: Dict[str, Any] = {"status": "REJECTED", "run_id": run_id, "reasons": [], "metrics": {}}
+    run = persistence.get_run(persistence.VALIDATION_PIPELINE_LOG, run_id)
+    if run is None:
+        out["reasons"].append(f"Benchmark run {run_id} was not found in the validation log.")
+        return out
+    if run.get("stage") != "performance":
+        out["reasons"].append(f"Run {run_id} is a '{run.get('stage')}' run, not a current Benchmarking run (legacy or wrong stage).")
+        return out
+    if run.get("record_status") == "legacy":
+        out["reasons"].append(f"Benchmark run {run_id} is a legacy record: {run.get('record_status_reason')}")
+        return out
+    payload = run.get("full_payload") or {}
+    report = payload.get("report") or {}
+    if int((report.get("metric_provenance") or {}).get("schema_version") or 0) < METRIC_PROVENANCE_SCHEMA_VERSION:
+        out["reasons"].append(f"Benchmark run {run_id} predates metric provenance recording (legacy run).")
+        return out
+    logged_sha = (run.get("summary") or {}).get("dataset_sha256")
+    if not logged_sha or logged_sha != claimed.get("dataset_sha256"):
+        out["reasons"].append("Benchmark run used a different dataset from the verified replication run.")
+        return out
+    logged_model = (run.get("summary") or {}).get("registered_model_id")
+    if claimed.get("registered_model_id") and logged_model != claimed.get("registered_model_id"):
+        out["reasons"].append(
+            f"Benchmark run was recorded for registered model '{logged_model or 'none'}', not '{claimed.get('registered_model_id')}'."
+        )
+        return out
+    bench = report.get("benchmark") or {}
+    if bench.get("status") != "OK":
+        out["reasons"].append(f"Benchmark run did not complete (status {bench.get('status')}).")
+        return out
+    out["status"] = "ACCEPTED"
+    out["metrics"] = {k: v for k, v in (bench.get("metrics") or {}).items() if _is_finite_number(v)}
+    out["model_name"] = bench.get("model_name")
+    return out
+
+
 @app.post("/validation/stage8/findings")
 async def validation_stage8_findings(
     intake_json: Optional[str] = Form(None),
@@ -5147,6 +5757,15 @@ async def validation_stage8_findings(
     benchmark_metrics_json: Optional[str] = Form(None),
     shock_result_json: Optional[str] = Form(None),
     bias_auc_gap: Optional[float] = Form(None),
+    replication_run_id: Optional[str] = Form(None),
+    business_model_name: Optional[str] = Form(None),
+    validation_model_id: Optional[str] = Form(None),
+    dataset_name: Optional[str] = Form(None),
+    dataset_sha256: Optional[str] = Form(None),
+    benchmark_run_id: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    csv_text: Optional[str] = Form(None),
+    registered_model_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Compile the Stage 8 Findings Tracker + overall verdict.
 
@@ -5157,6 +5776,22 @@ async def validation_stage8_findings(
     stage's own endpoint/response. CALIBRATION_KEYWORDS/STAGING_KEYWORDS are
     imported from the same source-of-truth validation_agent2.py Stage 3 uses,
     so the keyword lists can't drift between stages.
+
+    Evidence-based verdict (audit finding C2): replication metrics are no
+    longer taken from the browser. The verdict reloads the Model Replication
+    run named by `replication_run_id` from the validation log and verifies
+    it (see assess_replication_evidence). If the current dataset is sent
+    (`file`/`csv_text`) its fingerprint is computed here and must equal the
+    replication run's; otherwise the client-supplied `dataset_sha256` is
+    used. `rep_metrics_json` and `benchmark_metrics_json` are still accepted
+    for API compatibility but ignored; a benchmark is only used when
+    `benchmark_run_id` points to a verified current-format run.
+
+    Verdicts: APPROVED / CONDITIONALLY APPROVED (only on verified, passing
+    replication), REJECTED (a mandatory replication check failed, or the
+    findings themselves warrant rejection), INCONCLUSIVE (replication
+    evidence supplied but unverifiable, failed to execute, or incomplete),
+    NOT ASSESSED (no replication evidence supplied).
     """
     ij: Dict[str, Any] = {}
     if intake_json:
@@ -5174,19 +5809,45 @@ async def validation_stage8_findings(
         except Exception:
             profile = {}
 
-    rep_metrics: Dict[str, Any] = {}
-    if rep_metrics_json:
-        try:
-            rep_metrics = json.loads(rep_metrics_json) or {}
-        except Exception:
-            rep_metrics = {}
+    # Browser-posted metrics are never evidence. Recorded so the response is
+    # explicit that they were received and not used.
+    ignored_client_inputs = [
+        name for name, value in (("rep_metrics_json", rep_metrics_json), ("benchmark_metrics_json", benchmark_metrics_json))
+        if value
+    ]
 
-    bm_metrics: Dict[str, Any] = {}
-    if benchmark_metrics_json:
-        try:
-            bm_metrics = json.loads(benchmark_metrics_json) or {}
-        except Exception:
-            bm_metrics = {}
+    # Current dataset identity: fingerprinted here when the data is supplied,
+    # otherwise the client's claim (weaker; recorded as such).
+    dataset_identity_source = "client_claim"
+    current_sha = (dataset_sha256 or "").strip() or None
+    if file is not None or csv_text:
+        current_df = await _read_dataframe(file=file, csv_text=csv_text)
+        server_sha = dataset_fingerprint(current_df)
+        if current_sha and current_sha != server_sha:
+            # Keep the server value; the mismatch with the run is reported below.
+            ignored_client_inputs.append("dataset_sha256 (differs from server fingerprint of the supplied dataset)")
+        current_sha = server_sha
+        dataset_identity_source = "server_fingerprint"
+
+    # The registered Model Inventory ID selected at Intake is the identity the
+    # whole validation refers to; the name is informational only.
+    claimed_identity = {
+        "registered_model_id": (registered_model_id or ij.get("registered_model_id") or "").strip() or None,
+        "business_model_name": (business_model_name or ij.get("model_name") or "").strip() or None,
+        "validation_model_id": (validation_model_id or "").strip() or None,
+        "dataset_name": dataset_name,
+        "dataset_sha256": current_sha,
+        "dataset_identity_source": dataset_identity_source,
+    }
+    rep_evidence = assess_replication_evidence((replication_run_id or "").strip() or None, claimed_identity)
+    evidence_trusted = rep_evidence["status"] in ("PASS", "FAIL")
+    rep_metrics: Dict[str, Any] = rep_evidence["metrics"] if evidence_trusted else {}
+    bm_evidence = assess_benchmark_evidence(
+        (benchmark_run_id or "").strip() or None,
+        {"dataset_sha256": current_sha if evidence_trusted else None,
+         "registered_model_id": claimed_identity["registered_model_id"]},
+    )
+    bm_metrics: Dict[str, Any] = bm_evidence["metrics"] if bm_evidence["status"] == "ACCEPTED" else {}
 
     shock_res: Dict[str, Any] = {}
     if shock_result_json:
@@ -5255,28 +5916,52 @@ async def validation_stage8_findings(
         (["macro", "gdp", "unemployment"], "2.4b Forward-Looking Documentation (MDD)",
          "MDD does not reference macro/forward-looking variables", "Add macro overlay per IFRS 9 B5.5.49", "IFRS 9 B5.5.49", "MEDIUM", "Stage 2"),
     ]:
-        if not any(k in mdd_lower for k in kw):
+        # Same word-start matching as ValidationAgent2 (no fragments inside words).
+        if not any(ValidationAgent2._keyword_in(k, mdd_lower) for k in kw):
             all_findings.append({"stage": stage, "check": check,
                 "severity": sev, "status": "FAIL",
                 "finding": finding, "recommendation": rec, "regulation": reg})
 
-    # Stage 3 (Model Replication, was old Stage 4) — AUC replication gap
-    stated_auc = ij.get("stated_auc")
+    # Stage 3 (Model Replication) — from the server-verified replication run
+    # only. Evidence-gap findings carry status NOT ASSESSED / INCONCLUSIVE
+    # (not FAIL) so a missing run blocks approval without being miscounted
+    # as a model defect.
+    rep_status = rep_evidence["status"]
+    stated_auc = rep_evidence["reference_metrics"].get("roc_auc") if evidence_trusted else None
     rep_auc = rep_metrics.get("roc_auc")
-    if stated_auc and rep_auc:
-        gap = abs(float(stated_auc) - float(rep_auc))
-        if gap > 0.05:
-            all_findings.append({"stage": "Stage 3", "check": "4.2 AUC Replication",
+    if rep_status == "NOT_ASSESSED":
+        all_findings.append({"stage": "Stage 3", "check": "3.0 Replication Evidence",
+            "severity": "HIGH", "status": "NOT ASSESSED",
+            "finding": "Model Replication has not been executed for this validation.",
+            "recommendation": "Run Model Replication (Stage 3) for this model and dataset before a verdict can be issued.",
+            "regulation": "SS1/23 P4.1"})
+    elif rep_status == "INCONCLUSIVE":
+        all_findings.append({"stage": "Stage 3", "check": "3.0 Replication Evidence",
+            "severity": "HIGH", "status": "INCONCLUSIVE",
+            "finding": ("Model could not be replicated. " if rep_evidence["execution_failed"] else "Replication evidence could not be verified or is incomplete. ")
+                + " ".join(rep_evidence["reasons"]),
+            "recommendation": "Re-run Model Replication for this model and dataset, with developer-reported reference metrics, and resolve the issues listed.",
+            "regulation": "SS1/23 P4.1"})
+    else:
+        for check in rep_evidence["failed_mandatory_checks"]:
+            all_findings.append({"stage": "Stage 3", "check": f"{check['id']} {check['title']}",
                 "severity": "HIGH", "status": "FAIL",
-                "finding": f"AUC gap of {gap:.4f} — stated {stated_auc:.4f} vs replicated {rep_auc:.4f}",
-                "recommendation": "Developer must reconcile stated and replicated performance before resubmission",
+                "finding": str(check.get("observed") or "Mandatory replication check failed."),
+                "recommendation": "Developer must reconcile the submitted model with the independent replication before resubmission.",
+                "regulation": "SS1/23 P4.1"})
+        for check in rep_evidence["failed_other_checks"]:
+            all_findings.append({"stage": "Stage 3", "check": f"{check['id']} {check.get('title') or ''}".strip(),
+                "severity": "MEDIUM", "status": "FAIL",
+                "finding": str(check.get("observed") or "Replication check failed."),
+                "recommendation": "Review and document the difference against the developer-reported results.",
                 "regulation": "SS1/23 P4.1"})
 
-    # Stage 4 (Performance Testing, was old Stage 5) — metric thresholds
+    # Stage 4 (Performance Testing, was old Stage 5) — metric thresholds,
+    # evaluated only on the verified replication run's computed metrics.
     for metric, val, threshold, op, check, reg, sev in [
         ("ROC-AUC", rep_auc, 0.70, ">=", "5.1 ROC-AUC", "SS1/23 P4.1", "HIGH"),
         ("Recall", rep_metrics.get("recall"), 0.60, ">=", "5.2 Recall", "SS1/23 P4.4", "HIGH"),
-        ("Gini", round(2 * (rep_auc or 0) - 1, 4) if rep_auc else None, 0.40, ">=", "5.3 Gini", "SS11/13 §10.3", "HIGH"),
+        ("Gini", rep_metrics.get("gini"), 0.40, ">=", "5.3 Gini", "SS11/13 §10.3", "HIGH"),
         ("Brier Score", rep_metrics.get("brier_score"), 0.25, "<=", "5.4 Brier", "SS11/13 §10.5", "MEDIUM"),
     ]:
         if val is not None:
@@ -5297,6 +5982,12 @@ async def validation_stage8_findings(
                 "finding": f"Submitted model AUC ({rep_auc:.4f}) underperforms benchmark ({bm_auc:.4f})",
                 "recommendation": "Marginal improvement over baseline may not justify model complexity — review feature set",
                 "regulation": "SS1/23 P4.2"})
+    if bm_evidence["status"] == "REJECTED":
+        all_findings.append({"stage": "Stage 4", "check": "5.B Benchmark Evidence",
+            "severity": "LOW", "status": "WARN",
+            "finding": "Benchmark result not used: " + " ".join(bm_evidence["reasons"]),
+            "recommendation": "Re-run Benchmarking on the same dataset as the replication run.",
+            "regulation": "SS1/23 P4.2"})
 
     # Stage 5 (Stress & Backtesting, was old Stage 6) — sensitivity shock
     if shock_res and abs(shock_res.get("pd_change_pct", 0)) > 50:
@@ -5319,15 +6010,31 @@ async def validation_stage8_findings(
     medium_count = sum(1 for f in all_findings if f["severity"] == "MEDIUM")
     total_count = len(all_findings)
 
+    # Findings-based outcome (unchanged rule), then gated by the replication
+    # evidence: approval of any kind requires a verified, passing replication.
     if high_count == 0 and medium_count <= 2:
-        verdict = "APPROVED"
-        verdict_desc = "Model meets all regulatory requirements and validation standards."
+        findings_verdict = "APPROVED"
+        findings_desc = "No HIGH findings and at most 2 MEDIUM findings, with independent replication verified and passed."
     elif high_count <= 2:
-        verdict = "CONDITIONALLY APPROVED"
-        verdict_desc = f"Model may proceed subject to resolution of {high_count} HIGH finding(s) within agreed timeframe."
+        findings_verdict = "CONDITIONALLY APPROVED"
+        findings_desc = f"Model may proceed subject to resolution of {high_count} HIGH finding(s) within agreed timeframe."
     else:
+        findings_verdict = "REJECTED"
+        findings_desc = f"Model has {high_count} unresolved HIGH findings. Resubmission required after remediation."
+
+    if rep_status == "FAIL":
         verdict = "REJECTED"
-        verdict_desc = f"Model has {high_count} unresolved HIGH findings. Resubmission required after remediation."
+        verdict_desc = "Independent replication failed one or more mandatory checks: " + " ".join(rep_evidence["reasons"])
+    elif findings_verdict == "REJECTED":
+        verdict, verdict_desc = findings_verdict, findings_desc
+    elif rep_status == "NOT_ASSESSED":
+        verdict = "NOT ASSESSED"
+        verdict_desc = "No verdict can be issued: Model Replication has not been executed for this validation."
+    elif rep_status == "INCONCLUSIVE":
+        verdict = "INCONCLUSIVE"
+        verdict_desc = "No approval can be issued: " + " ".join(rep_evidence["reasons"])
+    else:
+        verdict, verdict_desc = findings_verdict, findings_desc
 
     # ── Monitoring & revalidation recommendations, driven by model tier ──
     tier = ij.get("model_tier", "Tier 2")
@@ -5352,8 +6059,20 @@ async def validation_stage8_findings(
         "monitoring_frequency": monitoring_frequency,
         "revalidation_trigger": revalidation_trigger,
         "model_tier": tier,
+        # Developer-reported AUC (reference) and the verified replication's
+        # computed AUC — both taken from the verified replication run.
         "stated_auc": stated_auc,
         "replicated_auc": rep_auc,
+        "verdict_basis": {
+            "policy_version": VERDICT_POLICY_VERSION,
+            "findings_verdict": findings_verdict,
+            "replication": rep_evidence,
+            "benchmark": {k: bm_evidence.get(k) for k in ("status", "run_id", "reasons", "metrics", "model_name")},
+            "mandatory_replication_checks": MANDATORY_REPLICATION_CHECKS,
+            "excluded_replication_checks": EXCLUDED_REPLICATION_CHECKS,
+            "dataset_identity_source": dataset_identity_source,
+            "ignored_client_inputs": ignored_client_inputs,
+        },
     }
 
     try:
@@ -5365,6 +6084,15 @@ async def validation_stage8_findings(
                 "high_count": high_count,
                 "medium_count": medium_count,
                 "total_count": total_count,
+                "verdict_policy_version": VERDICT_POLICY_VERSION,
+                "replication_run_id": rep_evidence.get("run_id"),
+                "replication_evidence_status": rep_status,
+                "registered_model_id": claimed_identity.get("registered_model_id"),
+                # The registered model's training this verdict was issued
+                # against; a retrain makes the verdict stale in history.
+                "training_run_id": registered_run_identity(claimed_identity.get("registered_model_id"))["training_run_id"],
+                "business_model_name": claimed_identity.get("business_model_name"),
+                "dataset_sha256": claimed_identity.get("dataset_sha256"),
             },
             full_payload=result,
         )

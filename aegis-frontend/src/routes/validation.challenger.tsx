@@ -28,6 +28,7 @@ import {
   VCard,
   VEmptyState,
   StatusPill,
+  ResumeExclusionNote,
 } from "@/components/validation-ui";
 
 export const Route = createFileRoute("/validation/challenger")({
@@ -44,7 +45,9 @@ export const Route = createFileRoute("/validation/challenger")({
 // under the hood (run_replication) — this just stops making the reviewer
 // do it twice.
 
-type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
+// NOT_ASSESSED: the evidence needed for the check was unavailable — it is
+// never shown as a pass. NOT_APPLICABLE: the check does not apply.
+type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP" | "NOT_ASSESSED" | "NOT_APPLICABLE";
 
 type ReplicationCheck = {
   id: string;
@@ -58,6 +61,81 @@ type ReplicationCheck = {
   _ablation?: Record<string, number>;
   _seed_aucs?: number[];
   _seeds?: number[];
+  // R4.5 / R4.6 repeated-run evidence (24-06/stability_checks.py).
+  _explanation?: string;
+  _methodology?: string;
+  _limitations?: string[];
+  _diagnostic_note?: string;
+  _runs_completed?: number;
+  _runs_failed?: number;
+  _runs?: StabilityRun[];
+  _summary?: { mean: number; sd: number; min: number; max: number };
+  _heterogeneity?: { Q: number; df: number; p_value: number; I2: number; pooled_auc: number; alpha: number };
+  _main_evaluation?: BootstrapEvaluation | null;
+  _temporal?: { available: boolean; reason?: string; test?: string; overall_auc?: number; periods?: TemporalPeriod[] } | null;
+  _mean_rank_correlation?: number | null;
+  _min_rank_correlation?: number | null;
+  _material_features?: string[];
+  _feature_stability?: FeatureStabilityRow[];
+  _reversed_pairs?: Array<{ higher: string; lower: string; reversal_share: number; p_value: number }>;
+  _driver_dropouts?: Array<{ feature: string; top_driver_in_runs: number[]; not_significant_in_runs: number[] }>;
+  _removal_diagnostics?: {
+    available: boolean;
+    reason?: string;
+    rule?: string;
+    note?: string;
+    features_improving_auc_when_removed?: Array<{ feature: string; auc_gain_when_removed: number }>;
+  } | null;
+};
+
+type StabilityRun = {
+  seed: number;
+  status: string;
+  auc?: number | null;
+  auc_se?: number | null;
+  auc_ci?: [number, number] | null;
+  test_rows?: number | null;
+  test_positives?: number | null;
+  test_negatives?: number | null;
+  error?: string | null;
+};
+
+type BootstrapEvaluation = {
+  available: boolean;
+  reason?: string;
+  auc?: number;
+  se?: number;
+  ci_low?: number;
+  ci_high?: number;
+  rows?: number;
+  positives?: number;
+  negatives?: number;
+  confidence_level?: number;
+};
+
+type TemporalPeriod = {
+  start: string;
+  end: string;
+  rows: number;
+  positives: number;
+  auc: number;
+  ci: [number, number];
+  deteriorated: boolean;
+};
+
+type FeatureStabilityRow = {
+  feature: string;
+  material: boolean;
+  selection_share: number;
+  importance_mean: number;
+  importance_sd: number;
+  top1_share: number;
+  top_k_share: number;
+  rank_mean?: number;
+  rank_min?: number;
+  rank_max?: number;
+  direction?: "+" | "-" | null;
+  direction_consistency?: number | null;
 };
 
 type ReplicationResult = {
@@ -73,13 +151,51 @@ type ReplicationResult = {
   // Provenance of the model configuration this run actually used — set by
   // the backend from real request state, never fabricated. Not surfaced in
   // the UI yet (see the Model Replication Methodology Audit).
-  replication_config_source?: "developer_hyperopt_best_params" | "developer_training_config" | "registry_defaults_unavailable_config";
+  replication_config_source?: "developer_hyperopt_best_params" | "developer_training_config" | "registry_defaults_unavailable_config" | "registered_lineage_contract";
   model_params_used?: Record<string, unknown>;
+  // How this run reproduced the model (registered reproduction vs an
+  // unregistered refit), what was verified, and what could not be done.
+  methodology?: ReplicationMethodology;
+  // Registered mode only: the ORIGINAL model's performance (re-scored
+  // artifact, or metrics recorded at training) that R4.x compare against.
+  original_metrics?: Record<string, number>;
+};
+
+type ReproductionStep = { status: string; detail?: string | null };
+type ReplicationMethodology = {
+  mode: "registered_model_reproduction" | "unregistered_independent_refit";
+  registered_model_id?: string | null;
+  registered_model_name?: string | null;
+  training_run_id?: string | null;
+  detail?: string;
+  lineage_checks?: Array<{ id: string; title: string; status: string; detail: string }>;
+  exact_artifact_reproduction?: ReproductionStep;
+  independent_training_reproduction?: ReproductionStep;
+  original_metrics_source?: "artifact_rescored" | "recorded_at_training" | null;
+  estimator?: { class: string; params: Record<string, unknown> };
+  limitations?: string[];
+  ignored_inputs?: string[];
+};
+
+// Identity of the exact replication execution. The final verdict (Stage 7)
+// sends run_id back and the backend reloads/verifies the run from its log.
+export type ReplicationEvidence = {
+  run_id: string | null;
+  persisted: boolean;
+  validation_model_id: string | null;
+  business_model_name: string | null;
+  algorithm: string | null;
+  dataset_name: string | null;
+  dataset_sha256: string;
+  dataset_rows: number;
+  target_col: string;
+  executed_at: string;
 };
 
 type ReplicationResponse = {
   stage: string;
   flags: string[];
+  evidence?: ReplicationEvidence;
   report: {
     replication: { result: ReplicationResult; checks: ReplicationCheck[] };
     metrics: Record<string, any>;
@@ -93,8 +209,24 @@ type ReplicationResponse = {
     metric_checks?: Array<Record<string, any>>;
     compliance_findings?: Array<Record<string, any>>;
     threshold_analysis?: Array<Record<string, any>>;
+    // Backend cross-check: confusion matrix, threshold metrics and test set agree.
+    evaluation_consistency?: { status: string; detail: string };
+    // The exact developer-reported values the backend compared against
+    // (form values merged with MDD-extracted values), with a per-key source.
+    // Absent on runs saved before provenance was recorded.
+    reference_metrics?: {
+      values: Record<string, number>;
+      sources: Record<string, string>;
+      source_labels?: Record<string, string>;
+      warnings?: string[];
+    };
+    metric_provenance?: { schema_version: number; metrics: string; reference_metrics: string };
   };
 };
+
+// Where a value typed into the Developer Reference Metrics form came from.
+// Sent to the backend as reported_sources_json so it's saved with the run.
+type ReferenceSource = "intake_mdd" | "demo_intake" | "development_training_run" | "manual_entry";
 
 const metricDefinitions = [
   { key: "roc_auc", label: "ROC-AUC", digits: 3 },
@@ -154,6 +286,8 @@ const STATUS_TONE: Record<CheckStatus, "pass" | "warn" | "fail" | "na"> = {
   WARN: "warn",
   FAIL: "fail",
   SKIP: "na",
+  NOT_ASSESSED: "warn",
+  NOT_APPLICABLE: "na",
 };
 
 function StatusIcon({ s }: { s: CheckStatus }) {
@@ -196,16 +330,148 @@ function Field({ label, className, children }: { label: string; className?: stri
   );
 }
 
-// Extracts the real numeric tolerance already embedded in a check's own
-// title/threshold text (e.g. "Std(AUC) < 0.02", "AUC degradation < 0.05")
-// so charts can plot the application's actual threshold instead of a
-// frontend-invented one. Returns null (no band/line drawn) if it can't find one.
-function parseThresholdValue(text?: string | null): number | null {
-  if (!text) return null;
-  const match = text.match(/[<≤]\s*([0-9]*\.?[0-9]+)/);
-  if (!match) return null;
-  const num = Number(match[1]);
-  return Number.isFinite(num) ? num : null;
+const fmt = (v: number | null | undefined, d = 4) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(d) : "—");
+const pct = (v: number | null | undefined) => (typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—");
+
+function Stat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50/60 px-3 py-2">
+      <div className="text-[10.5px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="mt-0.5 font-mono text-xs text-slate-800">{value}</div>
+    </div>
+  );
+}
+
+// Method, evidence and limitations behind R4.5 / R4.6, exactly as the backend
+// produced them. Older saved runs without this evidence show only the check text.
+function StabilityEvidence({ check }: { check: ReplicationCheck }) {
+  const isR45 = check.id === "R4.5";
+  const main = check._main_evaluation;
+  const het = check._heterogeneity;
+  const periods = check._temporal?.available ? check._temporal.periods ?? [] : [];
+  const features = (check._feature_stability ?? []).filter((f) => f.material);
+  const notMaterial = (check._feature_stability ?? []).length - features.length;
+  return (
+    <div className="space-y-3 text-xs text-slate-600">
+      <div className="flex items-start gap-2">
+        <StatusPill tone={STATUS_TONE[check.status]}>
+          <StatusIcon s={check.status} />
+          {check.status}
+        </StatusPill>
+        <p className="leading-relaxed">{check._explanation ?? check.observed ?? "—"}</p>
+      </div>
+      {isR45 ? (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="Runs used" value={`${check._runs_completed ?? 0}${check._runs_failed ? ` (+${check._runs_failed} failed)` : ""}`} />
+          <Stat label="Material features" value={check._material_features?.length ?? "—"} />
+          <Stat
+            label="Mean Spearman (min)"
+            value={check._mean_rank_correlation != null ? `${fmt(check._mean_rank_correlation, 3)} (${fmt(check._min_rank_correlation, 3)})` : "—"}
+          />
+          <Stat label="Reversals / dropouts" value={`${check._reversed_pairs?.length ?? 0} / ${check._driver_dropouts?.length ?? 0}`} />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="Runs used" value={`${check._runs_completed ?? 0}${check._runs_failed ? ` (+${check._runs_failed} failed)` : ""}`} />
+          <Stat label="Run AUC mean ± SD" value={check._summary ? `${fmt(check._summary.mean)} ± ${fmt(check._summary.sd)}` : "—"} />
+          <Stat label="Run AUC min – max" value={check._summary ? `${fmt(check._summary.min)} – ${fmt(check._summary.max)}` : "—"} />
+          <Stat
+            label="Heterogeneity"
+            value={het ? `Q=${fmt(het.Q, 2)} (df ${het.df}), p=${fmt(het.p_value, 3)}, I²=${pct(het.I2)}` : "—"}
+          />
+          {main?.available ? (
+            <div className="col-span-2 sm:col-span-4">
+              <Stat
+                label={`Model test AUC, ${Math.round((main.confidence_level ?? 0.95) * 100)}% stratified bootstrap CI`}
+                value={`${fmt(main.auc)} [${fmt(main.ci_low)}, ${fmt(main.ci_high)}] · n=${main.rows} · defaults=${main.positives} · non-defaults=${main.negatives}`}
+              />
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {isR45 && features.length ? (
+        <div className="overflow-x-auto rounded-lg border border-slate-100">
+          <table className="w-full text-[11px]">
+            <thead className="bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-2 py-1.5 font-medium">Feature</th>
+                <th className="px-2 py-1.5 font-medium">Selected</th>
+                <th className="px-2 py-1.5 font-medium">Importance (mean ± SD)</th>
+                <th className="px-2 py-1.5 font-medium">Rank mean (min–max)</th>
+                <th className="px-2 py-1.5 font-medium">Top-1</th>
+                <th className="px-2 py-1.5 font-medium">Direction</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-mono">
+              {features.map((f) => (
+                <tr key={f.feature}>
+                  <td className="px-2 py-1.5 font-sans text-slate-800">{f.feature}</td>
+                  <td className="px-2 py-1.5">{pct(f.selection_share)}</td>
+                  <td className="px-2 py-1.5">{fmt(f.importance_mean)} ± {fmt(f.importance_sd)}</td>
+                  <td className="px-2 py-1.5">{fmt(f.rank_mean, 2)} ({f.rank_min ?? "—"}–{f.rank_max ?? "—"})</td>
+                  <td className="px-2 py-1.5">{pct(f.top1_share)}</td>
+                  <td className="px-2 py-1.5">{f.direction ? `${f.direction} (${pct(f.direction_consistency)})` : "n/a"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {notMaterial > 0 ? (
+            <p className="border-t border-slate-100 px-2 py-1.5 text-[10.5px] text-slate-400">
+              {notMaterial} other input(s) made no significant contribution in most runs and are not ranked.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!isR45 && periods.length ? (
+        <div className="overflow-x-auto rounded-lg border border-slate-100">
+          <table className="w-full text-[11px]">
+            <thead className="bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-2 py-1.5 font-medium">Period</th>
+                <th className="px-2 py-1.5 font-medium">Rows (defaults)</th>
+                <th className="px-2 py-1.5 font-medium">AUC [CI]</th>
+                <th className="px-2 py-1.5 font-medium">Significant deterioration</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-mono">
+              {periods.map((p) => (
+                <tr key={p.start} className={p.deteriorated ? "bg-rose-50/60" : undefined}>
+                  <td className="px-2 py-1.5">{p.start} – {p.end}</td>
+                  <td className="px-2 py-1.5">{p.rows} ({p.positives})</td>
+                  <td className="px-2 py-1.5">{fmt(p.auc)} [{fmt(p.ci[0])}, {fmt(p.ci[1])}]</td>
+                  <td className="px-2 py-1.5">{p.deteriorated ? "Yes" : "No"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {check._temporal?.test ? <p className="border-t border-slate-100 px-2 py-1.5 text-[10.5px] text-slate-400">{check._temporal.test}</p> : null}
+        </div>
+      ) : null}
+
+      {check._methodology ? (
+        <details className="rounded-lg border border-slate-100 px-3 py-2">
+          <summary className="cursor-pointer font-medium text-slate-700">Methodology and criteria</summary>
+          <p className="mt-1.5 leading-relaxed">{check._methodology}</p>
+          {check.threshold ? <p className="mt-1.5 leading-relaxed text-slate-500">{check.threshold}</p> : null}
+        </details>
+      ) : null}
+
+      {check._limitations?.length ? (
+        <div>
+          <div className="font-medium text-slate-700">Limitations</div>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            {check._limitations.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {check._diagnostic_note ? <p className="italic text-slate-400">{check._diagnostic_note}</p> : null}
+    </div>
+  );
 }
 
 // Human-readable label for the backend's real `replication_config_source`,
@@ -219,6 +485,8 @@ function configProvenanceLabel(source?: ReplicationResult["replication_config_so
       return "Developer training configuration";
     case "registry_defaults_unavailable_config":
       return "Registry defaults · developer configuration unavailable";
+    case "registered_lineage_contract":
+      return "Registered model's recorded training configuration";
     default:
       return null;
   }
@@ -366,18 +634,30 @@ function ModelReplicationPanel({
   const [testSize, setTestSize] = React.useState(0.15);
   const [valSize, setValSize] = React.useState(0.15);
   const [reported, setReported] = React.useState<Record<string, string>>({});
+  const [reportedSources, setReportedSources] = React.useState<Record<string, ReferenceSource>>({});
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Seed from shared context so returning to this page (e.g. via Back from
   // Stage 4 — Benchmarking) shows the already-computed R4.1-R4.8 checks,
   // model ranking, and performance report instead of forcing a full rerun —
   // this previously lived only in local state and was lost on every remount.
-  const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
-    (ds.validationStage4Result?.replication as { result: ReplicationResult; checks: ReplicationCheck[] } | null) ?? null,
+  // The cached (browser-persisted) result is only reused when it carries run
+  // evidence for the registered model currently selected at Intake; an older
+  // cached result, or one for a different registered model, is not shown.
+  const resumeRegisteredModelId: string | null =
+    ((ds.validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
+  const cachedStage4 = ds.validationStage4Result as Record<string, any> | null | undefined;
+  const cachedStage4Usable = Boolean(
+    cachedStage4?.replication &&
+      cachedStage4?.evidence?.run_id &&
+      (cachedStage4?.evidence?.registered_model_id ?? null) === resumeRegisteredModelId,
   );
-  const [flags, setFlags] = React.useState<string[]>((ds.validationStage4Result?.flags as string[] | null) ?? []);
+  const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
+    cachedStage4Usable ? ((cachedStage4!.replication as { result: ReplicationResult; checks: ReplicationCheck[] }) ?? null) : null,
+  );
+  const [flags, setFlags] = React.useState<string[]>(cachedStage4Usable ? ((cachedStage4!.flags as string[] | null) ?? []) : []);
   const [performanceReport, setPerformanceReport] = React.useState<ReplicationResponse["report"] | null>(
-    (ds.validationStage4Result?.performanceReport as ReplicationResponse["report"] | null) ?? null,
+    cachedStage4Usable ? ((cachedStage4!.performanceReport as ReplicationResponse["report"] | null) ?? null) : null,
   );
 
   // Explicit, traceable record of where the currently-displayed replication
@@ -391,7 +671,7 @@ function ModelReplicationPanel({
     | { kind: "fresh" }
     | { kind: "resumed"; runId: string; timestamp: string; businessModelName: string | null; datasetName: string | null };
   const [provenance, setProvenance] = React.useState<ReplicationProvenance>(
-    ds.validationStage4Result?.replication ? { kind: "fresh" } : { kind: "none" },
+    cachedStage4Usable ? { kind: "fresh" } : { kind: "none" },
   );
 
   // The model identity to scope a resumed result by, so a reviewer looking
@@ -439,29 +719,36 @@ function ModelReplicationPanel({
   // fresh session, or no dataset in context), resuming is disabled entirely
   // rather than falling back to a less-scoped lookup: a wrong result is
   // worse than an empty one.
-  const { data: resumedReplication, meta: resumeMeta } = useResumeState<ReplicationResponse>(
+  //
+  // With a registered model selected at Intake, the lookup is scoped by its
+  // Model Inventory ID instead: the backend then also skips runs made before
+  // the model was last retrained, and legacy-format runs. (Dataset identity is
+  // enforced by the reproduction itself — it must be the training dataset.)
+  const resumeParams: Record<string, string> | undefined = resumeRegisteredModelId
+    ? { registered_model_id: resumeRegisteredModelId }
+    : resumeModelName && resumeDatasetName
+      ? { business_model_name: resumeModelName, dataset_name: resumeDatasetName }
+      : undefined;
+  const { data: resumedReplication, meta: resumeMeta, excluded: replicationExcluded } = useResumeState<ReplicationResponse>(
     "validation_pipeline_log.csv",
     "replication",
-    {
-      enabled: Boolean(resumeModelName && resumeDatasetName),
-      params: resumeModelName && resumeDatasetName
-        ? { business_model_name: resumeModelName, dataset_name: resumeDatasetName }
-        : undefined,
-    },
+    { enabled: Boolean(resumeParams), params: resumeParams },
   );
   React.useEffect(() => {
     if (!replication && resumedReplication?.report?.replication && resumeMeta) {
       const summary = (resumeMeta.summary ?? {}) as Record<string, any>;
-      // Defense in depth: the backend call above already scoped the lookup
-      // to `resumeModelName`/`resumeDatasetName`, but re-verify the row's
-      // own logged identity here too before ever applying it, so a resumed
-      // result can never end up attached to the wrong model or the wrong
-      // dataset even if that scoping were ever loosened upstream.
-      if (resumeModelName && summary.business_model_name !== resumeModelName) {
+      // Defense in depth: re-verify the row's own logged identity before
+      // applying it, so a resumed result can never end up attached to the
+      // wrong model or dataset even if the backend scoping were loosened.
+      if (resumeMeta.recordStatus !== "current") {
         return;
       }
-      if (resumeDatasetName && summary.dataset_name !== resumeDatasetName) {
-        return;
+      if (resumeRegisteredModelId) {
+        if (summary.registered_model_id !== resumeRegisteredModelId) return;
+      } else {
+        const norm = (v: unknown) => String(v ?? "").trim().replace(/\.(csv|xlsx|xls)$/i, "").toLowerCase();
+        if (resumeModelName && summary.business_model_name !== resumeModelName) return;
+        if (resumeDatasetName && norm(summary.dataset_name) !== norm(resumeDatasetName)) return;
       }
       setReplication(resumedReplication.report.replication);
       setFlags(resumedReplication.flags ?? []);
@@ -477,6 +764,7 @@ function ModelReplicationPanel({
         replication: resumedReplication.report.replication,
         flags: resumedReplication.flags ?? [],
         performanceReport: resumedReplication.report,
+        evidence: resumedReplication.evidence ?? null,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -490,6 +778,13 @@ function ModelReplicationPanel({
   const validationMddMetrics = ds.validationMddMetrics as Record<string, any> | null | undefined;
   const validationIntakeData = ds.validationIntakeData as Record<string, any> | null | undefined;
   const selectedModelName = ds.selectedModel?.name as string | undefined;
+  // Registered Model Inventory ID chosen at Intake. When present, the backend
+  // reproduces that registered model from its recorded lineage and ignores
+  // the algorithm / split / parameter fields below.
+  const registeredModelId: string | null =
+    typeof validationIntakeData?.registered_model_id === "string" && validationIntakeData.registered_model_id
+      ? validationIntakeData.registered_model_id
+      : null;
 
   const targetCandidates: string[] = React.useMemo(() => {
     const c = profile?.target_candidates ?? profile?.targetCandidates ?? profile?.candidate_targets ?? [];
@@ -603,15 +898,20 @@ function ModelReplicationPanel({
     }
 
     const sourceMetrics = validationMddMetrics ?? (trainingResult?.evaluation_metrics as Record<string, any> | undefined);
+    const prefillSource: ReferenceSource = validationMddMetrics
+      ? (profile?.demo_mode ? "demo_intake" : "intake_mdd")
+      : "development_training_run";
     if (sourceMetrics) {
-      setReported((prev) => {
-        const next = { ...prev };
-        for (const { key } of REPORTED_METRIC_FIELDS) {
-          const v = sourceMetrics[key] ?? (key === "cv_mean_auc" ? sourceMetrics.cv_mean : undefined);
-          if (v !== undefined && v !== null) next[key] = String(v);
-        }
-        return next;
-      });
+      const nextValues: Record<string, string> = {};
+      for (const { key } of REPORTED_METRIC_FIELDS) {
+        const v = sourceMetrics[key] ?? (key === "cv_mean_auc" ? sourceMetrics.cv_mean : undefined);
+        if (v !== undefined && v !== null) nextValues[key] = String(v);
+      }
+      setReported((prev) => ({ ...prev, ...nextValues }));
+      setReportedSources((prev) => ({
+        ...prev,
+        ...Object.fromEntries(Object.keys(nextValues).map((k) => [k, prefillSource])),
+      }));
     }
   }, [profile, trainingResult, trainingConfig, validationMddMetrics, validationIntakeData?.model_name, selectedModelName, targetCandidates]);
 
@@ -658,6 +958,7 @@ function ModelReplicationPanel({
       }
       form.append("model_name", modelIdentity.trim());
       form.append("algorithm", algorithmName);
+      if (registeredModelId) form.append("registered_model_id", registeredModelId);
       if (validationIntakeData) {
         form.append("intake_json", JSON.stringify(validationIntakeData));
       }
@@ -671,7 +972,7 @@ function ModelReplicationPanel({
       // above. When absent, these fields are simply omitted and the backend
       // falls back to registry defaults, recording that fact explicitly
       // rather than silently (replication_config_source on the result).
-      if (developerModelParams) {
+      if (developerModelParams && !registeredModelId) {
         form.append("model_params_json", JSON.stringify(developerModelParams.params));
         form.append("model_params_source", developerModelParams.source);
       }
@@ -684,6 +985,10 @@ function ModelReplicationPanel({
       );
       if (Object.keys(reportedPayload).length > 0) {
         form.append("reported_json", JSON.stringify(reportedPayload));
+        form.append(
+          "reported_sources_json",
+          JSON.stringify(Object.fromEntries(Object.keys(reportedPayload).map((k) => [k, reportedSources[k] ?? "manual_entry"]))),
+        );
       }
 
       const res = await formUpload<ReplicationResponse>("/validation/replication", form);
@@ -695,6 +1000,7 @@ function ModelReplicationPanel({
         replication: res.report.replication,
         flags: res.flags ?? [],
         performanceReport: res.report,
+        evidence: res.evidence ?? null,
       });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -711,17 +1017,35 @@ function ModelReplicationPanel({
     }
   };
 
+  const r45Check = replication?.checks?.find((c) => c.id === "R4.5") ?? null;
+  const r46Check = replication?.checks?.find((c) => c.id === "R4.6") ?? null;
+
+  // Per-run held-out AUC with its bootstrap CI (R4.6 evidence). Older saved
+  // runs only carry seed_aucs, which are shown without intervals.
   const seedChartData = React.useMemo(() => {
+    const runs = r46Check?._runs?.filter((r) => r.status === "COMPLETED" && typeof r.auc === "number");
+    if (runs?.length) {
+      return runs.map((r) => ({
+        seed: `Seed ${r.seed}`,
+        auc: r.auc as number,
+        ciLow: r.auc_ci?.[0] ?? null,
+        ciHigh: r.auc_ci?.[1] ?? null,
+        rows: r.test_rows ?? null,
+        positives: r.test_positives ?? null,
+      }));
+    }
     const aucs = replication?.result?.seed_aucs;
     if (!aucs?.length) return [];
-    // R4.6 carries the actual seed integers used for this run — prefer real
-    // seed identities over a synthetic "#1, #2…" index when available.
-    const realSeeds = replication?.checks?.find((c) => c.id === "R4.6")?._seeds;
+    const realSeeds = r46Check?._seeds;
     return aucs.map((auc, i) => ({
       seed: realSeeds && realSeeds[i] != null ? `Seed ${realSeeds[i]}` : `Seed ${i + 1}`,
       auc,
+      ciLow: null as number | null,
+      ciHigh: null as number | null,
+      rows: null as number | null,
+      positives: null as number | null,
     }));
-  }, [replication]);
+  }, [replication, r46Check]);
 
   const ablationChartData = React.useMemo(() => {
     const abl = replication?.result?.ablation;
@@ -733,23 +1057,24 @@ function ModelReplicationPanel({
       .map(([feature, drop]) => ({ feature, drop: Number((drop as number).toFixed(4)) }));
   }, [replication]);
 
-  // Real tolerance + real "which seed/feature" facts pulled from R4.5/R4.6's
-  // own text, so the stability and ablation charts can show the application's
-  // actual thresholds without the frontend inventing new ones.
+  // No fixed AUC-spread band: R4.6 judges run variation against each run's own
+  // sampling error, so the chart shows per-run CIs and the pooled AUC instead.
   const seedStats = React.useMemo(() => {
-    const aucs = replication?.result?.seed_aucs;
-    if (!aucs?.length) return null;
-    const mean = aucs.reduce((s, v) => s + v, 0) / aucs.length;
-    const variance = aucs.length > 1 ? aucs.reduce((s, v) => s + (v - mean) ** 2, 0) / aucs.length : 0;
-    const r46 = replication?.checks?.find((c) => c.id === "R4.6");
-    return { mean, std: Math.sqrt(variance), threshold: parseThresholdValue(r46?.title), status: r46?.status ?? null };
-  }, [replication]);
+    if (!seedChartData.length) return null;
+    const aucs = seedChartData.map((d) => d.auc);
+    const mean = r46Check?._summary?.mean ?? aucs.reduce((s, v) => s + v, 0) / aucs.length;
+    const variance = aucs.length > 1 ? aucs.reduce((s, v) => s + (v - mean) ** 2, 0) / (aucs.length - 1) : 0;
+    const std = r46Check?._summary?.sd ?? Math.sqrt(variance);
+    return { mean, std, pooled: r46Check?._heterogeneity?.pooled_auc ?? null, status: r46Check?.status ?? null };
+  }, [seedChartData, r46Check]);
 
+  // Removal-improves-AUC is a separate diagnostic (beyond sampling error);
+  // it does not set R4.5's status.
   const ablationStats = React.useMemo(() => {
-    const r45 = replication?.checks?.find((c) => c.id === "R4.5");
-    const maxFeatureMatch = r45?.observed?.match(/removing '([^']+)'/);
-    return { threshold: parseThresholdValue(r45?.title), maxFeature: maxFeatureMatch?.[1] ?? null, status: r45?.status ?? null };
-  }, [replication]);
+    const diag = r45Check?._removal_diagnostics;
+    const flagged = new Set((diag?.features_improving_auc_when_removed ?? []).map((f) => f.feature));
+    return { flagged, rule: diag?.rule ?? null, note: diag?.note ?? null };
+  }, [r45Check]);
 
   // Enterprise-styling constants for the two diagnostic charts below — colors
   // only, matching the app's existing blue/indigo Aegis language. Purely
@@ -783,24 +1108,12 @@ function ModelReplicationPanel({
     const seedValues = seedChartData.map((d) => d.auc);
     const lastIndex = seedValues.length - 1;
 
-    const meanDisplay = seedStats ? seedStats.mean.toFixed(4) : "—";
-    const thresholdDisplay = seedStats?.threshold != null ? `± ${seedStats.threshold}` : "n/a";
-    const pointCustomData = seedValues.map(() => [meanDisplay, thresholdDisplay]);
-
+    const hasCi = seedChartData.every((d) => d.ciLow != null && d.ciHigh != null);
+    const pointCustomData = seedChartData.map((d) => [
+      d.ciLow != null && d.ciHigh != null ? `[${d.ciLow.toFixed(4)}, ${d.ciHigh.toFixed(4)}]` : "n/a",
+      d.rows != null ? `${d.rows} rows, ${d.positives} defaults` : "n/a",
+    ]);
     const shapes: any[] = [];
-    if (seedStats && seedStats.threshold != null) {
-      shapes.push({
-        type: "rect",
-        xref: "paper",
-        x0: 0,
-        x1: 1,
-        y0: seedStats.mean - seedStats.threshold,
-        y1: seedStats.mean + seedStats.threshold,
-        fillcolor: CHART_INDIGO_SOFT,
-        line: { width: 0 },
-        layer: "below",
-      });
-    }
 
     // Real-data "latest seed" marker emphasis — the last element of the
     // actual seed_aucs array, not a synthetic/selected value.
@@ -817,9 +1130,22 @@ function ModelReplicationPanel({
           y: seedValues,
           line: { color: CHART_INDIGO, width: 2.5, shape: "spline", smoothing: 0.3 },
           marker: { size: markerSizes, color: CHART_INDIGO, line: { width: markerLineWidths, color: markerLineColors } },
+          ...(hasCi
+            ? {
+                error_y: {
+                  type: "data",
+                  symmetric: false,
+                  array: seedChartData.map((d) => (d.ciHigh as number) - d.auc),
+                  arrayminus: seedChartData.map((d) => d.auc - (d.ciLow as number)),
+                  color: CHART_INDIGO,
+                  thickness: 1.2,
+                  width: 4,
+                },
+              }
+            : {}),
           customdata: pointCustomData,
-          hovertemplate: "<b>%{x}</b><br>AUC %{y:.4f}<br>Mean AUC %{customdata[0]}<br>Threshold %{customdata[1]}<extra></extra>",
-          name: "AUC",
+          hovertemplate: "<b>%{x}</b><br>AUC %{y:.4f}<br>Bootstrap CI %{customdata[0]}<br>Test sample %{customdata[1]}<extra></extra>",
+          name: hasCi ? "Run AUC (bootstrap CI)" : "Run AUC",
         },
         ...(seedStats
           ? [
@@ -827,10 +1153,10 @@ function ModelReplicationPanel({
                 type: "scatter",
                 mode: "lines",
                 x: seedLabels,
-                y: seedLabels.map(() => seedStats.mean),
+                y: seedLabels.map(() => seedStats.pooled ?? seedStats.mean),
                 line: { color: CHART_MEAN_LINE, width: 1.5, dash: "dash" },
-                hovertemplate: "Mean AUC %{y:.4f}<extra></extra>",
-                name: "Mean AUC",
+                hovertemplate: `${seedStats.pooled != null ? "Pooled" : "Mean"} AUC %{y:.4f}<extra></extra>`,
+                name: seedStats.pooled != null ? "Pooled AUC (inverse-variance)" : "Mean AUC",
               },
             ]
           : []),
@@ -870,46 +1196,14 @@ function ModelReplicationPanel({
 
   const ablationFigure = React.useMemo(() => {
     if (!ablationChartData.length) return null;
-    const thresholdDisplay = ablationStats.threshold != null ? ablationStats.threshold.toFixed(2) : "n/a";
     const colors = ablationChartData.map((d) =>
-      d.feature === ablationStats.maxFeature
-        ? ablationStats.status === "FAIL"
-          ? CHART_ROSE
-          : ablationStats.status === "WARN"
-          ? CHART_AMBER
-          : d.drop >= 0
-          ? CHART_INDIGO
-          : CHART_CYAN
-        : d.drop >= 0
-        ? CHART_INDIGO
-        : CHART_CYAN,
+      ablationStats.flagged.has(d.feature) ? CHART_AMBER : d.drop >= 0 ? CHART_INDIGO : CHART_CYAN,
     );
     const customData = ablationChartData.map((d) => [
-      thresholdDisplay,
-      d.feature === ablationStats.maxFeature && ablationStats.status ? ablationStats.status : "—",
+      ablationStats.flagged.has(d.feature) ? "AUC rises beyond sampling error when removed" : "Within sampling error or AUC falls",
     ]);
     const shapes: any[] = [];
     const annotations: any[] = [];
-    if (ablationStats.threshold != null) {
-      shapes.push({
-        type: "line",
-        yref: "paper",
-        y0: 0,
-        y1: 1,
-        x0: ablationStats.threshold,
-        x1: ablationStats.threshold,
-        line: { color: CHART_THRESHOLD_LINE, dash: "dash", width: 1.5 },
-      });
-      annotations.push({
-        x: ablationStats.threshold,
-        y: 1,
-        yref: "paper",
-        yanchor: "bottom",
-        text: "R4.5 limit",
-        showarrow: false,
-        font: { size: 9.5, color: CHART_THRESHOLD_LINE },
-      });
-    }
     return {
       data: [
         {
@@ -919,7 +1213,7 @@ function ModelReplicationPanel({
           y: ablationChartData.map((d) => d.feature),
           marker: { color: colors, cornerradius: 3 },
           customdata: customData,
-          hovertemplate: "<b>%{y}</b><br>AUC change: %{x:.4f}<br>Threshold: %{customdata[0]}<br>Status: %{customdata[1]}<extra></extra>",
+          hovertemplate: "<b>%{y}</b><br>AUC drop on removal: %{x:.4f}<br>%{customdata[0]}<extra></extra>",
           name: "AUC Δ",
         },
       ],
@@ -951,25 +1245,18 @@ function ModelReplicationPanel({
   const ablationLegend = React.useMemo(() => {
     const hasPositive = ablationChartData.some((d) => d.drop >= 0);
     const hasNegative = ablationChartData.some((d) => d.drop < 0);
-    const hasCritical = Boolean(ablationStats.maxFeature) && (ablationStats.status === "FAIL" || ablationStats.status === "WARN");
+    const hasCritical = ablationChartData.some((d) => ablationStats.flagged.has(d.feature));
     return { hasPositive, hasNegative, hasCritical };
   }, [ablationChartData, ablationStats]);
 
   const metrics = replication?.result?.metrics ?? {};
 
-  // Real reported values, parsed to numbers where the reviewer actually
-  // entered/extracted one — used only for the informational Reference vs
-  // Replicated delta tiles, never for a derived pass/fail verdict (that
-  // comes solely from the real R4.x checks below).
-  const reportedNumeric = React.useMemo(() => {
-    const out: Record<string, number | null> = {};
-    for (const { key } of REPORTED_METRIC_FIELDS) {
-      const raw = reported[key];
-      const num = raw !== undefined && raw !== "" ? Number(raw) : NaN;
-      out[key] = Number.isFinite(num) ? num : null;
-    }
-    return out;
-  }, [reported]);
+  // Reference values exactly as the backend used them for R4.2/R4.3/R4.4/R4.8
+  // (form values merged with any MDD-extracted values), read from the run's
+  // own response — never from the current form state, which can differ after
+  // an MDD upload, a later edit, or when a saved run is resumed.
+  const referenceUsed = performanceReport?.reference_metrics ?? null;
+  const referenceRecorded = Boolean(performanceReport?.metric_provenance && referenceUsed);
 
   const checkCounts = React.useMemo(() => {
     const checks = replication?.checks ?? [];
@@ -987,6 +1274,8 @@ function ModelReplicationPanel({
   // for accuracy/precision/recall/f1; R4.2/R4.3/R4.8 give one verdict each
   // for roc_auc, gini+ks, and cv_mean_auc respectively). No thresholds are
   // invented here — a metric with no corresponding check simply has no status.
+  const methodology = replication?.result?.methodology ?? null;
+  const isRegisteredRun = methodology?.mode === "registered_model_reproduction";
   const comparisonRows = React.useMemo(() => {
     if (!replication?.result?.success) return [];
     const r42 = replication.checks.find((c) => c.id === "R4.2");
@@ -1000,7 +1289,20 @@ function ModelReplicationPanel({
           : typeof metrics[key] === "number"
           ? metrics[key]
           : null;
-      const reportedValue = reportedNumeric[key] ?? null;
+      const rawReference = referenceUsed?.values?.[key];
+      const developerValue = typeof rawReference === "number" && Number.isFinite(rawReference) ? rawReference : null;
+      const developerSource = developerValue !== null ? referenceUsed?.source_labels?.[key] ?? referenceUsed?.sources?.[key] ?? null : null;
+      // Registered reproduction compares against the ORIGINAL model's computed
+      // performance (exactly what R4.x used); developer-reported values stay a
+      // separately labelled reference. Unregistered refits compare against the
+      // developer-reported reference, as before.
+      const rawOriginal = isRegisteredRun ? replication.result.original_metrics?.[key] : undefined;
+      const reportedValue = isRegisteredRun
+        ? (typeof rawOriginal === "number" && Number.isFinite(rawOriginal) ? rawOriginal : null)
+        : developerValue;
+      const reportedSource = isRegisteredRun
+        ? (developerValue !== null ? `Developer-reported: ${formatValue(developerValue)}${developerSource ? ` (${developerSource})` : ""}` : null)
+        : developerSource;
       const delta = replicatedValue !== null && reportedValue !== null ? replicatedValue - reportedValue : null;
 
       let status: CheckStatus | null = null;
@@ -1015,9 +1317,9 @@ function ModelReplicationPanel({
       // than two independent ones — flag that so the table doesn't imply
       // they were checked separately.
       const joint = key === "gini" || key === "ks";
-      return { key, label, replicatedValue, reportedValue, delta, status, joint };
+      return { key, label, replicatedValue, reportedValue, reportedSource, delta, status, joint };
     });
-  }, [replication, reportedNumeric, metrics]);
+  }, [replication, referenceUsed, metrics, isRegisteredRun]);
 
 
   // --- Performance tab data (ported from the old Stage 4 "Performance" tab) ---
@@ -1212,6 +1514,18 @@ function ModelReplicationPanel({
         title="Model Replication"
         sub="Independently re-train the submitted model on the validation dataset and run checks R4.1–R4.8 against developer-reported metrics."
       >
+        {registeredModelId ? (
+          <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/60 px-4 py-3 text-xs text-blue-900">
+            <span className="font-semibold">Registered model reproduction: {registeredModelId}.</span> The registered model&apos;s recorded
+            algorithm, hyperparameters, preprocessing, features, split and seed are used, and its stored artifact is re-scored.
+            The algorithm, split-size and parameter fields below are ignored. The dataset must be the model&apos;s original training data.
+          </div>
+        ) : (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+            <span className="font-semibold">No registered model selected at Intake.</span> This will be an independent refit from the
+            settings below — not a reproduction of a registered model, and it cannot support a final verdict.
+          </div>
+        )}
         {/* Dataset & Model */}
         <div className="text-[11px] font-bold uppercase tracking-wider text-blue-700">Dataset &amp; Model</div>
         <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
@@ -1346,7 +1660,10 @@ function ModelReplicationPanel({
                 <label className="text-[11px] text-muted-foreground">{label}</label>
                 <input
                   value={reported[key] ?? ""}
-                  onChange={(e) => setReported((prev) => ({ ...prev, [key]: e.target.value }))}
+                  onChange={(e) => {
+                    setReported((prev) => ({ ...prev, [key]: e.target.value }));
+                    setReportedSources((prev) => ({ ...prev, [key]: "manual_entry" }));
+                  }}
                   placeholder="—"
                   className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm"
                 />
@@ -1370,9 +1687,12 @@ function ModelReplicationPanel({
 
           {replication && replication.result.success && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
-              <StatusPill tone={checkCounts.fail === 0 ? "pass" : "fail"}>
-                {checkCounts.fail === 0 ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
-                {checkCounts.fail === 0 ? "Passed" : "Failed"}
+              {/* Passed only when every check executed and passed; any
+                  WARN / SKIP / NOT_ASSESSED result (or no checks at all)
+                  makes the run Inconclusive rather than Passed. */}
+              <StatusPill tone={checkCounts.fail > 0 ? "fail" : checkCounts.total > 0 && checkCounts.pass === checkCounts.total ? "pass" : "warn"}>
+                {checkCounts.fail > 0 ? <XCircle className="h-3.5 w-3.5" /> : checkCounts.total > 0 && checkCounts.pass === checkCounts.total ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                {checkCounts.fail > 0 ? "Failed" : checkCounts.total > 0 && checkCounts.pass === checkCounts.total ? "Passed" : "Inconclusive"}
               </StatusPill>
               <span className="font-medium text-slate-600">
                 {checkCounts.pass}/{checkCounts.total} checks passed
@@ -1420,6 +1740,7 @@ function ModelReplicationPanel({
         </div>
       )}
 
+      {!replication && !loading ? <ResumeExclusionNote counts={replicationExcluded.counts} what="replication run" /> : null}
       {/* Purposeful empty state before the first run, instead of a blank gap */}
       {!replication && !loading && (
         <VEmptyState
@@ -1428,6 +1749,84 @@ function ModelReplicationPanel({
           description="Configure the dataset, target column, and model above, then run replication to see the R4.1–R4.8 checks and performance profile."
         />
       )}
+
+      {/* Replication methodology — what was reproduced, what was verified,
+          and what could not be done. Shown for failed runs too. */}
+      {replication && methodology ? (
+        <VCard
+          icon={ListChecks}
+          title="Replication Methodology"
+          sub={
+            isRegisteredRun
+              ? `Registered model ${methodology.registered_model_id ?? ""} — ${methodology.registered_model_name ?? ""} · training run ${methodology.training_run_id ?? "—"}`
+              : "Unregistered independent refit"
+          }
+        >
+          {isRegisteredRun ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {(
+                  [
+                    ["A. Exact artifact reproduction", methodology.exact_artifact_reproduction],
+                    ["B. Independent training reproduction", methodology.independent_training_reproduction],
+                  ] as Array<[string, ReproductionStep | undefined]>
+                ).map(([label, step]) => {
+                  const ok = step?.status === "REPRODUCED";
+                  const failed = step?.status === "MISMATCH" || step?.status === "DIVERGED" || step?.status === "FAILED";
+                  return (
+                    <div key={label} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-700">{label}</span>
+                        <StatusPill tone={ok ? "pass" : failed ? "fail" : "warn"}>{step?.status ?? "NOT RUN"}</StatusPill>
+                      </div>
+                      {step?.detail ? <p className="mt-1.5 text-xs text-slate-500">{step.detail}</p> : null}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                      <th className="px-3 py-2">ID</th>
+                      <th className="px-3 py-2">Lineage check</th>
+                      <th className="px-3 py-2">Detail</th>
+                      <th className="px-3 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {(methodology.lineage_checks ?? []).map((c) => (
+                      <tr key={c.id}>
+                        <td className="px-3 py-2 font-mono text-slate-400">{c.id}</td>
+                        <td className="px-3 py-2 font-medium text-slate-800">{c.title}</td>
+                        <td className="px-3 py-2 text-slate-500">{c.detail}</td>
+                        <td className="px-3 py-2">
+                          <StatusPill tone={c.status === "PASS" ? "pass" : c.status === "WARN" ? "warn" : "fail"}>{c.status}</StatusPill>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-amber-800">{methodology.detail}</p>
+          )}
+          {methodology.limitations?.length ? (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <div className="font-semibold">Limitations</div>
+              <ul className="mt-1 list-disc pl-4">
+                {methodology.limitations.map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {methodology.ignored_inputs?.length ? (
+            <p className="mt-2 text-[11px] text-slate-400">Ignored inputs (taken from the registered model instead): {methodology.ignored_inputs.join(", ")}</p>
+          ) : null}
+        </VCard>
+      ) : null}
 
       {/* Results */}
       {replication && (
@@ -1442,17 +1841,33 @@ function ModelReplicationPanel({
               <TabsContent value="replication" className="space-y-6 pt-4">
                 <VCard
                   icon={GitCompareArrows}
-                  title="Reference vs Replicated Performance"
-                  sub="Developer-reported metrics compared against this independent reproduction"
+                  title={isRegisteredRun ? "Original vs Reproduced Performance" : "Reference vs Replicated Performance"}
+                  sub={
+                    isRegisteredRun
+                      ? `Original model performance (${methodology?.original_metrics_source === "artifact_rescored" ? "stored artifact re-scored on the original test split" : "recorded at training — artifact unavailable"}) compared against the independent retraining; developer-reported values shown for reference only`
+                      : "Developer-reported metrics compared against this independent refit"
+                  }
                   contentClassName="-mx-6 -mb-6"
                 >
+                  {!referenceRecorded && !isRegisteredRun ? (
+                    <div className="mx-6 mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      This run was saved before reference sources were recorded, so the developer-reported values it was
+                      compared against are not available. Check statuses below still reflect that run; re-run to see the values.
+                    </div>
+                  ) : referenceUsed?.warnings?.length ? (
+                    <div className="mx-6 mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {referenceUsed.warnings.join(" ")}
+                    </div>
+                  ) : null}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-y border-slate-100 bg-slate-50 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
                           <th className="px-6 py-3 text-left">Metric</th>
-                          <th className="px-4 py-3 text-right">Reported</th>
-                          <th className="px-4 py-3 text-right">Replicated</th>
+                          <th className="px-4 py-3 text-right">{isRegisteredRun ? "Original model" : "Reported"}</th>
+                          <th className="px-4 py-3 text-right">{isRegisteredRun ? "Reproduced" : "Replicated"}</th>
                           <th className="px-4 py-3 text-right">Δ</th>
                           <th className="px-6 py-3 text-left">Status</th>
                         </tr>
@@ -1464,7 +1879,12 @@ function ModelReplicationPanel({
                               {row.label}
                               {row.joint && <span className="ml-2 text-[10px] font-normal uppercase tracking-wide text-slate-400">joint check</span>}
                             </td>
-                            <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600">{formatValue(row.reportedValue)}</td>
+                            <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600">
+                              {formatValue(row.reportedValue)}
+                              {row.reportedSource ? (
+                                <div className="font-sans text-[10px] font-normal text-slate-400">{row.reportedSource}</div>
+                              ) : null}
+                            </td>
                             <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-900">{formatValue(row.replicatedValue)}</td>
                             <td className={cn("px-4 py-3.5 text-right font-mono text-xs", row.delta === null ? "text-slate-400" : row.delta === 0 ? "text-slate-600" : row.delta > 0 ? "text-emerald-600" : "text-rose-600")}>
                               {formatDelta(row.delta)}
@@ -1536,8 +1956,8 @@ function ModelReplicationPanel({
 
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                   <VCard
-                    title="Replication Stability Across Seeds"
-                    sub="Variation in independently reproduced AUC across random seeds"
+                    title="R4.6 · Held-out AUC per Repeated Run"
+                    sub="Each run re-splits (stratified) and retrains; bars are each run's bootstrap CI"
                     badge={seedStats?.status ? { text: seedStats.status, tone: seedStats.status === "PASS" ? "emerald" : seedStats.status === "FAIL" ? "rose" : "amber" } : undefined}
                   >
                     {seedFigure ? (
@@ -1547,8 +1967,8 @@ function ModelReplicationPanel({
                         </div>
                         {seedStats && (
                           <p className="mt-2 text-[11px] text-slate-400">
-                            Mean AUC {seedStats.mean.toFixed(4)} · Std {seedStats.std.toFixed(4)}
-                            {seedStats.threshold != null ? ` · threshold < ${seedStats.threshold}` : ""}
+                            Mean AUC {seedStats.mean.toFixed(4)} · SD {seedStats.std.toFixed(4)}
+                            {seedStats.pooled != null ? ` · pooled ${seedStats.pooled.toFixed(4)}` : ""} · judged against sampling error, not a fixed spread limit
                           </p>
                         )}
                       </>
@@ -1558,9 +1978,9 @@ function ModelReplicationPanel({
                   </VCard>
 
                   <VCard
-                    title="Feature Ablation Impact"
-                    sub="Change in AUC when individual features are removed"
-                    badge={ablationStats.status ? { text: ablationStats.status, tone: ablationStats.status === "PASS" ? "emerald" : ablationStats.status === "FAIL" ? "rose" : "amber" } : undefined}
+                    title="Feature Removal Diagnostic"
+                    sub="AUC drop when each feature is removed and the model refit — reported separately; does not set R4.5"
+                    badge={ablationStats.flagged.size ? { text: `${ablationStats.flagged.size} FLAGGED`, tone: "amber" } : undefined}
                   >
                     {ablationFigure ? (
                       <>
@@ -1580,11 +2000,8 @@ function ModelReplicationPanel({
                             )}
                             {ablationLegend.hasCritical && (
                               <span className="inline-flex items-center gap-1.5">
-                                <span
-                                  className="h-2 w-2 rounded-full"
-                                  style={{ background: ablationStats.status === "FAIL" ? "#e11d48" : "#d97706" }}
-                                />
-                                Exceeds R4.5 threshold
+                                <span className="h-2 w-2 rounded-full" style={{ background: "#d97706" }} />
+                                AUC rises beyond sampling error when removed
                               </span>
                             )}
                           </div>
@@ -1592,15 +2009,43 @@ function ModelReplicationPanel({
                         <div className="rounded-xl border border-slate-100 bg-white p-1" style={{ height: ablationFigure.layout.height }}>
                           <PlotlyChart figure={ablationFigure} style={{ height: "100%" }} config={{ displayModeBar: false, scrollZoom: false }} />
                         </div>
+                        {ablationStats.rule || ablationStats.note ? (
+                          <p className="mt-2 text-[11px] text-slate-400">
+                            {ablationStats.rule ? `Flag rule: ${ablationStats.rule}. ` : ""}
+                            {ablationStats.note ?? ""}
+                          </p>
+                        ) : null}
                       </>
                     ) : (
                       <VEmptyState icon={ListChecks} title="No ablation data yet" description="Run replication to see the impact of removing each feature." />
                     )}
                   </VCard>
                 </div>
+
+                {r45Check || r46Check ? (
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    {[r45Check, r46Check].map((check) =>
+                      check ? (
+                        <VCard
+                          key={check.id}
+                          title={`${check.id} · ${check.title}`}
+                          sub="Method, evidence and limitations behind this result"
+                        >
+                          <StabilityEvidence check={check} />
+                        </VCard>
+                      ) : null,
+                    )}
+                  </div>
+                ) : null}
               </TabsContent>
 
               <TabsContent value="performance" className="space-y-6 pt-4">
+                {performanceReport?.evaluation_consistency && performanceReport.evaluation_consistency.status !== "PASS" ? (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    Evaluation consistency {performanceReport.evaluation_consistency.status}: {performanceReport.evaluation_consistency.detail}
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                   {metricCards.map((m) => (
                     <KpiAccentCard
@@ -1712,7 +2157,7 @@ function ModelReplicationPanel({
           </>
         ) : (
           <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-            <XCircle className="h-4 w-4 shrink-0" /> Training failed: {replication.result.error ?? "Unknown error"}
+            <XCircle className="h-4 w-4 shrink-0" /> Replication could not be completed: {replication.result.error ?? "Unknown error"}
           </div>
         )
       )}
