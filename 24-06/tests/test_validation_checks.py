@@ -256,6 +256,17 @@ def test_missing_split_evidence_is_not_assessed():
     assert si.build_r47([si._sub("S1", "x", "PASS", ""), si._sub("S4", "y", "NOT_ASSESSED", "")])["status"] == "NOT_ASSESSED"
 
 
+def test_taiwan_demo_sample_uses_training_only_preprocessing_for_r47():
+    df = pd.read_csv(Path(main.__file__).resolve().parent / "demo_data" / "taiwan_portfolio.csv")
+    fit = core._fit_core(df, "default", "Logistic Regression", 0.15, 0.15, 42, 5)
+    assert fit["split_stats"]["train_n"] == 490
+    assert fit["split_stats"]["val_n"] == 105
+    assert fit["split_stats"]["test_n"] == 105
+    r47 = core.unregistered_split_integrity(fit, "default", 0.15, 0.15, 42)
+    assert r47["status"] == "PASS", r47
+    assert _sub(r47, "S3")["status"] == "PASS"
+
+
 def test_not_assessed_r47_blocks_the_verdict(client):
     csv = env.to_csv(env.dataset_coefs(6000, [1.2, 0.6, 0.3, 0.0, 0.0], seed=5))
     model_id = env.train(client, csv, "R47 Gate Model")["model_id"]
@@ -321,6 +332,28 @@ def test_stress_driver_mapping_and_units():
             return pipe.predict_proba(frame[["unemployment_rate"]].to_numpy())
     stress.apply_macro_scenario(Recorder(), X, [0.5, 0.5], stress.MACRO_SCENARIOS[0])
     assert Recorder.seen["unemployment_rate"].tolist() == pytest.approx([0.08, 0.09])   # +3pp on a fraction scale
+
+
+def test_continuous_protected_variables_are_binned_before_auc_gap_check():
+    df = pd.DataFrame({
+        "age": np.repeat(np.linspace(20, 70, 80), 5),
+        "default": np.tile([0, 1] * 200, 1)[:400],
+    })
+    df = df.iloc[:400].copy()
+    y_test = pd.Series(df["default"].to_numpy(), index=df.index)
+    y_proba = np.clip(np.linspace(0.2, 0.8, len(df)), 0.01, 0.99)
+
+    result = core.bias_from_predictions(df, y_test, y_proba, "age")
+    assert result["success"] is True
+    assert result["rows"]
+    assert all("(" in row["Group"] or "-" in row["Group"] for row in result["rows"])
+    assert all(row["Group"] != str(v) for row in result["rows"] for v in [20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70])
+
+
+def test_demo_calibration_placeholder_is_not_valid_evidence():
+    report = ValidationAgent2().run_all_checks(None, {"calibration_method": "Not applicable for demonstration data"}, "")
+    s7 = {f["check_id"]: f for f in report["findings_by_stage"]["Stage 7: Regulatory Compliance"]}
+    assert s7["7.1"]["status"] == "FAIL"
 
 
 def test_regulatory_keywords_need_real_evidence():

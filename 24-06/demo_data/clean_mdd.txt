@@ -1,17 +1,15 @@
 Purpose and Intended Use: This model estimates probability of
         default for retail unsecured loans. Scope is limited to personal
         loan portfolio.
-        Methodology: XGBoost algorithm selected after comparison with
-        logistic regression baseline. SMOTE oversampling applied for
-        class imbalance combined with class weighting. Hyperparameter
-        tuning via RandomizedSearchCV. Calibrated via Platt scaling
-        through the cycle TTC calibration.
-        Data: Internal dataset January 2015 to December 2023, 5000
-        observations covering COVID-19 stress period. Default definition
-        90 days past due per IFRS 9 B5.5.28 and CRR Article 178.
-        Stratified random sample across origination vintages. Survivorship
-        bias addressed by retaining closed and charged-off accounts.
-        No time-period bias identified. Selection bias reviewed.
+        Methodology: LightGBM algorithm selected for the shipped Demo A
+        validation portfolio. This is a demo-only validation workflow and
+        not a registered development model.
+        Data: Shipped demo portfolio file demo_data/clean_portfolio.csv,
+        used to exercise the validation workflow. The dataset is an
+        illustrative demo sample and is not a production retail portfolio
+        or an internally sourced development dataset.
+        Default definition is represented by the demo target column used in
+        the validation workflow.
         Feature transformations: log transform of loan_amount, quantile
         binning of credit_score, WOE weight of evidence encoding,
         standard scaling. All transformations documented in Appendix B.

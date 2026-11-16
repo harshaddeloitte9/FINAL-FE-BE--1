@@ -1,7 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
+import { useMemo } from "react";
 import { useDataset } from "@/lib/app-context";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
+import { modelDatasetParams, runMatchesModelAndDataset } from "@/lib/history-record";
 import {
   FileText, Database, GitCompareArrows, BarChart3, Activity, ShieldCheck, ClipboardCheck,
   ArrowRight, Gauge, ClipboardList, ScrollText,
@@ -22,6 +25,7 @@ type StageStatus = "complete" | "active" | "pending";
 
 function ValidationHome() {
   const {
+    file,
     profile,
     trainingResult,
     validationIntakeData,
@@ -36,10 +40,25 @@ function ValidationHome() {
   // page keeps that state locally) — the only real signal of whether it's
   // been run is the same backend-saved run log every stage page resumes
   // from, so ask it the same way validation.stress.tsx does.
-  const { data: resumedStress } = useResumeState<{ stage: string; report: any }>(
+  // Scoped to the registered model under validation: another model's stress
+  // run must not mark this validation's stage as complete.
+  const overviewRegisteredModelId = ((validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
+  // H3: and on the exact dataset bytes the Stress page sends (file, else csv_text).
+  const overviewDatasetBlob = useMemo<Blob | null>(
+    () => file ?? (typeof profile?.csv_text === "string" && profile.csv_text ? new Blob([profile.csv_text], { type: "text/csv" }) : null),
+    [file, profile?.csv_text],
+  );
+  const overviewFileSha = useDatasetFileSha(overviewDatasetBlob);
+  const overviewStressParams = modelDatasetParams(overviewRegisteredModelId, overviewFileSha);
+  const { data: resumedStressRaw, meta: overviewStressMeta } = useResumeState<{ stage: string; report: any }>(
     "validation_pipeline_log.csv",
     "stress_testing",
+    { enabled: overviewStressParams !== null, params: overviewStressParams ?? undefined },
   );
+  const resumedStress = runMatchesModelAndDataset(overviewStressMeta?.summary as Record<string, any> | null, {
+    registeredModelId: overviewRegisteredModelId,
+    datasetFileSha: overviewFileSha,
+  }) ? resumedStressRaw : null;
 
   const stage3Done = Boolean(validationStage3Result);
   const stage4Done = Boolean(validationStage4Result?.replication);

@@ -79,8 +79,23 @@ def _tamper_artifact(run_id, mutate):
 def test_verified_registered_reproduction_can_be_approved(client, good):
     statuses = {c["id"]: c["status"] for c in good["run"]["report"]["replication"]["checks"]}
     assert all(statuses[c] == "PASS" for c in main.MANDATORY_REPLICATION_CHECKS), statuses
+    # Verdict policy 5: a passing replication alone is not enough — stress
+    # testing and the independence attestation are mandatory evidence.
+    alone = verdict(client, good["run"]["evidence"], GOOD_CSV, good["model_id"])
+    assert alone["verdict"] == "INCONCLUSIVE"
+    assert {g["evidence"] for g in alone["verdict_basis"]["evidence_completeness"]["gaps"]} == {"stress_testing", "independence"}
+    # Record the evidence for real: a stress run of this registered model on
+    # this dataset, and the validator's attestation.
+    r = client.post("/validation/stress/run", data={"target_col": "default", "algorithm": "Logistic Regression",
+                                                    "registered_model_id": good["model_id"]},
+                    files={"file": ("dev.csv", io.BytesIO(GOOD_CSV), "text/csv")})
+    assert r.status_code == 200, r.text
+    r = client.post("/validation/independence/attest", data={"registered_model_id": good["model_id"],
+                                                             "attested_by": "Test Validator", "independent": "true"})
+    assert r.status_code == 200, r.text
     v = verdict(client, good["run"]["evidence"], GOOD_CSV, good["model_id"])
     basis = v["verdict_basis"]
+    assert basis["evidence_completeness"]["complete"], basis["evidence_completeness"]["gaps"]
     assert basis["replication"]["status"] == "PASS", basis["replication"]["reasons"]
     assert basis["replication"]["methodology"]["exact_artifact_reproduction"] == "REPRODUCED"
     assert basis["replication"]["methodology"]["independent_training_reproduction"] == "REPRODUCED"
@@ -238,11 +253,18 @@ def test_stale_benchmarking_run_is_rejected_as_benchmark(client, good):
 
 
 def test_benchmark_for_another_registered_model_is_rejected(client, good):
+    # Batch 3D: an unknown registered model can no longer be benchmarked at
+    # all (fails closed, nothing recorded) ...
     r = client.post("/validation/performance", data={"model_name": "Logistic Regression", "target_col": "default",
                                                      "challenger_model_name": "Logistic Regression", "registered_model_id": "MOD-OTHER"},
                     files={"file": ("dev.csv", io.BytesIO(GOOD_CSV), "text/csv")})
-    assert r.status_code == 200
-    v = verdict(client, good["run"]["evidence"], GOOD_CSV, good["model_id"], extra={"benchmark_run_id": r.json()["evidence"]["run_id"]})
+    assert r.status_code == 404
+    # ... and a benchmark recorded for a different model is still rejected.
+    run_id = persistence.log_event(LOG, stage="performance", payload={"registered_model_id": "MOD-OTHER",
+                                                                       "dataset_sha256": good["run"]["evidence"]["dataset_sha256"]},
+                                   full_payload={"report": {"metric_provenance": {"schema_version": main.METRIC_PROVENANCE_SCHEMA_VERSION},
+                                                            "benchmark": {"status": "OK", "metrics": {"roc_auc": 0.5}}}})
+    v = verdict(client, good["run"]["evidence"], GOOD_CSV, good["model_id"], extra={"benchmark_run_id": run_id})
     assert v["verdict_basis"]["benchmark"]["status"] == "REJECTED"
     assert "MOD-OTHER" in " ".join(v["verdict_basis"]["benchmark"]["reasons"])
 

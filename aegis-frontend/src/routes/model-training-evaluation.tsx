@@ -17,7 +17,12 @@ import { useAuth } from "@/lib/auth-context";
 import PlotlyChart from "@/components/plotly-chart";
 import AnimatedNumber from "@/components/animated-number";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
 import { cn } from "@/lib/utils";
+import { selectedModelId, trainedModelIdentity, withSelectedModel } from "@/lib/model-identity";
+import { devResumeParams, resumedPayloadMatches } from "@/lib/dev-resume-scope";
+import { describeSplit, describeThresholdProvenance } from "@/lib/methodology-labels";
+import { appendSplitConfig, resolveSplitConfig } from "@/lib/split-config";
 
 export const Route = createFileRoute("/model-training-evaluation")({
   head: () => ({ meta: [{ title: "Model Training & Evaluation — Aegis Credit" }] }),
@@ -84,6 +89,10 @@ interface TrainingConfig {
   manual_params: Record<string, any>;
   use_oot: boolean;
   date_col: string | null;
+  // Validation split: stratified random (default) or an explicit
+  // chronological split on a chosen date column. Never inferred (E14).
+  split_strategy?: "stratified_random" | "temporal";
+  temporal_date_col?: string | null;
 }
 
 interface ComparisonResult {
@@ -367,6 +376,7 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
     setSelectedComparisonModel,
     preprocessingResult,
     validationIntakeData,
+    setValidationIntakeData,
   } = useDataset();
 
   // ── Split config: owned by Preprocessing (Step 3). Training only reads it. ──
@@ -441,7 +451,32 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
 
   // Resume where the reviewer left off: if this session has no training
   // result yet, pull the last saved /models/train run from the backend.
-  const { data: resumedTraining } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "training");
+  // Only a run trained on exactly this dataset file is eligible (E7); its
+  // model ID comes from the separate registration event, because training
+  // artifacts are immutable and never carry it (E9).
+  const datasetFileSha = useDatasetFileSha(file);
+  const trainingScope = { fileSha: datasetFileSha };
+  const trainingResumeParams = devResumeParams(trainingScope);
+  const { data: resumedTrainingRaw, meta: resumedTrainingMeta } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "training", {
+    params: trainingResumeParams ?? undefined,
+    enabled: trainingResumeParams !== null,
+  });
+  const { data: resumedRegistration, settled: registrationSettled } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "registration", {
+    params: resumedTrainingMeta ? { training_run_id: resumedTrainingMeta.runId } : undefined,
+    enabled: Boolean(resumedTrainingMeta),
+  });
+  const resumedTraining = useMemo<Record<string, any> | null>(() => {
+    if (!resumedTrainingRaw || !resumedTrainingMeta || !resumedPayloadMatches(resumedTrainingRaw, trainingScope)) return null;
+    // Wait for the registration lookup, so the restored result carries its model ID.
+    if (!registrationSettled) return null;
+    const registration = resumedRegistration?.training_run_id === resumedTrainingMeta.runId ? resumedRegistration : null;
+    return {
+      ...resumedTrainingRaw,
+      training_run_id: resumedTrainingMeta.runId,
+      model_id: registration?.registered_model_id ?? null,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumedTrainingRaw, resumedTrainingMeta, resumedRegistration, registrationSettled, datasetFileSha]);
   useEffect(() => {
     if (!trainingResult && resumedTraining) {
       setTrainingResult(resumedTraining as any);
@@ -551,6 +586,8 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
         const form = new FormData();
         form.append("file", file);
         form.append("target_col", profile.target_col || "loan_status");
+        // Same split as Preprocessing locked in (E12).
+        appendSplitConfig(form, resolveSplitConfig(splitConfig));
 
         const response = await formUpload("/models/recommend", form);
         if (!isMounted) return;
@@ -688,6 +725,10 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
       trainForm.append("date_col", config.date_col);
     }
     trainForm.append("use_feature_engineering", String(config.use_feature_engineering));
+    if (config.split_strategy === "temporal" && config.temporal_date_col) {
+      trainForm.append("split_strategy", "temporal");
+      trainForm.append("temporal_date_col", config.temporal_date_col);
+    }
     if (Object.keys(config.manual_params).length > 0) {
       trainForm.append("manual_params", JSON.stringify(config.manual_params));
     }
@@ -739,6 +780,13 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
       model_artifact: trainResponse.model_artifact,
       evaluation_metrics: trainResponse.evaluation_metrics ?? null,
       evaluation_data: trainResponse.evaluation_data ?? null,
+      // As returned by the backend (the persisted inventory entry); never inferred from the name.
+      model_id: trainedModelIdentity(trainResponse).modelId,
+      lineage: (trainResponse as Record<string, any>).lineage ?? null,
+      training_run_id: (trainResponse as Record<string, any>).training_run_id ?? null,
+      split_report: (trainResponse as Record<string, any>).split_report ?? null,
+      threshold_provenance: (trainResponse as Record<string, any>).threshold_provenance ?? null,
+      dataset_identity: (trainResponse as Record<string, any>).dataset_identity ?? null,
     };
   };
 
@@ -786,6 +834,12 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
         evaluation_data: result.evaluation_data,
         preprocessing_contract: result.preprocessing_contract ?? null,
         model_artifact: result.model_artifact,
+        model_id: result.model_id,
+        lineage: result.lineage,
+        training_run_id: result.training_run_id,
+        split_report: result.split_report,
+        threshold_provenance: result.threshold_provenance,
+        dataset_identity: result.dataset_identity,
       });
     } catch (err: any) {
       console.error("Training: failed", err);
@@ -1561,6 +1615,45 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
                 </div>
               )}
             </ConfigToggleCard>
+
+            <ConfigToggleCard
+              icon={CalendarClock}
+              title="Chronological Train / Validation / Test Split"
+              sub="Oldest rows train, then validation, most recent rows test (instead of a stratified random split)"
+              enabled={config.split_strategy === "temporal"}
+              onToggle={(value) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  split_strategy: value ? "temporal" : "stratified_random",
+                  temporal_date_col: value ? prev.temporal_date_col ?? null : null,
+                }))
+              }
+              badge={config.split_strategy === "temporal" ? (config.temporal_date_col ? "Temporal" : "Choose date column") : "Stratified random"}
+            >
+              {config.split_strategy === "temporal" && (
+                <div>
+                  <label className="text-xs font-medium text-slate-600 block mb-1">Date column (required)</label>
+                  {datetimeColumns.length > 0 ? (
+                    <select
+                      value={config.temporal_date_col ?? ""}
+                      onChange={(e) => setConfig((prev) => ({ ...prev, temporal_date_col: e.target.value || null }))}
+                      className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-white"
+                      data-testid="temporal-date-col"
+                    >
+                      <option value="">Select a date column…</option>
+                      {datetimeColumns.map((col) => (
+                        <option key={col} value={col}>{col}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-[11px] text-amber-700">No datetime column was detected in profiling, so a chronological split is not available.</p>
+                  )}
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    The date column is never chosen automatically. Until one is selected, training uses the stratified random split.
+                  </p>
+                </div>
+              )}
+            </ConfigToggleCard>
           </div>
         </section>
 
@@ -1575,7 +1668,7 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
           <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50/60 p-3.5">
             <div>
               <label className="text-sm font-medium text-slate-800">Auto-select (max F1)</label>
-              <p className="text-[11px] text-slate-500 mt-0.5">Optimize threshold automatically</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">Chosen on the validation rows; test rows are never used</p>
             </div>
             <Switch checked={useAutoThreshold} onCheckedChange={setUseAutoThreshold} />
           </div>
@@ -1616,7 +1709,10 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
           {resolvedThreshold !== null && (
             <div className="mt-4 rounded-lg bg-slate-900 px-3 py-2.5 text-[11px] text-slate-200">
               Last run: threshold = <strong className="text-white"><AnimatedNumber value={resolvedThreshold} formatter={(n) => n.toFixed(3)} /></strong>
-              {useAutoThreshold ? " → maximized F1" : " → manual override"}
+              <span data-testid="threshold-provenance">
+                {" → "}
+                {describeThresholdProvenance(evaluationMetrics?.threshold_provenance ?? trainingResult?.threshold_provenance).text}
+              </span>
             </div>
           )}
         </section>
@@ -1841,6 +1937,24 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
               <div><strong className="text-slate-900">CV:</strong> {usedTrainingConfig.use_cv ? `Yes (${usedTrainingConfig.cv_folds} folds)` : "No"}</div>
               <div><strong className="text-slate-900">Hyperopt:</strong> {usedTrainingConfig.use_hyperopt ? "Yes" : "No"}</div>
               <div><strong className="text-slate-900">OOT Validation:</strong> {usedTrainingConfig.use_oot ? `Yes${usedTrainingConfig.date_col ? ` (${usedTrainingConfig.date_col})` : " (auto-detected date column)"}` : "No"}</div>
+              {trainingResult?.split_report && (() => {
+                const split = describeSplit(trainingResult.split_report);
+                return (
+                  <div className="md:col-span-2" data-testid="split-method">
+                    <strong className="text-slate-900">Split:</strong>{" "}
+                    <span className={split.warning ? "text-amber-700" : undefined}>{split.text}</span>
+                  </div>
+                );
+              })()}
+              {(evaluationMetrics?.threshold_provenance || trainingResult?.threshold_provenance) && (() => {
+                const t = describeThresholdProvenance(evaluationMetrics?.threshold_provenance ?? trainingResult?.threshold_provenance);
+                return (
+                  <div className="md:col-span-2">
+                    <strong className="text-slate-900">Operating threshold:</strong>{" "}
+                    <span className={t.warning ? "text-amber-700" : undefined}>{t.text}</span>
+                  </div>
+                );
+              })()}
               <div><strong className="text-slate-900">Feature engineering:</strong> {usedTrainingConfig.use_feature_engineering ? "Enabled" : "Disabled"}</div>
               <div><strong className="text-slate-900">Class Weight:</strong> Automatic (balanced)</div>
               {Object.keys(usedTrainingConfig.manual_params || {}).length > 0 && (
@@ -1876,6 +1990,45 @@ function TrainingTab({ onProceed }: { onProceed: () => void }) {
               </div>
             </section>
           )}
+
+          {(() => {
+            // The inventory entry this training actually created/updated, as
+            // returned by /models/train (not looked up by name).
+            const trained = trainedModelIdentity(trainingResult as Record<string, any> | null);
+            if (!trained.modelId) return null;
+            const alreadySelected = selectedModelId(validationIntakeData) === trained.modelId;
+            return (
+              <section
+                className={cn(
+                  "rounded-2xl border p-4 text-sm shadow-sm",
+                  trained.lineageCaptured ? "border-blue-200 bg-blue-50/60 text-blue-900" : "border-amber-200 bg-amber-50 text-amber-900",
+                )}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <span className="font-semibold">Development Inventory: {trained.modelId}.</span>{" "}
+                    {trained.lineageCaptured
+                      ? "Lineage contract and scoring bundle recorded — eligible for registered-model replication."
+                      : `Lineage not recorded — registered-model replication will not be possible. ${trained.reason ?? ""}`}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={alreadySelected}
+                    onClick={() => {
+                      // Explicit user action: make this exact ID the registered model
+                      // for validation. Intake verifies it against the inventory.
+                      setValidationIntakeData(withSelectedModel(validationIntakeData, trained.modelId, []));
+                      navigate({ to: "/validation/intake" });
+                    }}
+                  >
+                    {alreadySelected ? "Selected for validation" : "Use for validation at Intake"}
+                  </Button>
+                </div>
+              </section>
+            );
+          })()}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex items-center gap-2">
@@ -2352,18 +2505,34 @@ function EvalCard({
 
 function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
   const navigate = useNavigate();
-  const { trainingResult, setTrainingResult } = useDataset();
+  const { trainingResult, setTrainingResult, file } = useDataset();
 
   // Resume where the reviewer left off: if this session has no training/
-  // evaluation result yet, pull the last saved /models/evaluate run from the
-  // backend and merge its evaluation_metrics/evaluation_data in.
-  const { data: resumedEvaluation } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "evaluation");
+  // evaluation result yet, pull the last saved /models/evaluate run — only
+  // one recorded for exactly this dataset file and a registered model and
+  // training run (E7). Anything else leaves the page empty.
+  const evaluationFileSha = useDatasetFileSha(file);
+  const evaluationResumeParams = devResumeParams({ fileSha: evaluationFileSha });
+  const { data: resumedEvaluation } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "evaluation", {
+    params: evaluationResumeParams ?? undefined,
+    enabled: evaluationResumeParams !== null,
+  });
   useEffect(() => {
-    if (!trainingResult && resumedEvaluation) {
-      setTrainingResult(resumedEvaluation as any);
+    const scope = resumedEvaluation?.evaluation_scope;
+    if (
+      !trainingResult &&
+      resumedEvaluation &&
+      resumedPayloadMatches(resumedEvaluation, {
+        fileSha: evaluationFileSha,
+        registeredModelId: scope?.registered_model_id ?? null,
+        trainingRunId: scope?.training_run_id ?? null,
+        requireModel: true,
+      })
+    ) {
+      setTrainingResult({ ...(resumedEvaluation as any), model_id: scope.registered_model_id, training_run_id: scope.training_run_id });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedEvaluation]);
+  }, [resumedEvaluation, evaluationFileSha]);
 
   const [activeTab, setActiveTab] = useState<"summary" | "roc" | "pr" | "confusion" | "score" | "threshold" | "lift" | "residual" | "temporal">("summary");
   const [temporalDateColumn, setTemporalDateColumn] = useState<string | null>(null);
@@ -2382,10 +2551,21 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
     : typeof evaluationData?.threshold === "number"
       ? evaluationData.threshold
       : 0.5;
-  // Present only when the backend auto-picked the threshold (i.e. no explicit
-  // override was passed to /models/train) — see evaluate_new.select_best_threshold.
-  const thresholdSelection = evaluationMetrics?.threshold_selection ?? evaluationData?.threshold_selection ?? null;
-  const isAutoThreshold = thresholdSelection != null;
+  // How the operating threshold was chosen, as recorded by the backend:
+  // F1-max on the VALIDATION partition, manual, or a nominal default. Older
+  // runs carry `threshold_selection` instead, which was optimised on the
+  // evaluated test rows themselves; those are flagged, never presented as
+  // out-of-sample (E3).
+  const thresholdProvenance =
+    evaluationMetrics?.threshold_provenance ??
+    evaluationData?.threshold_provenance ??
+    evaluationData?.evaluation_scope?.threshold_provenance ??
+    trainingResult?.threshold_provenance ??
+    null;
+  const legacyInSampleSelection = thresholdProvenance ? null : evaluationMetrics?.threshold_selection ?? evaluationData?.threshold_selection ?? null;
+  const thresholdSelection = legacyInSampleSelection;
+  const isAutoThreshold = thresholdProvenance?.method === "f1_max" || legacyInSampleSelection != null;
+  const thresholdLabel = describeThresholdProvenance(thresholdProvenance);
 
   const confusion = useMemo(() => {
     const matrix = evaluationMetrics?.confusion_matrix;
@@ -2679,9 +2859,53 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
           <div className="grid gap-5 xl:grid-cols-[1.6fr_1fr]">
             <EvalCard
               title="Threshold Insight"
-              sub={isAutoThreshold ? "Auto-selected to maximise F1 across 99 candidates" : "Manually specified decision threshold"}
+              sub={
+                thresholdProvenance?.method === "f1_max"
+                  ? "Auto-selected on the validation partition to maximise F1"
+                  : legacyInSampleSelection
+                    ? "Legacy run: selected on the evaluated test rows"
+                    : thresholdProvenance?.method === "manual"
+                      ? "Manually specified decision threshold"
+                      : "Threshold selection"
+              }
             >
-              {isAutoThreshold ? (
+              {thresholdProvenance ? (
+                <>
+                  <div
+                    className={cn(
+                      "mb-4 flex items-start gap-2.5 rounded-xl border p-3.5",
+                      thresholdLabel.warning ? "border-amber-200 bg-amber-50" : "border-blue-200 bg-blue-50",
+                    )}
+                    data-testid="evaluation-threshold-provenance"
+                  >
+                    <div className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white", thresholdLabel.warning ? "bg-amber-600" : "bg-blue-600")}>i</div>
+                    <p className={cn("text-xs leading-relaxed", thresholdLabel.warning ? "text-amber-900" : "text-blue-900")}>
+                      Threshold <strong className="font-mono">{threshold.toFixed(2)}</strong>: {thresholdLabel.text}.
+                      {thresholdProvenance.method === "f1_max" && " The test metrics below are measured at this cut-off on rows that took no part in choosing it."}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {[
+                      { label: "Threshold", value: threshold, formatter: (n: number) => n.toFixed(2), sub: thresholdProvenance.method === "manual" ? "manual" : "selected", tone: "text-blue-600" },
+                      ...(typeof thresholdProvenance.validation_f1 === "number"
+                        ? [{ label: "Validation F1", value: thresholdProvenance.validation_f1 * 100, formatter: (n: number) => `${n.toFixed(1)}%`, sub: "at threshold", tone: "text-emerald-600" }]
+                        : []),
+                      ...(typeof evaluationMetrics?.precision === "number"
+                        ? [{ label: "Test Precision", value: evaluationMetrics.precision * 100, formatter: (n: number) => `${n.toFixed(1)}%`, sub: `at τ=${threshold.toFixed(2)}`, tone: "text-cyan-600" }]
+                        : []),
+                      ...(typeof evaluationMetrics?.recall === "number"
+                        ? [{ label: "Test Recall", value: evaluationMetrics.recall * 100, formatter: (n: number) => `${n.toFixed(1)}%`, sub: `at τ=${threshold.toFixed(2)}`, tone: "text-amber-600" }]
+                        : []),
+                    ].map((t) => (
+                      <div key={t.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                        <div className={cn("font-mono text-xl font-bold", t.tone)}><AnimatedNumber value={t.value} formatter={t.formatter} /></div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">{t.label}</div>
+                        <div className="text-[9.5px] text-slate-400">{t.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : isAutoThreshold ? (
                 <>
                   <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 p-3.5">
                     <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">i</div>
@@ -2689,7 +2913,8 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
                       Threshold <strong className="font-mono">{threshold.toFixed(2)}</strong> was chosen automatically — it's the cut-off
                       that maximizes F1 ({(thresholdSelection.f1 * 100).toFixed(1)}%) on this test data, out of
                       99 candidate thresholds swept from 0.01 to 0.99. At this cut-off: <strong>precision {(thresholdSelection.precision * 100).toFixed(1)}%</strong>,{" "}
-                      <strong>recall {(thresholdSelection.recall * 100).toFixed(1)}%</strong>.
+                      <strong>recall {(thresholdSelection.recall * 100).toFixed(1)}%</strong>.{" "}
+                      <strong className="text-amber-800">Legacy run: because the threshold was optimised on these same test rows, these test metrics are optimistic. Retrain to select it on the validation partition.</strong>
                     </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -2720,8 +2945,13 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
                   { k: "Model", v: trainingResult.model_name || "—" },
                   { k: "Dataset", v: "Hold-out Test" },
                   { k: "Samples", v: holdoutSamples != null ? Number(holdoutSamples).toLocaleString() : "—", mono: true },
-                  { k: "Threshold", v: `${threshold.toFixed(2)}${isAutoThreshold ? " (auto)" : ""}`, mono: true },
-                  ...(isAutoThreshold ? [{ k: "Candidates", v: "99 swept", mono: false }] : []),
+                  { k: "Threshold", v: `${threshold.toFixed(2)}${thresholdProvenance?.method === "f1_max" ? " (auto, validation)" : legacyInSampleSelection ? " (auto, in-sample legacy)" : thresholdProvenance?.method === "manual" ? " (manual)" : ""}`, mono: true },
+                  ...(evaluationData?.evaluation_scope
+                    ? [
+                        { k: "Evaluated model", v: String(evaluationData.evaluation_scope.registered_model_id ?? "—"), mono: true },
+                        { k: "Partition", v: String(evaluationData.evaluation_scope.partition ?? "—"), mono: false },
+                      ]
+                    : []),
                 ].map((row) => (
                   <div key={row.k} className="flex items-center justify-between border-b border-slate-100 pb-2.5 text-sm last:border-0 last:pb-0">
                     <span className="text-slate-500">{row.k}</span>
@@ -2836,7 +3066,7 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
       {activeTab === "confusion" && (
         <EvalCard
           title="Confusion Matrix"
-          sub={`Threshold ${threshold.toFixed(2)}${isAutoThreshold ? " (auto-selected, max F1)" : ""}${confusionTotal ? ` — ${confusionTotal.toLocaleString()} hold-out samples` : ""}`}
+          sub={`Threshold ${threshold.toFixed(2)}${thresholdProvenance?.method === "f1_max" ? " (auto-selected on validation, max F1)" : legacyInSampleSelection ? " (auto-selected on test rows, legacy)" : ""}${confusionTotal ? ` — ${confusionTotal.toLocaleString()} hold-out samples` : ""}`}
           badge={{ text: `τ = ${threshold.toFixed(2)}`, tone: "primary" }}
         >
           <div className="flex flex-wrap items-center justify-center gap-8">
@@ -2920,7 +3150,7 @@ function EvaluationTab({ onBackToTraining }: { onBackToTraining: () => void }) {
         <EvalCard
           title="Threshold Analysis"
           sub="Precision · Recall · F1 across all decision cut-offs"
-          badge={isAutoThreshold ? { text: `Best F1 @ ${threshold.toFixed(2)}`, tone: "rose" } : undefined}
+          badge={isAutoThreshold ? { text: `${thresholdProvenance?.method === "f1_max" ? "Validation-selected" : "Best test F1"} @ ${threshold.toFixed(2)}`, tone: "rose" } : undefined}
         >
           {thresholdFigure ? (
             <PlotlyChart figure={thresholdFigure} style={{ minHeight: 380 }} config={{ displayModeBar: false }} />

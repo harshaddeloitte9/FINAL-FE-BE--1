@@ -1,0 +1,26 @@
+[
+  {
+    "id": "R01",
+    "source": "SS1/23",
+    "principle": "3.2",
+    "stage": "data",
+    "rule": "Firms must ensure that data used to develop and validate models is of sufficient quality, including completeness. Columns with excessive missing values undermine model reliability and statistical robustness.",
+    "check": "missing_threshold",
+    "threshold": 0.20,
+    "severity": "high",
+    "flag": "High missing data detected in columns (>20%)",
+    "suggestion": "Investigate the root cause of missingness (MAR/MCAR/MNAR). Apply appropriate imputation or exclude columns exceeding the 20% threshold. Document the data quality assessment and remediation steps per SS1/23 Principle 3.2."
+  },
+  {
+    "id": "R02",
+    "source": "SS1/23",
+    "principle": "3.2",
+    "stage": "data",
+    "rule": "Training data must adequately represent the population being modelled. Severe class imbalance (majority:minority ratio >10:1) can bias model outputs toward the majority class and result in poor minority-class detection.",
+    "check": "class_imbalance",
+    "threshold": 10.0,
+    "severity": "high",
+    "flag": "Severe class imbalance detected in target variable (ratio >10:1)",
+    "suggestion": "Apply SMOTE, class weighting, or threshold tuning to address class imbalance. Document the chosen approach and quantify its impact on recall, precision, and PR-AUC per SS1/23 Principle 3.2."
+  }
+]

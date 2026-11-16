@@ -1,0 +1,1 @@
+This document describes the model purpose, scope, objectives, bias, fairness, data preprocessing, assumptions, limitations, and performance evaluation.

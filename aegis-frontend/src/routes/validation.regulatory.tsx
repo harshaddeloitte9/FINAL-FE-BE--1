@@ -19,7 +19,8 @@ import { ApiError, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import PlotlyChart from "@/components/plotly-chart";
 import { deriveCheckTotal } from "@/components/check-summary";
-import { useResumeState } from "@/hooks/use-resume-state";
+import { useEvaluationKey, useEvaluationState } from "@/hooks/use-evaluation";
+import { EvidenceIdentity } from "@/components/evidence-identity";
 import { StageHero, HeroChip, VCard, VEmptyState, StatusPill, KpiStrip } from "@/components/validation-ui";
 
 // Same hex palette / no-toolbar convention established on the redesigned
@@ -262,75 +263,70 @@ function Regulatory() {
     return new File([csvText], safeName, { type: "text/csv" });
   }, [ds.file, ds.profile?.csv_text, ds.profile?.dataset_name]);
 
-  const [biasData, setBiasData] = useState<BiasResponse | null>((validationStage7BiasResult as BiasResponse | null) ?? null);
-  const [biasCol, setBiasCol] = useState<string>(() => (validationStage7BiasResult as BiasResponse | null)?.bias_col ?? "");
-  const [biasLoading, setBiasLoading] = useState(false);
-  const [biasError, setBiasError] = useState<string | null>(null);
-  const columnsFetched = useRef(false);
+  // Registered model chosen at Intake. A bias result belongs to one exact
+  // evaluation identity — registered model, its current training run, the
+  // dataset bytes and the analysed column — and is only shown while that
+  // identity is unchanged. (Results from the backend history are not
+  // restored here: they cannot be tied to the dataset currently loaded.)
+  const registeredModelId = ((ds.validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
+  const [protectedColumns, setProtectedColumns] = useState<string[] | null>(null);
+  const cachedBias = validationStage7BiasResult as (BiasResponse & { evaluation_key?: string | null }) | null;
+  const [biasCol, setBiasCol] = useState<string>(() => cachedBias?.bias_col ?? "");
+  const biasKey = useEvaluationKey(datasetFile, registeredModelId, biasCol || null);
+  const bias = useEvaluationState<BiasResponse>(biasKey, cachedBias);
+  const biasResult = bias.state.result;
+  const biasLoading = bias.state.status === "loading";
+  const biasError = bias.state.error;
+  const columnsFor = useRef<File | null>(null);
 
-  // Resume where the reviewer left off: this page maps to the
-  // "fair_lending_bias" stage since it's the one that calls POST
-  // /validation/stage7/bias-check. If nothing is loaded this session, pull
-  // the last saved run from the backend rather than starting blank.
-  const { data: resumedBias } = useResumeState<BiasResponse>(
-    "validation_pipeline_log.csv",
-    "fair_lending_bias",
-  );
+  // Detect the protected-characteristic columns of the CURRENT dataset (no
+  // protected_col posted) so the dropdown can populate itself. Re-detected
+  // whenever the dataset changes; an older detection never overwrites a newer one.
   useEffect(() => {
-    if (!biasData && resumedBias) {
-      setBiasData(resumedBias);
-      setValidationStage7BiasResult(resumedBias as unknown as Record<string, any>);
-      if (resumedBias.bias_col) setBiasCol(resumedBias.bias_col);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedBias]);
-
-  // Fetch just the detected protected-characteristic columns on first load
-  // (no protected_col posted yet) so the dropdown can populate itself.
-  useEffect(() => {
-    if (columnsFetched.current || biasData || !datasetFile) return;
-    columnsFetched.current = true;
+    if (!datasetFile || columnsFor.current === datasetFile) return;
+    columnsFor.current = datasetFile;
+    setProtectedColumns(null);
     const form = new FormData();
     form.append("file", datasetFile);
     form.append("target_col", targetCol);
     form.append("model_name", modelName);
     void formUpload<BiasResponse>("/validation/stage7/bias-check", form)
-      .then((resp) => setBiasData(resp))
+      .then((resp) => {
+        if (columnsFor.current === datasetFile) setProtectedColumns(resp.protected_columns ?? []);
+      })
       .catch(() => {
         /* silent — the "Run Bias Check" button re-attempts with a protected_col */
       });
-  }, [datasetFile, targetCol, modelName, biasData]);
+  }, [datasetFile, targetCol, modelName]);
 
   // Default the dropdown to the first detected column once columns arrive,
-  // rather than leaving it on the disabled "Choose a column…" placeholder.
-  // Only fires when nothing is selected yet, so it never overrides a
-  // selection the user (or a restored cached result) already made.
+  // and drop a selection that is not a column of the current dataset.
   useEffect(() => {
-    if (biasCol || !biasData?.protected_columns?.length) return;
-    setBiasCol(biasData.protected_columns[0]);
-  }, [biasCol, biasData]);
+    if (!protectedColumns) return;
+    if (!biasCol || !protectedColumns.includes(biasCol)) setBiasCol(protectedColumns[0] ?? "");
+  }, [biasCol, protectedColumns]);
 
   const runBiasCheck = useCallback(async () => {
-    if (!datasetFile || !biasCol) return;
-    setBiasLoading(true);
-    setBiasError(null);
+    if (!datasetFile || !biasCol || !biasKey) return;
+    const token = bias.begin();                       // clears the previous result now
+    setValidationStage7BiasResult(null);
     try {
       const form = new FormData();
       form.append("file", datasetFile);
       form.append("target_col", targetCol);
       form.append("model_name", modelName);
       form.append("protected_col", biasCol);
+      if (registeredModelId) form.append("registered_model_id", registeredModelId);
       const resp = await formUpload<BiasResponse>("/validation/stage7/bias-check", form);
-      setBiasData(resp);
-      setValidationStage7BiasResult(resp as unknown as Record<string, any>);
+      if (!bias.isCurrent(token)) return;             // a newer request or identity superseded this one
+      bias.succeed(token, resp);
+      setValidationStage7BiasResult({ ...(resp as unknown as Record<string, any>), registered_model_id: registeredModelId, evaluation_key: biasKey });
     } catch (err) {
-      setBiasError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Bias check failed.");
-    } finally {
-      setBiasLoading(false);
+      bias.fail(token, err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Bias check failed.");
     }
-  }, [datasetFile, targetCol, modelName, biasCol, setValidationStage7BiasResult]);
+  }, [datasetFile, targetCol, modelName, biasCol, biasKey, bias, setValidationStage7BiasResult, registeredModelId]);
 
-  const biasAucRows = (biasData?.rows ?? []).filter((r) => r.AUC !== null) as Array<BiasRow & { AUC: number }>;
+  const biasAucRows = (biasResult?.rows ?? []).filter((r) => r.AUC !== null) as Array<BiasRow & { AUC: number }>;
   const biasAucMean = biasAucRows.length ? biasAucRows.reduce((s, r) => s + r.AUC, 0) / biasAucRows.length : 0;
 
   const featureImportanceFigure = useMemo(() => {
@@ -483,7 +479,7 @@ function Regulatory() {
             <VCard icon={Scale} title="Fair Lending Bias Check" sub="Check if model performance differs significantly across protected characteristics. Large gaps may indicate discriminatory bias.">
               {!datasetFile ? (
                 <VEmptyState icon={Scale} title="No dataset available" description="Complete Stage 1 Intake and Stage 2 Data Validation first." />
-              ) : biasData && biasData.protected_columns.length === 0 ? (
+              ) : protectedColumns && protectedColumns.length === 0 ? (
                 <VEmptyState icon={Scale} title="No protected characteristics detected" description="Common ones: age, gender, region, employment, education." />
               ) : (
                 <>
@@ -498,7 +494,7 @@ function Regulatory() {
                         <option value="" disabled>
                           Choose a column…
                         </option>
-                        {(biasData?.protected_columns ?? []).map((col) => (
+                        {(protectedColumns ?? []).map((col) => (
                           <option key={col} value={col}>
                             {col}
                           </option>
@@ -508,7 +504,7 @@ function Regulatory() {
                     <button
                       type="button"
                       onClick={() => void runBiasCheck()}
-                      disabled={!biasCol || biasLoading}
+                      disabled={!biasCol || biasLoading || !biasKey}
                       className="inline-flex items-center gap-2 rounded-lg bg-[#2f67ff] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {biasLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
@@ -517,6 +513,16 @@ function Regulatory() {
                   </div>
 
                   {biasError ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{biasError}</div> : null}
+                  {biasLoading ? (
+                    <p className="mt-3 text-xs text-slate-500" data-testid="bias-state">Running the bias check for the current model and dataset…</p>
+                  ) : bias.state.status === "idle" && !biasError ? (
+                    <p className="mt-3 text-xs text-slate-500" data-testid="bias-state">No bias result yet for the current model, dataset and characteristic.</p>
+                  ) : null}
+                  {biasResult ? (
+                    <div className="mt-4">
+                      <EvidenceIdentity evidence={(biasResult as any).evidence} />
+                    </div>
+                  ) : null}
 
                   {/* Overall bias-check finding — the backend already returns
                       this on every /validation/stage7/bias-check response
@@ -527,13 +533,13 @@ function Regulatory() {
                       actual PASS/WARN/FAIL result visually prominent per the
                       requested hierarchy, using only data already fetched —
                       no new calculation or endpoint. */}
-                  {biasData?.check ? (
+                  {biasResult?.check ? (
                     <div className="mt-4">
-                      <ThresholdCheckCard check={biasData.check} />
+                      <ThresholdCheckCard check={biasResult.check} />
                     </div>
                   ) : null}
 
-                  {biasData?.rows && biasData.rows.length > 0 ? (
+                  {biasResult?.rows && biasResult.rows.length > 0 ? (
                     <>
                       <div className="mt-5">
                         <SectionHeading eyebrow="Group-Level Comparison" />
@@ -550,7 +556,7 @@ function Regulatory() {
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-50">
-                              {biasData.rows.map((r, rowIndex) => (
+                              {biasResult.rows.map((r, rowIndex) => (
                                 <tr key={r.Group} className="hover:bg-slate-50/60">
                                   <td className="px-3 py-2 text-slate-400">{rowIndex + 1}</td>
                                   <td className="px-3 py-2 font-medium text-slate-900">{r.Group}</td>

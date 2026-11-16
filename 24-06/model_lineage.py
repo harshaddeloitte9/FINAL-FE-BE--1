@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import json
 import platform
 import time
@@ -37,7 +38,7 @@ from sklearn.metrics import roc_auc_score
 import persistence
 import split_integrity as si
 import stability_checks as stability
-from evaluate_new import compute_binary_metrics
+from evaluate_new import THRESHOLD_SOURCE_USER, THRESHOLD_SOURCE_VALIDATION, compute_binary_metrics
 from feature_engineering import analyze_for_feature_engineering, apply_feature_engineering
 from model_selector import get_hyperparameter_grid, get_model_instance
 from preprocessing_new import (
@@ -46,7 +47,15 @@ from preprocessing_new import (
     finalize_xy,
     select_imputation_strategy,
 )
-from train_new import compute_split_stats, split_data, train_model
+from train_new import (
+    SPLIT_STRATEGIES,
+    SPLIT_STRATEGY_STRATIFIED,
+    SPLIT_STRATEGY_TEMPORAL,
+    compute_split_stats,
+    make_split,
+    split_data,
+    train_model,
+)
 from utils import detect_column_types, detect_task_type
 
 LINEAGE_CONTRACT_VERSION = 1
@@ -89,8 +98,16 @@ def fit_training_pipeline(
     combined_transform_choices: Dict[str, Any],
     combined_strategy_override: Optional[str],
     estimator: Any = None,
+    split_strategy: str = SPLIT_STRATEGY_STRATIFIED,
+    temporal_date_col: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fit the development pipeline exactly as /models/train does.
+
+    `split_strategy` is "stratified_random" (default) or "temporal". A
+    temporal split is only made when explicitly requested, on
+    `temporal_date_col`; it is never inferred from whatever date column the
+    data happens to contain. The split report (strategy achieved, fallbacks,
+    class counts, boundaries) is returned as `split_report`.
 
     `estimator`, when given, is used as the (unfitted) model instead of
     building one from estimator_name/manual_params — reproduction passes an
@@ -104,9 +121,9 @@ def fit_training_pipeline(
     task_type = detect_task_type(df[target_col])
     X, y, _ = finalize_xy(df, col_types, target_col)
     raw_feature_columns = [str(c) for c in X.columns]
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
-        X, y, test_size=test_size, val_size=val_size,
-        task_type=task_type, random_state=random_seed,
+    (X_train, X_val, X_test, y_train, y_val, y_test), split_report = split_dataset(
+        df, X, y, strategy=split_strategy, date_col=temporal_date_col,
+        test_size=test_size, val_size=val_size, random_seed=random_seed, task_type=task_type,
     )
 
     effective_preprocessing_contract = {
@@ -173,10 +190,14 @@ def fit_training_pipeline(
             X_test = semantic_imputer.transform(X_test)
 
     origination_date_col = date_col if (date_col and date_col in df.columns) else None
+    origination_date_col_inferred = False
     if origination_date_col is None:
+        # Only used for the optional OOT window and date reporting; the split
+        # itself never becomes temporal because of this.
         datetime_candidates = col_types.get("datetime", [])
         if datetime_candidates:
             origination_date_col = datetime_candidates[0]
+            origination_date_col_inferred = True
 
     dates_train = None
     if origination_date_col and origination_date_col in df.columns:
@@ -254,7 +275,83 @@ def fit_training_pipeline(
         "X_train_pre_impute": X_train_pre_impute, "X_test_pre_impute": X_test_pre_impute,
         "X_train_pre_fe": X_train_pre_fe, "dates_train": dates_train,
         "use_oot": use_oot, "target_col": target_col,
+        "split_report": split_report,
+        "origination_date_col_inferred": origination_date_col_inferred,
     }
+
+
+def split_dataset(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, *, strategy: Optional[str], date_col: Optional[str],
+                  test_size: float, val_size: float, random_seed: int, task_type: str):
+    """Apply a split strategy to (X, y) taken from `df`. Returns
+    (splits, report). Temporal needs an explicit date column present in df."""
+    strategy = strategy or SPLIT_STRATEGY_STRATIFIED
+    if strategy not in SPLIT_STRATEGIES:
+        raise ValueError(f"Unknown split strategy '{strategy}'. Use one of {list(SPLIT_STRATEGIES)}.")
+    dates = None
+    if strategy == SPLIT_STRATEGY_TEMPORAL:
+        if not date_col:
+            raise ValueError("A temporal split needs an explicit date column.")
+        if date_col not in df.columns:
+            raise ValueError(f"Temporal split date column '{date_col}' is not in the dataset.")
+        dates = df[date_col]
+    return make_split(X, y, strategy=strategy, test_size=test_size, val_size=val_size, random_state=random_seed,
+                      task_type=task_type, dates=dates, date_col=date_col)
+
+
+def contract_split(df: pd.DataFrame, contract: Dict[str, Any], *, random_seed: Optional[int] = None):
+    """Re-derive a registered model's split exactly as recorded (strategy,
+    date column, sizes, seed). Contracts recorded before the strategy was
+    captured used the stratified random split."""
+    sp = contract.get("split") or {}
+    X_all, y_all, _ = finalize_xy(df, detect_column_types(df), contract["target_col"])
+    return split_dataset(
+        df, X_all, y_all, strategy=sp.get("strategy") or SPLIT_STRATEGY_STRATIFIED, date_col=sp.get("date_col"),
+        test_size=sp.get("test_size"), val_size=sp.get("val_size"),
+        random_seed=sp.get("random_seed") if random_seed is None else random_seed, task_type="binary",
+    )
+
+
+def operating_threshold(contract: Dict[str, Any]) -> Dict[str, Any]:
+    """The registered model's operating threshold and how trustworthy its
+    provenance is. Reproduction always uses this value; it never re-optimises.
+
+    PASS: value recorded with provenance (validation partition or user).
+    WARN: only the value used at training is known, not how it was chosen
+          (contracts recorded before provenance capture; such thresholds may
+          have been optimised on the test rows).
+    FAIL: no threshold recorded at all; the nominal 0.5 is reported, never
+          presented as the model's own operating point."""
+    tr = (contract or {}).get("training") or {}
+    prov = tr.get("threshold_provenance") if isinstance(tr.get("threshold_provenance"), dict) else None
+    if prov and tr.get("threshold") is not None and prov.get("source_partition") in (THRESHOLD_SOURCE_VALIDATION, THRESHOLD_SOURCE_USER):
+        return {"value": float(tr["threshold"]), "status": "PASS", "provenance": prov,
+                "detail": f"{float(tr['threshold']):.4f}, {prov.get('method')} on {prov.get('source_partition')}"
+                          + (" (degraded)" if prov.get("degraded") else "")}
+    if tr.get("threshold") is not None:
+        return {"value": float(tr["threshold"]), "status": "WARN", "provenance": prov,
+                "detail": f"Threshold {float(tr['threshold']):.4f} recorded without its selection method or partition."}
+    used = ((contract or {}).get("development_metrics") or {}).get("threshold_used")
+    if used is not None:
+        return {"value": float(used), "status": "WARN", "provenance": None,
+                "detail": f"Only the threshold used at training ({float(used):.4f}) is recorded; how it was selected "
+                          "is unknown (it may have been optimised on the test rows)."}
+    return {"value": 0.5, "status": "FAIL", "provenance": None,
+            "detail": "No operating threshold is recorded for this model; the nominal 0.5 is used and the evidence is incomplete."}
+
+
+def split_methodology_check(contract: Dict[str, Any]) -> Dict[str, str]:
+    """L11: the split strategy actually used at training, and whether it
+    degraded (for example a stratification fallback)."""
+    sp = (contract or {}).get("split") or {}
+    report = sp.get("report") if isinstance(sp.get("report"), dict) else None
+    if not sp.get("strategy") or not report:
+        return {"status": "WARN", "detail": "The split strategy actually achieved at training was not recorded "
+                                            "(model trained before split reporting); stratification cannot be confirmed."}
+    if report.get("degraded"):
+        reasons = "; ".join(f"{f.get('partition')}: {f.get('reason')}" for f in report.get("fallbacks") or [])
+        return {"status": "WARN", "detail": f"Split '{sp['strategy']}' was degraded at training ({reasons or 'see split report'})."}
+    extra = f" on '{sp.get('date_col')}' {report.get('boundaries')}" if sp["strategy"] == SPLIT_STRATEGY_TEMPORAL else ""
+    return {"status": "PASS", "detail": f"Split '{sp['strategy']}' achieved as '{report.get('achieved')}'{extra}."}
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────
@@ -402,7 +499,10 @@ def build_lineage_contract(
     threshold: Optional[float],
     development_metrics: Dict[str, Any],
     artifact: Dict[str, str],
+    threshold_provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """`threshold` is the operating threshold actually applied to the
+    development metrics; `threshold_provenance` records how it was chosen."""
     pre = fit["effective_preprocessing_contract"]
     ti = fit["training_info"] or {}
     return {
@@ -435,7 +535,10 @@ def build_lineage_contract(
             "feature_engineering_enabled": bool(training_config.get("use_feature_engineering")),
         },
         "split": {
-            "method": "train_new.split_data (stratified when possible) after preprocessing_new.finalize_xy",
+            "method": "train_new.make_split after preprocessing_new.finalize_xy",
+            "strategy": (fit.get("split_report") or {}).get("strategy") or SPLIT_STRATEGY_STRATIFIED,
+            "date_col": (fit.get("split_report") or {}).get("date_col"),
+            "report": _json_safe_value(fit.get("split_report") or {})[1],
             "test_size": training_config.get("test_size"),
             "val_size": training_config.get("val_size"),
             "random_seed": training_config.get("random_seed"),
@@ -449,6 +552,8 @@ def build_lineage_contract(
             "use_oot": bool(training_config.get("use_oot")),
             "date_col": training_config.get("date_col"),
             "threshold": threshold,
+            "threshold_provenance": _json_safe_value(threshold_provenance)[1] if threshold_provenance else None,
+            "origination_date_col_inferred": bool(fit.get("origination_date_col_inferred")),
             "best_params": {k: _json_safe_value(v)[1] for k, v in (ti.get("best_params") or {}).items()},
             "cv_mean": ti.get("cv_mean"),
         },
@@ -457,6 +562,340 @@ def build_lineage_contract(
         "libraries": library_versions(),
         "artifact": artifact,
         "created_at": pd.Timestamp.now().isoformat(),
+    }
+
+
+# ── Verified scoring-bundle loading (the only deserialization path) ────────
+#
+# Model artifacts are pickles, and unpickling runs code. So the backend only
+# ever deserializes a scoring bundle that it wrote itself: resolved from the
+# exact registered model ID's lineage contract, located inside the approved
+# artifact folder, and whose bytes match the SHA-256 recorded at
+# registration. Browser-supplied artifacts are never deserialized.
+
+def approved_artifact_dir() -> Path:
+    """The only folder scoring bundles may be loaded from (where
+    save_scoring_bundle writes them)."""
+    return (persistence.APP_DATA_DIR / "model_artifacts").resolve()
+
+
+def approved_bundle_path(artifact: Optional[Dict[str, Any]]) -> Optional[Path]:
+    """The recorded bundle path resolved inside the approved folder, or None
+    if no path is recorded or it points anywhere else (traversal, absolute
+    path, symlink out of the folder)."""
+    rel = (artifact or {}).get("path")
+    if not isinstance(rel, str) or not rel.strip():
+        return None
+    path = (persistence.BACKEND_DIR / rel).resolve()
+    try:
+        path.relative_to(approved_artifact_dir())
+    except ValueError:
+        return None
+    return path
+
+
+class ArtifactVerificationError(Exception):
+    """A registered scoring bundle could not be resolved and verified.
+    `status` is a lineage status code; `http_status` the API error code."""
+
+    def __init__(self, status: str, reasons: List[str], http_status: int = 409):
+        super().__init__(" ".join(reasons))
+        self.status = status
+        self.reasons = reasons
+        self.http_status = http_status
+
+
+def _verified_bundle_bytes(contract: Dict[str, Any]) -> bytes:
+    artifact = contract.get("artifact") or {}
+    path = approved_bundle_path(artifact)
+    if path is None:
+        raise ArtifactVerificationError(LINEAGE_BUNDLE_MISSING, [
+            "The scoring bundle path recorded in the lineage contract is missing or outside the approved artifact storage."])
+    if not path.is_file():
+        raise ArtifactVerificationError(LINEAGE_BUNDLE_MISSING, ["The scoring bundle recorded in the lineage contract is missing."])
+    data = path.read_bytes()   # hashed and loaded from the same bytes (no swap between check and load)
+    if not artifact.get("sha256") or hashlib.sha256(data).hexdigest() != artifact.get("sha256"):
+        raise ArtifactVerificationError(LINEAGE_BUNDLE_INTEGRITY_FAILED, [
+            "The scoring bundle's SHA-256 differs from the one recorded at registration; it was not loaded."])
+    return data
+
+
+def _deserialize_verified(data: bytes) -> Any:
+    """Deserialization boundary — only ever given bytes that passed
+    _verified_bundle_bytes."""
+    return joblib.load(io.BytesIO(data))
+
+
+def load_registered_scoring_bundle(model_id: Optional[str]) -> Dict[str, Any]:
+    """Resolve an exact registered model ID to its verified scoring bundle.
+    Fails closed: unknown ID (404), missing/old contract, unsupported task,
+    missing bundle, path outside approved storage or hash mismatch (409).
+    Never matches names, never builds a contract, writes nothing."""
+    wanted = str(model_id or "").strip()
+    if not wanted:
+        raise ArtifactVerificationError("not_selected", ["A registered model ID is required."], http_status=400)
+    entry = next((m for m in persistence.load_model_inventory().get("development", [])
+                  if isinstance(m, dict) and str(m.get("model_id") or "").strip() == wanted), None)
+    if entry is None:
+        raise ArtifactVerificationError("not_found", [f"Registered model '{wanted}' was not found in the Development Inventory."],
+                                        http_status=404)
+    readiness = lineage_readiness(entry)
+    if not readiness["replication_ready"]:
+        raise ArtifactVerificationError(readiness["status"], readiness["reasons"])
+    bundle = _deserialize_verified(_verified_bundle_bytes(entry["lineage_contract"]))
+    if not isinstance(bundle, dict) or "pipeline" not in bundle:
+        raise ArtifactVerificationError(LINEAGE_BUNDLE_INTEGRITY_FAILED, ["The verified scoring bundle has no model pipeline."])
+    return {"model_id": wanted, "entry": entry, "contract": entry["lineage_contract"], "bundle": bundle, "readiness": readiness}
+
+
+# ── Registered-model evaluation (stress, bias, benchmark champion) ─────────
+#
+# Validation stages that evaluate "the model" score the REGISTERED model: its
+# verified scoring bundle, on its recorded training dataset and the exact
+# test rows recorded at training. Nothing is refitted and no artifact is
+# chosen by algorithm name. Anything that fits a new model is labelled an
+# independent refit instead (EVALUATION_MODE_INDEPENDENT_REFIT).
+EVALUATION_MODE_REGISTERED = "registered_scoring_bundle"
+EVALUATION_MODE_INDEPENDENT_REFIT = "independent_refit"
+
+
+def registered_evaluation(
+    df: pd.DataFrame,
+    model_id: Optional[str],
+    *,
+    dataset_sha256: str,
+    expected_training_run_id: Optional[str] = None,
+    compute_sensitivity: bool = False,
+) -> Dict[str, Any]:
+    """Score the registered model on its recorded split. Fails closed
+    (ArtifactVerificationError) on: unknown ID, missing/old lineage, missing
+    bundle, path outside approved storage, hash mismatch, training-run
+    mismatch, dataset different from the training dataset, missing target,
+    or a split that does not reproduce the recorded test rows."""
+    resolved = load_registered_scoring_bundle(model_id)
+    contract, bundle = resolved["contract"], resolved["bundle"]
+    model_id = resolved["model_id"]
+    training_run_id = contract.get("training_run_id")
+    if contract.get("model_id") and str(contract["model_id"]).strip() != model_id:
+        raise ArtifactVerificationError("contract_identity_mismatch", [
+            f"The lineage contract belongs to model {contract['model_id']}, not {model_id}."])
+    if expected_training_run_id and str(expected_training_run_id).strip() != training_run_id:
+        raise ArtifactVerificationError("training_run_mismatch", [
+            f"Expected training run {expected_training_run_id}, but {model_id}'s current training is {training_run_id}."])
+    recorded_sha = (contract.get("dataset") or {}).get("sha256")
+    if not recorded_sha or dataset_sha256 != recorded_sha:
+        raise ArtifactVerificationError("dataset_mismatch", [
+            f"The supplied dataset is not {model_id}'s training dataset ({(contract.get('dataset') or {}).get('name')}); "
+            "the registered model is evaluated on its recorded test rows, which only that dataset contains."])
+    target = contract.get("target_col")
+    if not target or target not in df.columns:
+        raise ArtifactVerificationError("target_missing", [f"Target column '{target}' is not in the supplied dataset."])
+
+    sp = contract.get("split") or {}
+    try:
+        (Xtr_raw, Xv_raw, Xte_raw, ytr, yv, yte), _split_report = contract_split(df, contract)
+    except ValueError as exc:
+        raise ArtifactVerificationError("split_mismatch", [f"The recorded split could not be re-derived: {exc}"])
+    test_index_sha = index_fingerprint(Xte_raw.index)
+    if test_index_sha != sp.get("test_index_sha256") or (set(Xtr_raw.index) | set(Xv_raw.index)) & set(Xte_raw.index):
+        raise ArtifactVerificationError("split_mismatch", [
+            "The recorded train/test split could not be reproduced (test rows differ from training)."])
+
+    pipeline = bundle["pipeline"]
+    X_train = _transform_for_bundle(bundle, Xtr_raw)
+    X_test = _transform_for_bundle(bundle, Xte_raw)
+    y_proba = np.asarray(pipeline.predict_proba(X_test))[:, 1]
+    op = operating_threshold(contract)
+    metrics = binary_metrics(pipeline, X_test, yte, op["value"])
+
+    sensitivity = None
+    if compute_sensitivity:
+        # The registered model's own feature sensitivity, without refitting:
+        # AUC drop when each input is permuted on the recorded test rows.
+        sensitivity, _sd = stability.permutation_importance(pipeline, X_test, yte, repeats=3, seed=int(sp.get("random_seed") or 0))
+
+    identity = {
+        "evaluation_mode": EVALUATION_MODE_REGISTERED,
+        "registered_model_id": model_id,
+        "training_run_id": training_run_id,
+        "dataset_sha256": dataset_sha256,
+        "test_index_sha256": test_index_sha,
+        "bundle_sha256": (contract.get("artifact") or {}).get("sha256"),
+        "test_rows": int(len(yte)),
+        "operating_threshold": op["value"],
+        "threshold_status": op["status"],
+        "threshold_provenance": op["provenance"],
+    }
+    return {
+        "identity": identity,
+        "contract": contract,
+        "pipeline": pipeline,
+        "X_train": X_train, "X_test": X_test, "y_train": ytr, "y_test": yte, "y_proba": y_proba,
+        "X_train_raw": Xtr_raw, "X_test_raw": Xte_raw, "X_val_raw": Xv_raw, "y_val": yv,
+        "transform": lambda X_raw: _transform_for_bundle(bundle, X_raw),
+        "operating_threshold": op,
+        "col_types": detect_column_types(df), "task_type": "binary",
+        "metrics": metrics,
+        "cv_mean_auc": (contract.get("training") or {}).get("cv_mean"),
+        "ablation": sensitivity,
+        "sensitivity_method": "permutation" if compute_sensitivity else None,
+    }
+
+
+# ── Readiness (read-only) ──────────────────────────────────────────────────
+
+LINEAGE_READY = "ready"
+LINEAGE_MISSING = "lineage_missing"
+LINEAGE_UNSUPPORTED_TASK = "unsupported_task"
+LINEAGE_BUNDLE_MISSING = "bundle_missing"
+LINEAGE_BUNDLE_INTEGRITY_FAILED = "bundle_integrity_failed"
+
+
+def lineage_readiness(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether a registered development model can be reproduced, using the
+    same preconditions run_registered_replication applies: a current-version
+    lineage contract, a supported task type, and the recorded scoring bundle
+    present with its recorded SHA-256. Reads files only; writes nothing and
+    never builds or repairs a contract."""
+    contract = entry.get("lineage_contract")
+    reasons: List[str] = []
+    contract_info = None
+    bundle = {"recorded": False, "available": False, "integrity": "not_recorded", "path": None}
+    if not isinstance(contract, dict) or contract.get("contract_version") != LINEAGE_CONTRACT_VERSION:
+        status = LINEAGE_MISSING
+        reasons.append(
+            "No lineage contract is recorded for this model (it was registered before lineage capture, or training "
+            "did not complete registration). Its training configuration and scoring bundle are unknown, so it cannot "
+            "be reproduced. Retrain the model to record its lineage."
+        )
+        if entry.get("lineage_contract_error"):
+            reasons.append(f"Recorded lineage error: {entry['lineage_contract_error']}")
+    else:
+        contract_info = {
+            "contract_version": contract.get("contract_version"),
+            "training_run_id": contract.get("training_run_id"),
+            "task_type": contract.get("task_type"),
+            "target_col": contract.get("target_col"),
+            "estimator_name": contract.get("estimator_name"),
+            "dataset_name": (contract.get("dataset") or {}).get("name"),
+            "created_at": contract.get("created_at"),
+        }
+        artifact = contract.get("artifact") or {}
+        bundle["recorded"] = bool(artifact.get("path"))
+        bundle["path"] = artifact.get("path")
+        if contract.get("task_type") != "binary":
+            status = LINEAGE_UNSUPPORTED_TASK
+            reasons.append(f"Registered reproduction supports binary classification only (model task: {contract.get('task_type')}).")
+        elif not artifact.get("path"):
+            status = LINEAGE_BUNDLE_MISSING
+            reasons.append("The lineage contract records no scoring bundle, so the original model cannot be re-scored.")
+        else:
+            # Same location rule as the loader: only the approved artifact folder.
+            path = approved_bundle_path(artifact)
+            if path is None:
+                status = LINEAGE_BUNDLE_MISSING
+                bundle["integrity"] = "outside_approved_storage"
+                reasons.append("The scoring bundle path recorded in the lineage contract is outside the approved artifact storage, so it is never read.")
+            elif not path.is_file():
+                status = LINEAGE_BUNDLE_MISSING
+                bundle["integrity"] = "missing"
+                reasons.append("The scoring bundle recorded in the lineage contract is missing.")
+            elif _file_sha256(path) != artifact.get("sha256"):
+                status = LINEAGE_BUNDLE_INTEGRITY_FAILED
+                bundle["integrity"] = "mismatch"
+                reasons.append("The scoring bundle's SHA-256 differs from the one recorded at registration.")
+            else:
+                status = LINEAGE_READY
+                bundle["available"] = True
+                bundle["integrity"] = "verified"
+    return {
+        "model_id": entry.get("model_id"),
+        "model_name": entry.get("model_name"),
+        "algorithm": entry.get("algorithm"),
+        "status": status,
+        "replication_ready": status == LINEAGE_READY,
+        "contract": contract_info,
+        "scoring_bundle": bundle,
+        "reasons": reasons,
+    }
+
+
+# ── Legacy readiness (read-only, E10) ──────────────────────────────────────
+#
+# Classifies every registered development model by what evidence actually
+# exists for it. Nothing is inferred, back-filled or written: a model whose
+# training configuration, split, threshold or scoring bundle was never
+# recorded cannot be "migrated" into having them — it must be retrained.
+
+LEGACY_READY = "ready"
+LEGACY_READY_WITH_GAPS = "ready_with_methodology_gaps"
+LEGACY_RETRAIN_REQUIRED = "retrain_required"
+LEGACY_BLOCKED = "blocked_artifact_issue"
+
+
+def legacy_model_readiness(entry: Dict[str, Any]) -> Dict[str, Any]:
+    base = lineage_readiness(entry)
+    contract = entry.get("lineage_contract") if isinstance(entry.get("lineage_contract"), dict) else None
+    recorded_elsewhere = {
+        # Present on the inventory entry, but NOT linked to a verifiable
+        # training run or artifact, so it cannot stand in for a contract.
+        "training_config": bool(entry.get("training_config")),
+        "evaluation_metrics": bool(entry.get("evaluation_metrics")),
+        "dataset_name": bool((entry.get("dataset") or {}).get("file_name") if isinstance(entry.get("dataset"), dict) else entry.get("dataset_name")),
+    }
+    gaps: List[str] = []
+    if base["status"] == LINEAGE_MISSING:
+        category = LEGACY_RETRAIN_REQUIRED
+        gaps.append("No lineage contract: training configuration, split, operating threshold and scoring bundle were never recorded.")
+    elif base["status"] in (LINEAGE_BUNDLE_MISSING, LINEAGE_BUNDLE_INTEGRITY_FAILED):
+        category = LEGACY_BLOCKED
+        gaps.extend(base["reasons"])
+    elif base["status"] == LINEAGE_UNSUPPORTED_TASK:
+        category = LEGACY_BLOCKED
+        gaps.extend(base["reasons"])
+    else:
+        op = operating_threshold(contract)
+        split = split_methodology_check(contract)
+        if op["status"] != "PASS":
+            gaps.append("Operating threshold: " + op["detail"])
+        if split["status"] != "PASS":
+            gaps.append("Split methodology: " + split["detail"])
+        if not (contract.get("dataset") or {}).get("file_sha256"):
+            gaps.append("Original dataset file fingerprint not recorded (only the parsed-table fingerprint).")
+        category = LEGACY_READY if not gaps else LEGACY_READY_WITH_GAPS
+    return {
+        "model_id": entry.get("model_id"),
+        "model_name": entry.get("model_name"),
+        "algorithm": entry.get("algorithm"),
+        "category": category,
+        "lineage_status": base["status"],
+        "replication_ready": base["replication_ready"],
+        "gaps": gaps,
+        "recorded_on_inventory_entry": recorded_elsewhere,
+        # No automatic migration is safe: every missing item is evidence of
+        # how the model was trained, which cannot be reconstructed after the fact.
+        "safe_migration": None,
+        "action": {
+            LEGACY_READY: "None.",
+            LEGACY_READY_WITH_GAPS: "Usable for reproduction; the listed gaps block a clean verdict until the model is retrained.",
+            LEGACY_RETRAIN_REQUIRED: "Retrain the model to record its lineage. Existing metadata is kept as history and not converted.",
+            LEGACY_BLOCKED: "Investigate the scoring bundle (missing, moved or modified). It is never loaded or repaired automatically.",
+        }[category],
+    }
+
+
+def legacy_readiness_report(store: Dict[str, Any]) -> Dict[str, Any]:
+    """Readiness of every registered development model. Read-only."""
+    models = [legacy_model_readiness(m) for m in (store.get("development") or []) if isinstance(m, dict)]
+    counts: Dict[str, int] = {}
+    for m in models:
+        counts[m["category"]] = counts.get(m["category"], 0) + 1
+    return {
+        "total": len(models),
+        "counts": counts,
+        "models": models,
+        "migration_policy": ("Read-only assessment. No lineage contract, threshold, split or bundle is ever fabricated "
+                             "or back-filled; models without recorded lineage must be retrained."),
     }
 
 
@@ -493,6 +932,8 @@ def _fit_from_contract(df: pd.DataFrame, contract: Dict[str, Any], *, random_see
         combined_transform_choices=pre.get("transform_choices") or {},
         combined_strategy_override=pre.get("strategy_override"),
         estimator=build_estimator(contract["estimator"]),
+        split_strategy=sp.get("strategy") or SPLIT_STRATEGY_STRATIFIED,
+        temporal_date_col=sp.get("date_col"),
     )
 
 
@@ -561,9 +1002,7 @@ def registered_split_integrity(fit: Dict[str, Any], df: pd.DataFrame, contract: 
     ))
 
     def _resplit_test_index():
-        X_all, y_all, _ = finalize_xy(df, detect_column_types(df), contract["target_col"])
-        return split_data(X_all, y_all, test_size=sp["test_size"], val_size=sp["val_size"],
-                          task_type="binary", random_state=sp["random_seed"])[2].index
+        return contract_split(df, contract)[0][2].index
 
     subchecks.append(si.check_split_reproducible(X_test.index, _resplit_test_index, sp.get("test_index_sha256")))
     return si.build_r47(subchecks)
@@ -690,12 +1129,12 @@ def run_registered_replication(
         return _stop("Supplied dataset does not match the registered model's training dataset.")
 
     # Re-derive the original split exactly as training did.
-    col_types = detect_column_types(df)
-    X_all, y_all, _ = finalize_xy(df, col_types, target)
     sp = contract["split"]
-    Xtr, Xv, Xte_raw, ytr, yv, yte = split_data(
-        X_all, y_all, test_size=sp["test_size"], val_size=sp["val_size"], task_type="binary", random_state=sp["random_seed"],
-    )
+    try:
+        (Xtr, Xv, Xte_raw, ytr, yv, yte), _split_report = contract_split(df, contract)
+    except ValueError as exc:
+        _check(lineage_checks, "L9", "Original train/test split reproduced", "FAIL", f"Recorded split could not be re-derived: {exc}")
+        return _stop(f"Recorded split could not be re-derived: {exc}")
     same_test_rows = index_fingerprint(Xte_raw.index) == sp["test_index_sha256"]
     no_overlap = not (set(Xtr.index) | set(Xv.index)) & set(Xte_raw.index)
     split_detail = (
@@ -705,24 +1144,43 @@ def run_registered_replication(
     )
     split_ok = _check(lineage_checks, "L9", "Original train/test split reproduced",
                       "PASS" if same_test_rows and no_overlap else "FAIL", split_detail)
-    threshold = contract["training"].get("threshold")
+    op = operating_threshold(contract)
+    _check(lineage_checks, "L10", "Operating threshold recorded with provenance", op["status"], op["detail"])
+    methodology["operating_threshold"] = op
+    if op["status"] != "PASS":
+        limitations.append("Operating threshold provenance: " + op["detail"])
+    split_method = split_methodology_check(contract)
+    _check(lineage_checks, "L11", "Split methodology recorded and not degraded", split_method["status"], split_method["detail"])
+    if split_method["status"] != "PASS":
+        limitations.append("Split methodology: " + split_method["detail"])
+    # The recorded operating threshold is reused as-is; it is never re-optimised.
+    threshold = op["value"]
     recorded_metrics = contract.get("development_metrics") or {}
 
     # A. Exact artifact reproduction.
     original_metrics: Dict[str, Any] = {}
     artifact = contract.get("artifact") or {}
-    artifact_path = persistence.BACKEND_DIR / artifact["path"] if artifact.get("path") else None
+    artifact_path = approved_bundle_path(artifact)   # None if unrecorded or outside approved storage
     exact: Dict[str, Any] = {"status": "UNAVAILABLE", "detail": None, "artifact_sha256": artifact.get("sha256")}
-    if artifact_path is None or not artifact_path.exists():
+    bundle_bytes: Optional[bytes] = None
+    if artifact.get("path") and artifact_path is None:
+        exact["detail"] = "The registered model artifact path is outside the approved artifact storage; it was not read."
+    elif artifact_path is None or not artifact_path.is_file():
         exact["detail"] = "The registered model artifact file is missing."
-    elif _file_sha256(artifact_path) != artifact.get("sha256"):
-        exact["detail"] = "Artifact integrity check failed: file SHA-256 differs from the one recorded at registration."
+    else:
+        bundle_bytes = artifact_path.read_bytes()
+        if hashlib.sha256(bundle_bytes).hexdigest() != artifact.get("sha256"):
+            bundle_bytes = None
+            exact["detail"] = "Artifact integrity check failed: file SHA-256 differs from the one recorded at registration."
+    if bundle_bytes is None:
+        pass
     elif not split_ok:
         exact["status"] = "NOT_RUN"
         exact["detail"] = "Original test split could not be reproduced."
     else:
         try:
-            bundle = joblib.load(artifact_path)
+            # Deserializes exactly the bytes whose hash was just verified.
+            bundle = _deserialize_verified(bundle_bytes)
             X_scoring = _transform_for_bundle(bundle, Xte_raw)
             original_metrics = binary_metrics(bundle["pipeline"], X_scoring, yte, threshold)
             cmp = compare_metrics(recorded_metrics, original_metrics, EXACT_TOLERANCE)
@@ -805,16 +1263,21 @@ def run_registered_replication(
         # Each run also yields the R4.5 / R4.6 evidence (stability_checks).
         criteria = stability.load_criteria()
 
+        split_strategy = (contract.get("split") or {}).get("strategy") or SPLIT_STRATEGY_STRATIFIED
+        run_context = {"split_strategy": split_strategy, "dataset_sha256": dataset_sha256,
+                       "registered_model_id": entry.get("model_id"), "training_run_id": contract.get("training_run_id")}
+
         def _seed_execution(s: int) -> Dict[str, Any]:
             f_s = _fit_from_contract(df, contract, random_seed=s, use_cv=False)
-            return stability.evaluate_run(s, f_s["pipeline"], f_s["X_train"], f_s["X_test"], f_s["y_test"], criteria)
+            return stability.evaluate_run(s, f_s["pipeline"], f_s["X_train"], f_s["X_test"], f_s["y_test"], criteria,
+                                          context=run_context)
 
         out["seed_runs"] = []
         for s in seeds:
             try:
                 out["seed_runs"].append(_seed_execution(s))
             except Exception as exc:
-                out["seed_runs"].append(stability.failed_run(s, exc))
+                out["seed_runs"].append(stability.failed_run(s, exc, context=run_context))
         out["seed_aucs"] = [r["auc"] for r in out["seed_runs"] if r["status"] == "COMPLETED"]
         first_ok = next((r for r in out["seed_runs"] if r["status"] == "COMPLETED"), None)
         repeat = None
@@ -822,11 +1285,12 @@ def run_registered_replication(
             try:
                 repeat = _seed_execution(first_ok["seed"])
             except Exception as exc:
-                repeat = stability.failed_run(first_ok["seed"], exc)
+                repeat = stability.failed_run(first_ok["seed"], exc, context=run_context)
         r46c = criteria["r46"]
         from val_replication_core import _temporal_evidence
         out["stability"] = {
             "runs": out["seed_runs"],
+            "independence": stability.seed_run_independence(out["seed_runs"], split_strategy),
             "determinism": stability.determinism_check(first_ok, repeat),
             "main_evaluation": stability.stratified_bootstrap_auc(
                 np.asarray(y_test), proba, r46c["bootstrap_iterations"], int(r46c["bootstrap_seed"]), float(r46c["confidence_level"])),

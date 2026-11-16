@@ -112,6 +112,49 @@ def select_best_threshold(
     }
 
 
+THRESHOLD_METHOD_MANUAL = "manual"
+THRESHOLD_METHOD_F1_MAX = "f1_max"
+THRESHOLD_METHOD_DEFAULT = "default_0.5"
+THRESHOLD_SOURCE_USER = "user_specified"
+THRESHOLD_SOURCE_VALIDATION = "validation"
+
+
+def select_operating_threshold(
+    y_val,
+    proba_val,
+    manual: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Choose the operating threshold WITHOUT looking at the test rows.
+
+    - `manual` given: used as-is (method "manual", source "user_specified").
+    - otherwise: F1-maximising threshold on the validation partition
+      (`y_val`, `proba_val`), never on the evaluation/test data.
+    - validation rows unusable (missing, empty, single class, no
+      probabilities): nominal 0.5, marked `degraded` with the reason.
+
+    Returns the provenance dict that is recorded alongside the metrics."""
+    if manual is not None:
+        return {"method": THRESHOLD_METHOD_MANUAL, "value": float(manual), "source_partition": THRESHOLD_SOURCE_USER,
+                "rows": None, "positives": None, "degraded": False, "reason": "Threshold specified by the user."}
+    y_arr = None if y_val is None else np.asarray(y_val)
+    reason = None
+    if y_arr is None or proba_val is None or len(y_arr) == 0:
+        reason = "No validation partition was available to select a threshold."
+    elif len(np.unique(y_arr)) < 2:
+        reason = "The validation partition contains a single class; a threshold cannot be optimised on it."
+    if reason:
+        return {"method": THRESHOLD_METHOD_DEFAULT, "value": 0.5, "source_partition": None,
+                "rows": None if y_arr is None else int(len(y_arr)),
+                "positives": None if y_arr is None else int((y_arr == 1).sum()),
+                "degraded": True, "reason": reason + " The nominal 0.5 cut-off was used."}
+    scores = _to_scores(np.asarray(proba_val)) if np.asarray(proba_val).ndim == 2 else np.asarray(proba_val)
+    sel = select_best_threshold(y_arr, scores, metric="f1")
+    return {"method": THRESHOLD_METHOD_F1_MAX, "value": float(sel["threshold"]), "source_partition": THRESHOLD_SOURCE_VALIDATION,
+            "rows": int(len(y_arr)), "positives": int((y_arr == 1).sum()), "degraded": False,
+            "validation_f1": sel["f1"],
+            "reason": "F1-maximising threshold selected on the validation partition (test rows not used)."}
+
+
 def compute_binary_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -132,6 +175,9 @@ def compute_binary_metrics(
         _scores = _to_scores(y_proba) if y_proba.ndim == 2 else y_proba
         if threshold is None:
             threshold_selection = select_best_threshold(y_true, _scores, metric="f1")
+            # Chosen on the very rows being scored: flagged so it is never
+            # mistaken for an out-of-sample operating point.
+            threshold_selection["source_partition"] = "evaluated_data_in_sample"
             threshold = threshold_selection["threshold"]
         y_pred_thresh = (_scores >= threshold).astype(int)
     else:

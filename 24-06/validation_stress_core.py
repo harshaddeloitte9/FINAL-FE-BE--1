@@ -105,8 +105,14 @@ def _find_driver_col(num_cols: list[str], keywords: list[str]) -> Optional[str]:
 
 def detect_driver_columns(X: pd.DataFrame) -> dict[str, Optional[str]]:
     """Best-effort detection of macro/credit driver columns by name, mirroring
-    the Streamlit version's keyword heuristics."""
+    the Streamlit version's keyword heuristics.
+
+    Ratio columns that merely contain a driver's name (debt_to_income,
+    loan_to_income, dti, …) are NOT that driver: shocking debt_to_income by
+    "income −25%" lowered DTI, i.e. applied a favourable shock."""
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    ratio_markers = ("_to_", "ratio", "dti", "debt")
+    income_cols = [c for c in num_cols if not any(m in c.lower() for m in ratio_markers)]
     return {
         "gdp": _find_driver_col(num_cols, ["gdp"]),
         "unemployment": _find_driver_col(num_cols, ["unemploy", "jobless"]),
@@ -114,7 +120,7 @@ def detect_driver_columns(X: pd.DataFrame) -> dict[str, Optional[str]]:
             "house_price", "hpi", "home_price", "home_value",
             "property_price", "collateral_value",
         ]),
-        "income": _find_driver_col(num_cols, ["income", "salary", "wage", "earnings"]),
+        "income": _find_driver_col(income_cols, ["income", "salary", "wage", "earnings"]),
     }
 
 
@@ -134,10 +140,24 @@ def _status_from_thresholds(value: float, warn_at: float, fail_at: float, higher
 
 # ── 6.1 — Sensitivity analysis (ablation-based + manual shock) ──────────────
 
-def get_ablation_sensitivity(ablation: Optional[dict]) -> dict:
-    """Summarize the per-feature AUC-drop-on-removal results already computed
-    by run_replication()'s ablation step. Returns the ranked table plus the
-    6.1 check verdict — does NOT recompute ablation itself."""
+def get_ablation_sensitivity(ablation: Optional[dict], method: Optional[str] = None) -> dict:
+    """Summarize the per-feature AUC-drop results already computed — by
+    run_replication()'s ablation step (removal + refit), or, for a registered
+    model, by permuting each input of the registered model itself
+    (method="permutation", no refit). Returns the ranked table plus the 6.1
+    check verdict — does NOT recompute anything itself."""
+    out = _ablation_sensitivity(ablation)
+    if method == "permutation":
+        out["method"] = "permutation"
+        if out["available"]:
+            out["check"]["observed"] = out["check"]["observed"].replace("when removing", "when permuting") + \
+                " (registered model, no refit)"
+    else:
+        out["method"] = "removal_refit"
+    return out
+
+
+def _ablation_sensitivity(ablation: Optional[dict]) -> dict:
     ablation = ablation or {}
     rows = [
         {"feature": k, "auc_drop": round(float(v), 4)}
@@ -185,19 +205,40 @@ def apply_manual_shock(
 ) -> dict:
     """Shock a single numeric feature by +/- magnitude_pct% across the whole
     test set and re-score. `direction` is "increase" or "decrease"."""
-    if feature not in X_test.columns:
-        raise ValueError(f"Unknown feature '{feature}'.")
+    X_shocked = _shock_frame(X_test, feature, direction, magnitude_pct)
+    shocked_proba = pipeline.predict_proba(X_shocked)[:, 1]
+    return _shock_summary(feature, direction, magnitude_pct, y_proba, shocked_proba)
 
-    X_shocked = X_test.copy()
+
+def apply_manual_shock_through(score: Any, X_raw: pd.DataFrame, feature: str, direction: str,
+                               magnitude_pct: float) -> dict:
+    """Shock a raw input feature and re-score through `score(X_raw) -> PD`,
+    the model's FULL scoring chain (for a registered model: dropped columns,
+    imputer, feature engineering, then the pipeline). Columns derived from the
+    feature therefore move with it. Base and shocked PDs come from the same
+    rows through the same chain."""
+    X_shocked = _shock_frame(X_raw, feature, direction, magnitude_pct)
+    out = _shock_summary(feature, direction, magnitude_pct, score(X_raw), score(X_shocked))
+    out["rows"] = int(len(X_raw))
+    return out
+
+
+def _shock_frame(X: pd.DataFrame, feature: str, direction: str, magnitude_pct: float) -> pd.DataFrame:
+    if feature not in X.columns:
+        raise ValueError(f"Unknown feature '{feature}'.")
+    if not pd.api.types.is_numeric_dtype(X[feature]):
+        raise ValueError(f"Feature '{feature}' is not numeric and cannot be shocked by a percentage.")
+    X_shocked = X.copy()
     multiplier = 1 + magnitude_pct / 100 if direction == "increase" else 1 - magnitude_pct / 100
     X_shocked[feature] = X_shocked[feature] * multiplier
+    return X_shocked
 
-    shocked_proba = pipeline.predict_proba(X_shocked)[:, 1]
-    base_pd = float(np.array(y_proba).mean())
-    shock_pd = float(shocked_proba.mean())
+
+def _shock_summary(feature: str, direction: str, magnitude_pct: float, base_proba: Any, shocked_proba: Any) -> dict:
+    base_pd = float(np.asarray(base_proba).mean())
+    shock_pd = float(np.asarray(shocked_proba).mean())
     pd_change = shock_pd - base_pd
     pd_change_pct = (pd_change / base_pd * 100) if base_pd > 0 else 0.0
-
     return {
         "feature": feature,
         "direction": direction,
@@ -223,8 +264,12 @@ def apply_macro_scenario(pipeline: Any, X_test: pd.DataFrame, y_proba: Any, scen
 
     unemp_col = driver_cols["unemployment"]
     if unemp_col and scenario["unemployment_pp"] != 0:
+        # unemployment_pp is a fraction (0.03 = +3 percentage points). For a
+        # column stored as a fraction (0.07 = 7%) add it as is; for one stored
+        # in percent (7.0) scale by 100. (Previously the fraction case was
+        # divided by 100, applying +0.03pp instead of +3pp.)
         is_fraction = X_scn[unemp_col].abs().max() <= 1.5
-        delta = scenario["unemployment_pp"] / 100 if is_fraction else scenario["unemployment_pp"] * 100
+        delta = scenario["unemployment_pp"] if is_fraction else scenario["unemployment_pp"] * 100
         X_scn[unemp_col] = X_scn[unemp_col] + delta
         applied.append(f"{unemp_col} +{scenario['unemployment_pp']*100:.0f}pp")
 
@@ -238,22 +283,44 @@ def apply_macro_scenario(pipeline: Any, X_test: pd.DataFrame, y_proba: Any, scen
         X_scn[inc_col] = X_scn[inc_col] * (1 + scenario["income_pct"])
         applied.append(f"{inc_col} x {1 + scenario['income_pct']:.2f}")
 
-    scn_proba = pipeline.predict_proba(X_scn)[:, 1]
     base_pd = float(np.array(y_proba).mean())
-    scn_pd = float(np.clip(scn_proba.mean() * scenario["pd_multiplier"], 0, 1))
-    if scenario["pd_multiplier"] != 1.0:
-        applied.append(f"flat PD uplift x {scenario['pd_multiplier']}")
+    driver_shocks_applied = list(applied)
+    multiplier = float(scenario["pd_multiplier"])
+
+    # No driver column matched and no overlay: nothing was stressed. Report
+    # that explicitly instead of a "0.0% change" that looks like a result.
+    if not driver_shocks_applied and multiplier == 1.0:
+        return {
+            "id": scenario["id"], "name": scenario["name"], "desc": scenario["desc"],
+            "status": "NOT_APPLICABLE",
+            "reason": "None of this scenario's driver columns (GDP, unemployment, house price, income) exist in the data, so it was not run.",
+            "applied": [], "base_pd": base_pd, "scn_pd": None, "pd_change": None, "pd_change_pct": None,
+            "model_response_pd": None, "overlay_multiplier": multiplier,
+        }
+
+    # The model's own response to the driver shocks, kept separate from any
+    # assumed flat uplift so the two are never presented as one result.
+    model_response_pd = float(pipeline.predict_proba(X_scn)[:, 1].mean())
+    scn_pd = float(np.clip(model_response_pd * multiplier, 0, 1))
+    if multiplier != 1.0:
+        applied.append(f"flat PD uplift x {multiplier} (assumption, not model output)")
 
     pd_change = scn_pd - base_pd
     return {
         "id": scenario["id"],
         "name": scenario["name"],
         "desc": scenario["desc"],
+        # OVERLAY_ONLY: no driver column matched — the whole change is the
+        # assumed multiplier, not a model response.
+        "status": "APPLIED" if driver_shocks_applied else "OVERLAY_ONLY",
         "applied": applied,
         "base_pd": base_pd,
         "scn_pd": scn_pd,
         "pd_change": pd_change,
         "pd_change_pct": (pd_change / base_pd * 100) if base_pd > 0 else 0.0,
+        "model_response_pd": model_response_pd,
+        "model_response_change_pct": ((model_response_pd - base_pd) / base_pd * 100) if base_pd > 0 else 0.0,
+        "overlay_multiplier": multiplier,
     }
 
 
@@ -268,45 +335,83 @@ def run_all_macro_scenarios(pipeline: Any, X_test: pd.DataFrame, y_proba: Any) -
 
 # ── 6.4 — PSI stability (train vs test score distribution) ──────────────────
 
-def compute_psi_stability(pipeline: Any, X_train: pd.DataFrame, y_proba: Any) -> dict:
+def _psi(expected: np.ndarray, actual: np.ndarray):
+    lo = min(expected.min(), actual.min())
+    hi = max(expected.max(), actual.max())
+    bins = np.linspace(lo, hi, 11)
+    labels = [f"{bins[i]:.3f}\u2013{bins[i+1]:.3f}" for i in range(len(bins) - 1)]
+    e_counts, _ = np.histogram(expected, bins=bins)
+    a_counts, _ = np.histogram(actual, bins=bins)
+    e_pct = np.where(e_counts == 0, 0.0001, e_counts / len(expected))
+    a_pct = np.where(a_counts == 0, 0.0001, a_counts / len(actual))
+    per_bin = (a_pct - e_pct) * np.log(a_pct / e_pct)
+    rows = [{"bin": labels[i], "train_pct": round(float(e_pct[i]) * 100, 2), "test_pct": round(float(a_pct[i]) * 100, 2),
+             "psi": round(float(per_bin[i]), 5)} for i in range(len(labels))]
+    return float(per_bin.sum()), rows
+
+
+PSI_THRESHOLD_TEXT = "PSI < 0.10 PASS, 0.10-0.25 WARN, > 0.25 FAIL"
+
+
+def compute_psi_stability(pipeline: Any, X_train: pd.DataFrame, y_proba: Any,
+                          X_test: Optional[pd.DataFrame] = None, val_df: Optional[pd.DataFrame] = None,
+                          date_col: Optional[str] = None) -> dict:
+    """Score-distribution stability (6.4).
+
+    PSI measures whether the scored population SHIFTS (SS11/13 \u00a710.6). The
+    train and test sets here are two random samples of the same data, so
+    their PSI is \u22480 by construction and says nothing about stability \u2014 it
+    used to be reported as a PASS. Now:
+      * with a date column: PSI between the earlier and later halves (by
+        date) of all scored records \u2014 a genuine population-shift test;
+      * without one: NOT_ASSESSED. The train-vs-test value is still returned,
+        labelled as a same-population reference only.
+    """
     train_proba = pipeline.predict_proba(X_train)[:, 1]
     test_proba = np.array(y_proba)
+    same_pop_psi, same_pop_bins = _psi(train_proba, test_proba)
 
-    psi_min = min(train_proba.min(), test_proba.min())
-    psi_max = max(train_proba.max(), test_proba.max())
-    bins = np.linspace(psi_min, psi_max, 11)
-    bin_labels = [f"{bins[i]:.3f}\u2013{bins[i+1]:.3f}" for i in range(len(bins) - 1)]
-
-    tr_counts, _ = np.histogram(train_proba, bins=bins)
-    te_counts, _ = np.histogram(test_proba, bins=bins)
-
-    tr_pct = np.where(tr_counts == 0, 0.0001, tr_counts / len(train_proba))
-    te_pct = np.where(te_counts == 0, 0.0001, te_counts / len(test_proba))
-
-    psi_per_bin = (te_pct - tr_pct) * np.log(te_pct / tr_pct)
-    psi_total = float(psi_per_bin.sum())
-
-    status = _status_from_thresholds(psi_total, PSI_WARN, PSI_FAIL)
-
-    bins_out = [
-        {
-            "bin": bin_labels[i],
-            "train_pct": round(float(tr_pct[i]) * 100, 2),
-            "test_pct": round(float(te_pct[i]) * 100, 2),
-            "psi": round(float(psi_per_bin[i]), 5),
-        }
-        for i in range(len(bin_labels))
-    ]
+    resolved_date_col = _detect_date_column(val_df, hint=date_col) if val_df is not None else None
+    if resolved_date_col and X_test is not None:
+        try:
+            scores = pd.Series(np.concatenate([train_proba, test_proba]),
+                               index=list(X_train.index) + list(X_test.index))
+            dates = pd.to_datetime(val_df[resolved_date_col], errors="coerce").reindex(scores.index)
+            frame = pd.DataFrame({"date": dates, "score": scores}).dropna().sort_values("date")
+            if len(frame) >= 40 and frame["date"].nunique() >= 2:
+                cut = frame["date"].iloc[len(frame) // 2]
+                early, late = frame[frame["date"] < cut]["score"].to_numpy(), frame[frame["date"] >= cut]["score"].to_numpy()
+                if len(early) >= 20 and len(late) >= 20:
+                    psi_total, bins_out = _psi(early, late)
+                    status = _status_from_thresholds(psi_total, PSI_WARN, PSI_FAIL)
+                    return {
+                        "psi_total": round(psi_total, 4),
+                        "bins": bins_out,
+                        "comparison": f"earlier vs later records by {resolved_date_col} (split at {cut.date()})",
+                        "series_labels": {"train_pct": f"Before {cut.date()}", "test_pct": f"From {cut.date()}"},
+                        "same_population_psi": round(same_pop_psi, 4),
+                        "check": {
+                            "id": "6.4", "title": "Score Distribution Stability (PSI)", "status": status,
+                            "observed": f"PSI between {len(early)} earlier and {len(late)} later scored records "
+                                        f"({resolved_date_col}, split at {cut.date()}) = {psi_total:.4f}",
+                            "threshold": PSI_THRESHOLD_TEXT, "source": "SS11/13 \u00a710.6",
+                        },
+                    }
+        except Exception:
+            pass
 
     return {
-        "psi_total": round(psi_total, 4),
-        "bins": bins_out,
+        "psi_total": None,
+        "bins": same_pop_bins,
+        "comparison": "train vs test from one random split (same population \u2014 reference only)",
+        "series_labels": {"train_pct": "Train %", "test_pct": "Test %"},
+        "same_population_psi": round(same_pop_psi, 4),
         "check": {
-            "id": "6.4", "title": "Score Distribution Stability (PSI)",
-            "status": status,
-            "observed": f"PSI = {psi_total:.4f}",
-            "threshold": "PSI < 0.10 PASS, 0.10-0.25 WARN, > 0.25 FAIL",
-            "source": "SS11/13 \u00a710.6",
+            "id": "6.4", "title": "Score Distribution Stability (PSI)", "status": "NOT_ASSESSED",
+            "observed": ("No usable date column, so population stability over time cannot be assessed. "
+                         f"Train-vs-test PSI from one random split ({same_pop_psi:.4f}) is \u22480 by construction "
+                         "and is shown for reference only."),
+            "threshold": PSI_THRESHOLD_TEXT, "source": "SS11/13 \u00a710.6",
         },
     }
 
@@ -479,7 +584,7 @@ def run_stress_suite(rep_result: dict, val_df: Optional[pd.DataFrame], freq_key:
             "reason": "Model replication did not return a usable pipeline/test set.",
         }
 
-    sensitivity = get_ablation_sensitivity(ablation)
+    sensitivity = get_ablation_sensitivity(ablation, rep_result.get("sensitivity_method"))
     macro = run_all_macro_scenarios(pipeline, X_test, y_proba)
     # Backtesting only re-buckets the already-computed y_test/y_proba by
     # calendar period — it needs no retraining — so every frequency option
@@ -492,7 +597,7 @@ def run_stress_suite(rep_result: dict, val_df: Optional[pd.DataFrame], freq_key:
         for key in FREQ_MAP
     }
     backtest = backtest_by_freq.get(freq_key) or run_backtesting(val_df, y_test, y_proba, freq_key=freq_key, date_col=date_col)
-    psi = compute_psi_stability(pipeline, X_train, y_proba) if X_train is not None else {
+    psi = compute_psi_stability(pipeline, X_train, y_proba, X_test=X_test, val_df=val_df, date_col=date_col) if X_train is not None else {
         "psi_total": None, "bins": [],
         "check": {"id": "6.4", "title": "Score Distribution Stability (PSI)", "status": "PENDING",
                   "observed": "Training data required (X_train) but not available.",
@@ -526,7 +631,8 @@ def run_stress_suite(rep_result: dict, val_df: Optional[pd.DataFrame], freq_key:
             "warn": sum(1 for c in checks if c["status"] == "WARN") + dir_warn,
             "fail": sum(1 for c in checks if c["status"] == "FAIL") + dir_fail,
             "pending": sum(1 for c in checks if c["status"] == "PENDING"),
-            "na": dir_na,
+            # Checks whose evidence was unavailable are counted, never dropped.
+            "na": dir_na + sum(1 for c in checks if c["status"] in ("NOT_ASSESSED", "NOT_APPLICABLE")),
         },
     }
 

@@ -3,10 +3,14 @@ stability_checks.py — R4.5 (feature stability) and R4.6 (predictive
 performance stability), redesigned after the methodology review
 (R4_5_R4_6_METHODOLOGY_REVIEW.md).
 
-Evidence comes from repeated runs: each run is a fresh stratified re-split
-and a retrain with the model's own configuration (the registered model's
-recorded configuration for a registered reproduction). For every run this
-module measures, on that run's held-out rows:
+Evidence comes from repeated runs: each run re-derives the train/test split
+with its own seed and retrains with the model's own configuration (the
+registered model's recorded configuration for a registered reproduction).
+Every run records the split strategy and a fingerprint of the test rows it
+evaluated; runs only count as independent evidence when their test sets
+actually differ (a chronological split does not change with the seed, so
+seed re-splitting cannot assess it — see seed_run_independence). For every
+run this module measures, on that run's held-out rows:
   * ROC-AUC and its stratified-bootstrap standard error,
   * permutation importance of every model input (AUC drop when the column is
     shuffled; repeated, giving a within-run standard error) — model-agnostic,
@@ -33,17 +37,23 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm, rankdata, spearmanr, ttest_1samp
 
+from split_integrity import index_fingerprint
+
+CHRONOLOGICAL_SPLIT = "temporal"
+
 CRITERIA_PATH = Path(__file__).resolve().parent / "config" / "stability_criteria.json"
 DETERMINISM_TOLERANCE = 1e-9
 
 R45_METHODOLOGY = (
-    "Repeated stratified re-split + retrain with the model's configuration. Per run: permutation importance "
+    "Repeated seeded re-split + retrain with the model's configuration; each run's test-row fingerprint is "
+    "recorded and the runs count only if their test sets differ. Per run: permutation importance "
     "of every input on held-out rows (AUC drop when shuffled) and the direction of each numeric feature's "
     "effect on predicted PD. Stability = agreement of importance ranks (Spearman) and directions across runs, "
     "judged among material features (selected in at least half of the runs)."
 )
 R46_METHODOLOGY = (
-    "Repeated stratified re-split + retrain with the model's configuration. Per run: held-out ROC-AUC with a "
+    "Repeated seeded re-split + retrain with the model's configuration; each run's test-row fingerprint is "
+    "recorded and the runs count only if their test sets differ. Per run: held-out ROC-AUC with a "
     "stratified-bootstrap standard error. Run-to-run variation is compared with sampling error (Cochran's Q "
     "heterogeneity test, I²); each run is tested for significant deterioration against the pooled AUC and each "
     "chronological period against the overall test AUC (one-sided, Bonferroni-corrected); the model's test AUC "
@@ -152,7 +162,11 @@ def direction_effects(pipeline, X_eval: pd.DataFrame, X_reference: pd.DataFrame)
 
 # ── One repeated run ───────────────────────────────────────────────────────
 
-def evaluate_run(seed: int, pipeline, X_train: pd.DataFrame, X_test: pd.DataFrame, y_test, criteria: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_run(seed: int, pipeline, X_train: pd.DataFrame, X_test: pd.DataFrame, y_test, criteria: Dict[str, Any],
+                 context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """One repeated run's evidence. `context` carries the run's identity
+    (split strategy, dataset fingerprint, model / training run) and is
+    recorded with it, together with the fingerprint of the test rows scored."""
     r45, r46 = criteria["r45"], criteria["r46"]
     y = np.asarray(y_test).astype(int)
     p = pipeline.predict_proba(X_test)[:, 1]
@@ -174,11 +188,40 @@ def evaluate_run(seed: int, pipeline, X_train: pd.DataFrame, X_test: pd.DataFram
         "selected": selected,
         "direction": direction_effects(pipeline, X_test, X_train),
         "model_inputs": [str(c) for c in X_test.columns],
+        **(context or {}),
+        "test_index_sha256": index_fingerprint(X_test.index),
     }
 
 
-def failed_run(seed: int, exc: BaseException) -> Dict[str, Any]:
-    return {"seed": seed, "status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
+def failed_run(seed: int, exc: BaseException, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {"seed": seed, "status": "FAILED", "error": f"{type(exc).__name__}: {exc}", **(context or {})}
+
+
+def seed_run_independence(runs: List[Dict[str, Any]], split_strategy: Optional[str]) -> Dict[str, Any]:
+    """Whether the completed seed runs are genuinely independent evaluations:
+    every completed run recorded its test-row fingerprint and no two runs
+    scored the same test rows. A chronological split ignores the seed, so its
+    runs re-evaluate identical rows and are never independent evidence."""
+    completed = [r for r in runs if r.get("status") == "COMPLETED"]
+    fingerprints = [r.get("test_index_sha256") for r in completed]
+    distinct = len({f for f in fingerprints if f})
+    out = {"split_strategy": split_strategy, "completed_runs": len(completed), "distinct_test_sets": distinct,
+           "independent": False, "reason": None}
+    if not completed:
+        out["reason"] = "No seed run completed."
+    elif any(not f for f in fingerprints):
+        out["reason"] = "Seed runs did not record the test rows they evaluated, so their independence cannot be verified."
+    elif split_strategy == CHRONOLOGICAL_SPLIT:
+        out["reason"] = (f"Chronological split: the seed does not change the split, so all {len(completed)} seed runs "
+                         f"evaluated the same test rows ({distinct} distinct test set). Seed re-splitting cannot assess "
+                         "stability for this model; a chronological stability methodology approved by Model Risk "
+                         "Management is required.")
+    elif distinct < len(completed):
+        out["reason"] = (f"Only {distinct} distinct test sets across {len(completed)} seed runs; repeated evaluation "
+                         "of identical test rows is not independent evidence.")
+    else:
+        out["independent"] = True
+    return out
 
 
 def determinism_check(first: Optional[Dict[str, Any]], repeat: Optional[Dict[str, Any]]) -> Dict[str, Any]:

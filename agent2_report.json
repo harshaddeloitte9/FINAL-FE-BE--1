@@ -1,0 +1,182 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-13T16:21:34.898622",
+    "rules_source": "rag_store/rules.json",
+    "stages_checked": [
+      "data",
+      "evaluation",
+      "feature",
+      "training"
+    ],
+    "total_rules": 2,
+    "rules_passed": -2,
+    "rules_flagged": 4,
+    "compliance_score": 0
+  },
+  "summary": {
+    "high_severity": 4,
+    "medium_severity": 0,
+    "low_severity": 0,
+    "overall_status": "FAIL"
+  },
+  "flags_by_stage": {
+    "data": [
+      {
+        "rule_id": "R01",
+        "source": "SS1/23",
+        "principle": "3.2",
+        "stage": "data",
+        "severity": "high",
+        "flag": "High missing data (>20%) in: credit_limit, drawn_balance, ead_at_default, loan_term_years, default_date, ltv, recovery_rate",
+        "suggestion": "Investigate the root cause of missingness (MAR/MCAR/MNAR). Apply appropriate imputation or exclude columns exceeding the 20% threshold. Document the data quality assessment and remediation steps per SS1/23 Principle 3.2.",
+        "observed_value": [
+          "credit_limit",
+          "drawn_balance",
+          "ead_at_default",
+          "loan_term_years",
+          "default_date",
+          "ltv",
+          "recovery_rate"
+        ]
+      }
+    ],
+    "feature": [],
+    "training": [
+      {
+        "rule_id": "NO_CV",
+        "source": "SS1/23",
+        "principle": "Principle 3.3",
+        "stage": "training",
+        "severity": "high",
+        "flag": "Cross-validation was not performed. SS1/23 Principle 3.3 requires backward-looking stability testing across multiple data samples \u2014 stratified K-Fold CV (k\u22655) must be run and fold-level metrics reported to demonstrate model stability.",
+        "suggestion": "Enable K-Fold cross-validation in the training step. Report mean and standard deviation of ROC-AUC, recall, and PR-AUC across folds in the validation report per SS1/23 Principle 3.3.",
+        "observed_value": null
+      }
+    ],
+    "evaluation": [
+      {
+        "rule_id": "SS1_P3.3_NO_SENSITIVITY",
+        "source": "SS1/23",
+        "principle": "Principle 3.3",
+        "stage": "evaluation",
+        "severity": "high",
+        "flag": "No sensitivity analysis has been performed. SS1/23 Principle 3.3 requires backward-looking and forward-looking sensitivity testing \u2014 the effect of parameter perturbations on model outputs must be documented.",
+        "suggestion": "Run a sensitivity analysis varying key model parameters (\u00b110%, \u00b125%). Document how predictions change under adverse macro scenarios and include results in the model validation report.",
+        "observed_value": null
+      },
+      {
+        "rule_id": "NO_SHAP",
+        "source": "SS1/23",
+        "principle": "Principle 3.5 | 4.2",
+        "stage": "evaluation",
+        "severity": "high",
+        "flag": "Model explainability analysis (SHAP) was not performed. SS1/23 Principle 3.5 requires model inputs and their relative contributions to be documented and explainable to non-technical stakeholders and regulators. SS1/23 Principle 4.2 additionally requires that model outputs be explainable using model-agnostic interpretability techniques (e.g. SHAP, LIME) to support human oversight and credit decisions.",
+        "suggestion": "Run SHAP value analysis on Step 7 (Explainability). Produce a SHAP summary plot and document the top contributing features in the model card per SS1/23 Principles 3.5 and 4.2.",
+        "observed_value": false
+      }
+    ]
+  },
+  "flags_by_source": {
+    "SS1/23": [
+      {
+        "rule_id": "R01",
+        "source": "SS1/23",
+        "principle": "3.2",
+        "stage": "data",
+        "severity": "high",
+        "flag": "High missing data (>20%) in: credit_limit, drawn_balance, ead_at_default, loan_term_years, default_date, ltv, recovery_rate",
+        "suggestion": "Investigate the root cause of missingness (MAR/MCAR/MNAR). Apply appropriate imputation or exclude columns exceeding the 20% threshold. Document the data quality assessment and remediation steps per SS1/23 Principle 3.2.",
+        "observed_value": [
+          "credit_limit",
+          "drawn_balance",
+          "ead_at_default",
+          "loan_term_years",
+          "default_date",
+          "ltv",
+          "recovery_rate"
+        ]
+      },
+      {
+        "rule_id": "NO_CV",
+        "source": "SS1/23",
+        "principle": "Principle 3.3",
+        "stage": "training",
+        "severity": "high",
+        "flag": "Cross-validation was not performed. SS1/23 Principle 3.3 requires backward-looking stability testing across multiple data samples \u2014 stratified K-Fold CV (k\u22655) must be run and fold-level metrics reported to demonstrate model stability.",
+        "suggestion": "Enable K-Fold cross-validation in the training step. Report mean and standard deviation of ROC-AUC, recall, and PR-AUC across folds in the validation report per SS1/23 Principle 3.3.",
+        "observed_value": null
+      },
+      {
+        "rule_id": "SS1_P3.3_NO_SENSITIVITY",
+        "source": "SS1/23",
+        "principle": "Principle 3.3",
+        "stage": "evaluation",
+        "severity": "high",
+        "flag": "No sensitivity analysis has been performed. SS1/23 Principle 3.3 requires backward-looking and forward-looking sensitivity testing \u2014 the effect of parameter perturbations on model outputs must be documented.",
+        "suggestion": "Run a sensitivity analysis varying key model parameters (\u00b110%, \u00b125%). Document how predictions change under adverse macro scenarios and include results in the model validation report.",
+        "observed_value": null
+      },
+      {
+        "rule_id": "NO_SHAP",
+        "source": "SS1/23",
+        "principle": "Principle 3.5 | 4.2",
+        "stage": "evaluation",
+        "severity": "high",
+        "flag": "Model explainability analysis (SHAP) was not performed. SS1/23 Principle 3.5 requires model inputs and their relative contributions to be documented and explainable to non-technical stakeholders and regulators. SS1/23 Principle 4.2 additionally requires that model outputs be explainable using model-agnostic interpretability techniques (e.g. SHAP, LIME) to support human oversight and credit decisions.",
+        "suggestion": "Run SHAP value analysis on Step 7 (Explainability). Produce a SHAP summary plot and document the top contributing features in the model card per SS1/23 Principles 3.5 and 4.2.",
+        "observed_value": false
+      }
+    ]
+  },
+  "all_flags": [
+    {
+      "rule_id": "R01",
+      "source": "SS1/23",
+      "principle": "3.2",
+      "stage": "data",
+      "severity": "high",
+      "flag": "High missing data (>20%) in: credit_limit, drawn_balance, ead_at_default, loan_term_years, default_date, ltv, recovery_rate",
+      "suggestion": "Investigate the root cause of missingness (MAR/MCAR/MNAR). Apply appropriate imputation or exclude columns exceeding the 20% threshold. Document the data quality assessment and remediation steps per SS1/23 Principle 3.2.",
+      "observed_value": [
+        "credit_limit",
+        "drawn_balance",
+        "ead_at_default",
+        "loan_term_years",
+        "default_date",
+        "ltv",
+        "recovery_rate"
+      ]
+    },
+    {
+      "rule_id": "NO_CV",
+      "source": "SS1/23",
+      "principle": "Principle 3.3",
+      "stage": "training",
+      "severity": "high",
+      "flag": "Cross-validation was not performed. SS1/23 Principle 3.3 requires backward-looking stability testing across multiple data samples \u2014 stratified K-Fold CV (k\u22655) must be run and fold-level metrics reported to demonstrate model stability.",
+      "suggestion": "Enable K-Fold cross-validation in the training step. Report mean and standard deviation of ROC-AUC, recall, and PR-AUC across folds in the validation report per SS1/23 Principle 3.3.",
+      "observed_value": null
+    },
+    {
+      "rule_id": "SS1_P3.3_NO_SENSITIVITY",
+      "source": "SS1/23",
+      "principle": "Principle 3.3",
+      "stage": "evaluation",
+      "severity": "high",
+      "flag": "No sensitivity analysis has been performed. SS1/23 Principle 3.3 requires backward-looking and forward-looking sensitivity testing \u2014 the effect of parameter perturbations on model outputs must be documented.",
+      "suggestion": "Run a sensitivity analysis varying key model parameters (\u00b110%, \u00b125%). Document how predictions change under adverse macro scenarios and include results in the model validation report.",
+      "observed_value": null
+    },
+    {
+      "rule_id": "NO_SHAP",
+      "source": "SS1/23",
+      "principle": "Principle 3.5 | 4.2",
+      "stage": "evaluation",
+      "severity": "high",
+      "flag": "Model explainability analysis (SHAP) was not performed. SS1/23 Principle 3.5 requires model inputs and their relative contributions to be documented and explainable to non-technical stakeholders and regulators. SS1/23 Principle 4.2 additionally requires that model outputs be explainable using model-agnostic interpretability techniques (e.g. SHAP, LIME) to support human oversight and credit decisions.",
+      "suggestion": "Run SHAP value analysis on Step 7 (Explainability). Produce a SHAP summary plot and document the top contributing features in the model card per SS1/23 Principles 3.5 and 4.2.",
+      "observed_value": false
+    }
+  ],
+  "model_tier": null
+}

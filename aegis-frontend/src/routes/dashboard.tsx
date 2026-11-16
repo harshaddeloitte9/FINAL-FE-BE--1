@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { isLegacyRecord, LEGACY_BADGE_TEXT, LEGACY_FALLBACK_REASON } from "@/lib/history-record";
 import { Activity, ArrowUpRight, Clock3, Layers, ShieldCheck, Sparkles, Target } from "lucide-react";
 import {
   Area,
@@ -54,6 +55,9 @@ type HistoryRun = {
   stage?: string;
   run_id?: string;
   summary?: unknown;
+  // Labelled by the backend; legacy rows are shown, never rewritten (H4).
+  record_status?: "current" | "legacy";
+  record_status_reason?: string | null;
 };
 
 function monthLabel(date: Date) {
@@ -294,6 +298,8 @@ function DashboardPage() {
       event: summarizeHistoryEvent(run.summary, run.stage),
       type: parseSummaryTone(run.summary),
       user: run.run_id ? `Run ${run.run_id.slice(0, 6)}` : "System",
+      legacy: isLegacyRecord(run),
+      legacyReason: run.record_status_reason ?? LEGACY_FALLBACK_REASON,
     }));
   }, [history]);
 
@@ -494,7 +500,18 @@ function DashboardPage() {
                     }`}
                   />
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs text-foreground">{item.event}</p>
+                    <p className="text-xs text-foreground">
+                      {item.event}
+                      {item.legacy ? (
+                        <span
+                          data-testid="legacy-badge"
+                          title={item.legacyReason}
+                          className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800"
+                        >
+                          {LEGACY_BADGE_TEXT}
+                        </span>
+                      ) : null}
+                    </p>
                     <p className="mt-1 text-[11px] text-muted-foreground">{item.user} · {item.time}</p>
                   </div>
                 </div>

@@ -1,11 +1,23 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { ArrowRight, FileCheck, FileText, Upload, CheckCircle2, PlayCircle, ShieldCheck, ClipboardCheck, AlertTriangle } from "lucide-react";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useModelIdentity } from "@/hooks/use-model-identity";
+import {
+  demoIntakeSnapshot,
+  identityExplanation,
+  identityLabel,
+  restoreDraftModelId,
+  sanitizeFrameworks,
+  selectedModelId,
+  withSelectedModel,
+} from "@/lib/model-identity";
 import { StageHero, HeroChip, VCard, KpiStrip, VEmptyState } from "@/components/validation-ui";
+import { formatMddMetricValue } from "@/lib/mdd-metrics";
+import { buildEvidenceStatus, buildRequiredArtifactState, buildSubmissionBlockedReason } from "@/lib/intake-warning";
 
 export const Route = createFileRoute("/validation/intake")({
   head: () => ({ meta: [{ title: "Model Intake — Aegis Credit" }] }),
@@ -57,22 +69,30 @@ type IntakeDisplay = {
   };
 };
 
+type IntakeSnapshotData = {
+  model_name?: string;
+  owning_team?: string;
+  model_owner?: string;
+  lead_validator?: string;
+  model_type?: string;
+  model_version?: string;
+  model_tier?: string;
+  model_purpose?: string;
+  mdd_text?: string | null;
+  mdd_document_path?: string | null;
+  frameworks?: string[];
+  is_demo_data?: boolean;
+  demo_mode?: string | null;
+  demo_created_at?: string | null;
+  validation_date?: string | null;
+};
+
 type IntakeResponse = {
   demo_mode?: string;
   demo_label?: string;
+  demo_created_at?: string | null;
   display: IntakeDisplay;
-  val_intake_data?: {
-    model_name?: string;
-    owning_team?: string;
-    model_owner?: string;
-    lead_validator?: string;
-    model_type?: string;
-    model_version?: string;
-    model_tier?: string;
-    model_purpose?: string;
-    mdd_text?: string;
-    frameworks?: string[];
-  };
+  val_intake_data?: IntakeSnapshotData;
   val_mdd_reported_metrics?: Record<string, any>;
   chk_inventory?: boolean;
   chk_tier?: boolean;
@@ -110,7 +130,10 @@ function RequiredBadge({ required }: { required: boolean }) {
   );
 }
 
-function ArtifactStatus({ uploaded, parsed }: { uploaded: boolean; parsed?: boolean }) {
+function ArtifactStatus({ uploaded, parsed, demoOnlyText }: { uploaded: boolean; parsed?: boolean; demoOnlyText?: string }) {
+  if (demoOnlyText) {
+    return <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">{demoOnlyText}</span>;
+  }
   if (parsed) {
     return <span className="whitespace-nowrap rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">Parsed</span>;
   }
@@ -138,13 +161,16 @@ function UploadAction({ label, accept, onFile }: { label: string; accept: string
   );
 }
 
-function ReadinessCheck({ label, ok }: { label: string; ok: boolean }) {
+function ReadinessCheck({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
   return (
-    <div className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 ${ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
-      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${ok ? "bg-emerald-500" : "bg-amber-400"}`}>
+    <div className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 ${ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${ok ? "bg-emerald-500" : "bg-amber-400"}`}>
         {ok ? <CheckCircle2 className="h-3 w-3 text-white" /> : <AlertTriangle className="h-3 w-3 text-white" />}
       </span>
-      <span className={`text-sm font-medium ${ok ? "text-emerald-800" : "text-amber-800"}`}>{label}</span>
+      <div className="min-w-0">
+        <span className={`block text-sm font-medium ${ok ? "text-emerald-800" : "text-amber-800"}`}>{label}</span>
+        {detail ? <span className={`mt-1 block text-xs ${ok ? "text-emerald-700" : "text-amber-700"}`}>{detail}</span> : null}
+      </div>
     </div>
   );
 }
@@ -218,6 +244,7 @@ function Intake() {
     setValidationMddMetrics,
     setValidationProfile,
     setValidationResults,
+    validationIntakeData,
   } = useDataset();
 
   // Form state mirroring the Streamlit intake
@@ -229,32 +256,77 @@ function Intake() {
   const [tier, setTier] = useState("Tier 2 — Medium Risk");
   const [version, setVersion] = useState("");
   const [purpose, setPurpose] = useState("");
-  const [frameworks, setFrameworks] = useState<string[]>(["IFRS9", "SS1/23", "RBI"]);
+  const [frameworks, setFrameworks] = useState<string[]>(["SS1/23", "RBI Model Risk Management"]);
+  // The registered development model (Model Inventory ID) this validation is
+  // about. Replication, Benchmarking and Findings all refer to this ID. The
+  // single source of truth is the shared validationIntakeData — written the
+  // moment the dropdown changes, so every stage sees the same selection.
+  const [registeredModels, setRegisteredModels] = useState<
+    Array<{ model_id: string; model_name: string; algorithm?: string; has_lineage: boolean }>
+  >([]);
+  const [inventoryLoaded, setInventoryLoaded] = useState(false);
+  useEffect(() => {
+    void api<{ development?: Array<Record<string, any>> }>("/model-inventory")
+      .then((inv) => {
+        setRegisteredModels(
+          (inv.development ?? [])
+            .filter((m) => m?.model_id)
+            .map((m) => ({
+              model_id: String(m.model_id),
+              model_name: String(m.model_name ?? ""),
+              algorithm: m.algorithm ? String(m.algorithm) : undefined,
+              has_lineage: Boolean(m.lineage_contract),
+            })),
+        );
+        setInventoryLoaded(true);
+      })
+      .catch(() => {
+        setRegisteredModels([]);
+        setInventoryLoaded(false);
+      });
+  }, []);
+  const inventoryIds = useMemo(() => registeredModels.map((m) => m.model_id), [registeredModels]);
+  const registeredModelId = selectedModelId(validationIntakeData) ?? "";
+  const setRegisteredModelId = (id: string) => {
+    setValidationIntakeData(withSelectedModel(validationIntakeData, id || null, inventoryIds));
+  };
+  // Once the inventory has loaded, keep the "registered in inventory" flag in
+  // step with the selected ID's real membership. The ID itself is never
+  // changed or replaced here.
+  useEffect(() => {
+    if (!inventoryLoaded || !registeredModelId) return;
+    const inInventory = inventoryIds.includes(registeredModelId);
+    if (Boolean(validationIntakeData?.model_inventory_registered) !== inInventory) {
+      setValidationIntakeData(withSelectedModel(validationIntakeData, registeredModelId, inventoryIds));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventoryLoaded, inventoryIds, registeredModelId]);
+  const [draftModelMessage, setDraftModelMessage] = useState<string | null>(null);
+  const modelIdentity = useModelIdentity(registeredModelId || null);
+  const identityBadge = identityLabel(modelIdentity);
   const [demoMode, setDemoMode] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoError, setDemoError] = useState<string | null>(null);
+  const [demoCreatedAt, setDemoCreatedAt] = useState<string | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [proceedError, setProceedError] = useState<string | null>(null);
 
-  // Resume where the reviewer left off: only pre-fills the (currently empty)
-  // model name field from the most recently saved intake run — it doesn't
-  // silently overwrite in-progress form data. The existing draft-lookup
-  // effect below then surfaces its own opt-in "restore this draft?" prompt
-  // once the name is filled in, same as if the reviewer had typed it.
-  const { data: resumedIntake } = useResumeState<{ model_name?: string }>("validation_pipeline_log.csv", "intake");
-  useEffect(() => {
-    if (!modelName.trim() && resumedIntake?.model_name) {
-      setModelName(resumedIntake.model_name);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedIntake]);
+  // H1 — the most recently saved intake can belong to ANY model (intake runs
+  // record no registered model or dataset), so it is never applied
+  // automatically. Its model name is only offered as an explicit opt-in
+  // action below the Model Name field, labelled as not linked to the
+  // selected model. Using it then triggers the existing opt-in draft prompt,
+  // exactly as if the reviewer had typed the name.
+  const { data: previousIntake } = useResumeState<{ model_name?: string }>("validation_pipeline_log.csv", "intake");
+  const previousIntakeName = typeof previousIntake?.model_name === "string" ? previousIntake.model_name.trim() : "";
 
   const toggleFramework = (fw: string) => {
-    setFrameworks((prev) =>
-      prev.includes(fw) ? prev.filter((f) => f !== fw) : [...prev, fw]
-    );
+    setFrameworks((prev) => {
+      const next = prev.includes(fw) ? prev.filter((f) => f !== fw) : [...prev, fw];
+      return sanitizeFrameworks(next);
+    });
   };
 
   // Artifacts state
@@ -310,7 +382,9 @@ function Intake() {
         setTier(s.tier ?? "Tier 2 — Medium Risk");
         setVersion(s.version ?? "");
         setPurpose(s.purpose ?? "");
-        setFrameworks(Array.isArray(s.frameworks) && s.frameworks.length > 0 ? s.frameworks : ["IFRS9", "SS1/23", "RBI"]);
+        setFrameworks(sanitizeFrameworks(Array.isArray(s.frameworks) && s.frameworks.length > 0 ? s.frameworks : ["SS1/23", "RBI Model Risk Management"]));
+        // registeredModelId from older saved snapshots is deliberately not
+        // restored here: the selection lives in shared state only.
         setDemoMode(s.demoMode ?? null);
         setMddFileName(s.mddFileName ?? null);
         setMddText(s.mddText ?? null);
@@ -366,34 +440,6 @@ function Intake() {
   const perfUploaded = Boolean(perfFileName);
   const hyperparamsUploaded = Boolean(hyperparamsFileName);
   const readyCount = [datasetUploaded, mddUploaded, trainingCodeUploaded, profileUploaded, assumptionsUploaded, perfUploaded, hyperparamsUploaded].filter(Boolean).length;
-
-  // Governance checklist items are intentionally NOT gated — they're an
-  // honest record of what's actually true at this point in the process
-  // (e.g. "no conflict of interest" may genuinely be unresolved yet), not a
-  // set of boxes to force-tick. Only the attestation checkbox below — the
-  // user's own confirmation that whatever state the checklist is actually
-  // in is honestly represented — gates moving to the next stage.
-  const handleProceed = () => {
-    if (!chkAttestation) {
-      setProceedError("Please confirm the information above is accurate before proceeding.");
-      return;
-    }
-    setProceedError(null);
-    setValidationIntakeData({
-      model_name: modelName,
-      owning_team: owningTeam,
-      model_owner: modelOwner,
-      lead_validator: leadValidator,
-      model_type: modelType,
-      model_tier: tier,
-      model_version: version,
-      model_purpose: purpose,
-      mdd_text: mddText ?? null,
-      mdd_document_path: mddDocumentPath ?? null,
-      frameworks,
-    });
-    navigate({ to: intake.nextStep.path });
-  };
 
   // Backend-persisted draft (keyed by model_name — no real user/session
   // system exists yet, so this is the closest thing to "this submission").
@@ -457,6 +503,10 @@ function Intake() {
     setChkIndependence(Boolean(draft.chkIndependence));
     setChkPlanApproved(Boolean(draft.chkPlanApproved));
     setChkAttestation(Boolean(draft.chkAttestation));
+    // Registered model: restored only if it is still in the inventory.
+    const restored = restoreDraftModelId(draft.registeredModelId, inventoryIds, inventoryLoaded);
+    setValidationIntakeData(withSelectedModel(validationIntakeData, restored.modelId, inventoryIds));
+    setDraftModelMessage(restored.message);
   };
 
   const loadAvailableDraft = () => {
@@ -481,6 +531,7 @@ function Intake() {
         owningTeam, modelOwner, leadValidator, modelType, tier, version, purpose,
         mddFileName, trainingCodeFileName, profileFileName, assumptionsFileName, perfFileName, hyperparamsFileName,
         chkInventory, chkTier, chkArtifacts, chkPrevFindings, chkRegScope, chkIndependence, chkPlanApproved, chkAttestation,
+        registeredModelId: registeredModelId || null,
       };
       const resp = await api<{ saved: boolean; saved_at: string }>("/validation/intake/draft", {
         method: "POST",
@@ -495,7 +546,8 @@ function Intake() {
   };
 
   const demoOptions = [
-    { key: "Demo A — Gold Standard", mode: "clean" },
+    { key: "Demo A — Original Demo", mode: "clean" },
+    { key: "Demo A — Taiwan Benchmark", mode: "taiwan" },
     { key: "Demo B — Flawed Submission", mode: "flawed" },
   ];
 
@@ -512,9 +564,16 @@ function Intake() {
     { key: "performance", label: "Performance Report", format: "PDF / DOCX / XLSX", required: false, uploaded: perfUploaded, parsed: false, detail: "Model accuracy and stability" },
     { key: "hyperparams", label: "Hyperparameters", format: "JSON", required: false, uploaded: hyperparamsUploaded, parsed: false, detail: "Training configuration details" },
   ] as const;
-  const reqTotal = artifactRows.filter((a) => a.required).length;
-  const reqUploaded = artifactRows.filter((a) => a.required && a.uploaded).length;
-
+  const isDemoOnly = Boolean(validationIntakeData?.is_demo_data === true);
+  const requiredArtifactStatus = buildRequiredArtifactState({
+    isDemo: isDemoOnly,
+    datasetUploaded,
+    mddUploaded: Boolean(mddText) && !parseError,
+    trainingCodeUploaded,
+  });
+  const reqTotal = requiredArtifactStatus.total;
+  const reqUploaded = requiredArtifactStatus.uploaded;
+  const missingRequiredArtifacts = requiredArtifactStatus.missingRequiredArtifacts;
   const attestationValues = [chkInventory, chkTier, chkArtifacts, chkPrevFindings, chkRegScope, chkIndependence, chkPlanApproved];
   const attestedCount = attestationValues.filter(Boolean).length;
   const allAttested = attestationValues.every(Boolean);
@@ -526,6 +585,50 @@ function Intake() {
   const metadataFields = [modelName, owningTeam, modelOwner, leadValidator, version, purpose];
   const metadataFilledCount = metadataFields.filter((v) => v.trim().length > 0).length;
   const metadataComplete = metadataFilledCount === metadataFields.length;
+
+  const requiredArtifactsReady = reqUploaded === reqTotal;
+  const metadataReady = metadataComplete;
+  const demoOnlyWarning = isDemoOnly && !trainingCodeUploaded
+    ? "Demo-only validation. Training code is not supplied; model replication and final approval are unavailable."
+    : null;
+  const submissionReady = Boolean(chkAttestation && allAttested && requiredArtifactsReady && metadataReady);
+
+  const submissionBlockedReason = buildSubmissionBlockedReason({
+    metadataReady,
+    missingRequiredArtifacts,
+    allAttested,
+    chkAttestation,
+  });
+
+  const handleProceed = () => {
+    if (!submissionReady) {
+      const reasons: string[] = [];
+      if (!metadataReady) reasons.push("complete the required model metadata");
+      if (!requiredArtifactsReady) reasons.push("upload all required artifacts");
+      if (!allAttested) reasons.push("complete all governance controls");
+      if (!chkAttestation) reasons.push("confirm the intake is accurate");
+      setProceedError(`Stage 2 remains blocked until you ${reasons.join(", ")}.`);
+      return;
+    }
+    setProceedError(null);
+    setValidationIntakeData({
+      model_name: modelName,
+      owning_team: owningTeam,
+      model_owner: modelOwner,
+      lead_validator: leadValidator,
+      model_type: modelType,
+      model_tier: tier,
+      model_version: version,
+      model_purpose: purpose,
+      mdd_text: mddText ?? null,
+      mdd_document_path: mddDocumentPath ?? null,
+      frameworks: sanitizeFrameworks(frameworks),
+      ...withSelectedModel(null, registeredModelId || null, inventoryIds),
+      // Keep the demo markers the demo snapshot set (demo data is never registered).
+      ...(validationIntakeData?.is_demo_data ? { is_demo_data: true, demo_mode: validationIntakeData.demo_mode ?? null } : {}),
+    });
+    navigate({ to: intake.nextStep.path });
+  };
 
   const loadDemo = async (mode: string) => {
     setDemoError(null);
@@ -539,21 +642,31 @@ function Intake() {
       setIntakeLoaded(true);
       const snapshot = response.val_intake_data;
       if (snapshot) {
-        const selectedFrameworks = Array.isArray(snapshot.frameworks) && snapshot.frameworks.length > 0
+        const selectedFrameworks = sanitizeFrameworks(Array.isArray(snapshot.frameworks) && snapshot.frameworks.length > 0
           ? snapshot.frameworks
-          : frameworks;
-        const intakeSnapshot = {
+          : ["SS1/23", "RBI Model Risk Management"]);
+        // Demo data is never a registered model: any earlier selection is
+        // cleared on purpose (demoIntakeSnapshot).
+        const intakeSnapshot = demoIntakeSnapshot({
           ...snapshot,
           mdd_text: snapshot.mdd_text ?? null,
           mdd_document_path: snapshot.mdd_document_path ?? null,
           frameworks: selectedFrameworks,
-        };
+        });
         setValidationIntakeData(intakeSnapshot);
+        setDraftModelMessage(null);
         setFrameworks(selectedFrameworks);
         setModelName(snapshot.model_name ?? "");
-        setOwningTeam(snapshot.owning_team ?? "");
-        setModelOwner(snapshot.model_owner ?? "");
-        setLeadValidator(snapshot.lead_validator ?? "");
+        setOwningTeam(intakeSnapshot.owning_team ?? "Demo profile");
+        setModelOwner(intakeSnapshot.model_owner ?? "Not assigned — demo");
+        setLeadValidator(intakeSnapshot.lead_validator ?? "Not assigned — demo");
+        setDemoCreatedAt(
+          typeof intakeSnapshot.demo_created_at === "string" && intakeSnapshot.demo_created_at.trim()
+            ? intakeSnapshot.demo_created_at
+            : typeof snapshot.demo_created_at === "string" && snapshot.demo_created_at.trim()
+              ? snapshot.demo_created_at
+              : null,
+        );
         setModelType(snapshot.model_type ?? "PD (Probability of Default)");
         setTier(snapshot.model_tier ?? "Tier 2 — Medium Risk");
         setVersion(snapshot.model_version ?? "");
@@ -602,7 +715,7 @@ function Intake() {
         chips={
           <>
             <HeroChip tone={readyCount >= 3 ? "success" : "neutral"}>{readyCount}/7 artifacts uploaded</HeroChip>
-            <HeroChip tone={chkAttestation ? "success" : "neutral"}>{chkAttestation ? "Attested" : "Attestation pending"}</HeroChip>
+            <HeroChip tone={allAttested && chkAttestation ? "success" : "neutral"}>{allAttested && chkAttestation ? "Attested" : "Governance pending"}</HeroChip>
           </>
         }
       />
@@ -624,8 +737,8 @@ function Intake() {
             sub: `${metadataFilledCount} of ${metadataFields.length} fields completed`, tone: metadataComplete ? "emerald" : "amber",
           },
           {
-            icon: ArrowRight, label: "Submission Readiness", value: chkAttestation ? "Ready" : "Not Ready",
-            sub: chkAttestation ? "All conditions satisfied" : "Complete attestation to proceed", tone: chkAttestation ? "emerald" : "slate",
+            icon: ArrowRight, label: "Submission Readiness", value: submissionReady ? "Ready" : "Not Ready",
+            sub: submissionReady ? "All required conditions satisfied" : "Complete the required governance and evidence checks", tone: submissionReady ? "emerald" : "slate",
           },
         ]}
       />
@@ -656,6 +769,9 @@ function Intake() {
             {demoError ? <span className="text-xs text-amber-600">{demoError}</span> : null}
           </div>
         </div>
+        {demoCreatedAt ? (
+          <div className="mt-3 text-[11px] text-slate-500">Demo creation timestamp: {new Date(demoCreatedAt).toLocaleString()}</div>
+        ) : null}
       </VCard>
 
       {/* Model profile + Risk tier / Target definition */}
@@ -664,12 +780,22 @@ function Intake() {
           icon={FileText}
           title="Model Profile"
           sub={intake.modelMetadata.description}
-          badge={{ text: intake.modelMetadata.registeredLabel, tone: intake.modelMetadata.registeredLabel === "Registered" ? "primary" : "slate" }}
+          badge={registeredModelId ? identityBadge : { text: demoMode ? "Demo data — not registered" : "No registered model selected", tone: "slate" }}
           className="xl:col-span-3"
         >
           <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
             <Field label="Model Name">
               <input value={modelName} onChange={(e) => setModelName(e.target.value)} className="w-full bg-transparent font-mono text-sm font-semibold text-slate-900 outline-none" />
+              {!modelName.trim() && previousIntakeName ? (
+                <button
+                  type="button"
+                  data-testid="previous-intake-offer"
+                  onClick={() => setModelName(previousIntakeName)}
+                  className="mt-1 block text-left text-[11px] text-blue-700 underline underline-offset-2"
+                >
+                  Use the name from the most recently saved intake: “{previousIntakeName}” (saved for any model; not linked to the selected model)
+                </button>
+              ) : null}
             </Field>
             <Field label="Model Version">
               <input value={version} onChange={(e) => setVersion(e.target.value)} className="w-full bg-transparent font-mono text-sm font-semibold text-slate-900 outline-none" />
@@ -690,6 +816,47 @@ function Intake() {
                 <option>EAD (Exposure at Default)</option>
                 <option>Scorecard / Rating</option>
               </select>
+            </Field>
+            <Field label="Registered Model (Model Inventory)" className="sm:col-span-2">
+              <select
+                value={registeredModelId}
+                onChange={(e) => setRegisteredModelId(e.target.value)}
+                className="w-full cursor-pointer bg-transparent text-sm font-semibold text-slate-800 outline-none"
+              >
+                <option value="">Not linked to a registered model</option>
+                {registeredModelId && !inventoryIds.includes(registeredModelId) ? (
+                  <option value={registeredModelId}>{registeredModelId} — not in the loaded Model Inventory</option>
+                ) : null}
+                {registeredModels.map((m) => (
+                  <option key={m.model_id} value={m.model_id}>
+                    {m.model_id} — {m.model_name}
+                    {m.algorithm ? ` (${m.algorithm})` : ""}
+                    {m.has_lineage ? "" : " · no training lineage recorded"}
+                  </option>
+                ))}
+              </select>
+              <div
+                className={`mt-1 text-[11px] ${
+                  modelIdentity.kind === "ready" ? "text-blue-700"
+                  : modelIdentity.kind === "incomplete" ? "text-amber-700"
+                  : modelIdentity.kind === "invalid" ? "text-rose-700"
+                  : "text-slate-500"
+                }`}
+              >
+                <span className="font-semibold">{identityLabel(modelIdentity).text}.</span> {identityExplanation(modelIdentity)}
+                {modelIdentity.kind === "ready" || modelIdentity.kind === "incomplete" ? (
+                  <span className="block text-slate-500">
+                    Lineage contract: {modelIdentity.readiness.contract ? `v${modelIdentity.readiness.contract.contract_version}, training run ${modelIdentity.readiness.contract.training_run_id ?? "—"}` : "not recorded"}
+                    {" · "}Scoring bundle: {modelIdentity.readiness.scoring_bundle.available ? "available (SHA-256 verified)" : modelIdentity.readiness.scoring_bundle.integrity.replace(/_/g, " ")}
+                  </span>
+                ) : null}
+              </div>
+              {draftModelMessage ? <div className="mt-1 text-[11px] text-amber-700">{draftModelMessage}</div> : null}
+              {intakeLoaded && demoMode ? (
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {demoMode} is demonstration data and is not a model in the Model Inventory.
+                </div>
+              ) : null}
             </Field>
             <Field label="Risk Tier" className="sm:col-span-2">
               <select value={tier} onChange={(e) => setTier(e.target.value)} className="w-full cursor-pointer bg-transparent text-sm font-semibold text-blue-700 outline-none">
@@ -860,13 +1027,19 @@ function Intake() {
                   <div className="text-xs text-slate-400">{trainingCodeFileName ?? "Required for replication and review"}</div>
                 </td>
                 <td className="whitespace-nowrap px-4 py-3.5 font-mono text-xs text-slate-400">ZIP / PY / IPYNB</td>
-                <td className="px-4 py-3.5"><ArtifactStatus uploaded={trainingCodeUploaded} /></td>
+                <td className="px-4 py-3.5">
+                  <ArtifactStatus uploaded={trainingCodeUploaded} demoOnlyText={isDemoOnly ? "Not supplied — demo" : undefined} />
+                </td>
                 <td className="px-6 py-3.5 text-right">
-                  <UploadAction
-                    label={trainingCodeUploaded ? "Replace" : "Attach"}
-                    accept=".zip,.py,.ipynb"
-                    onFile={(f) => setTrainingCodeFileName(f.name)}
-                  />
+                  {isDemoOnly ? (
+                    <span className="text-xs text-amber-700">Demo-only validation</span>
+                  ) : (
+                    <UploadAction
+                      label={trainingCodeUploaded ? "Replace" : "Attach"}
+                      accept=".zip,.py,.ipynb"
+                      onFile={(f) => setTrainingCodeFileName(f.name)}
+                    />
+                  )}
                 </td>
               </tr>
 
@@ -956,7 +1129,7 @@ function Intake() {
             {Object.entries(mddMetrics).map(([label, value]) => (
               <div key={label} className="rounded-xl border border-slate-100 bg-slate-50/60 px-4 py-3">
                 <div className="text-[10px] uppercase tracking-wider text-slate-400">{label.replace(/_/g, " ")}</div>
-                <div className="mt-1 font-mono text-xl font-bold text-slate-900">{value ?? "—"}</div>
+                <div className="mt-1 font-mono text-xl font-bold text-slate-900">{formatMddMetricValue(value)}</div>
               </div>
             ))}
           </div>
@@ -978,15 +1151,14 @@ function Intake() {
             <div className="mb-3 text-sm font-semibold text-slate-700">Applicable Regulatory Frameworks</div>
             <div className="space-y-3">
               {[
-                { key: "IFRS9", label: "IFRS 9", sub: "Financial Instruments" },
                 { key: "SS1/23", label: "SS1/23", sub: "PRA Model Risk Management" },
-                { key: "RBI", label: "RBI Model Risk Management", sub: "Reserve Bank of India guidance" },
+                { key: "RBI Model Risk Management", label: "RBI Model Risk Management", sub: "Reserve Bank of India guidance" },
               ].map((fw) => (
                 <label key={fw.key} className="flex cursor-pointer items-start gap-3">
                   <input
                     type="checkbox"
                     className="mt-0.5 h-4 w-4 accent-blue-600"
-                    checked={frameworks.includes(fw.key)}
+                    checked={frameworks.includes(fw.key) || frameworks.includes(fw.key === "RBI Model Risk Management" ? "RBI" : fw.key)}
                     onChange={() => toggleFramework(fw.key)}
                   />
                   <div>
@@ -1027,11 +1199,21 @@ function Intake() {
       <VCard icon={ClipboardCheck} title="Attestation &amp; Submission" sub={intake.nextStep.description}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <ReadinessCheck label="Required information complete" ok={metadataComplete} />
-          <ReadinessCheck label="Required evidence uploaded" ok={reqUploaded === reqTotal} />
+          <ReadinessCheck
+            label={requiredArtifactStatus.label}
+            ok={requiredArtifactStatus.ok}
+            detail={requiredArtifactStatus.detail}
+          />
           <ReadinessCheck label="Governance controls reviewed" ok={allAttested} />
         </div>
 
         <div className="my-5 border-t border-slate-100" />
+
+        {demoOnlyWarning ? (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+            {demoOnlyWarning}
+          </div>
+        ) : null}
 
         <label className="mb-5 flex cursor-pointer items-center gap-3">
           <input type="checkbox" className="h-4 w-4 accent-blue-600" checked={chkAttestation} onChange={(e) => setChkAttestation(e.target.checked)} />
@@ -1040,6 +1222,9 @@ function Intake() {
 
         {submitError ? <div className="mb-4 text-sm text-red-600">{submitError}</div> : null}
         {proceedError ? <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{proceedError}</div> : null}
+        {!submissionReady && submissionBlockedReason ? (
+          <div className="mb-4 text-sm text-amber-700">{submissionBlockedReason}</div>
+        ) : null}
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
@@ -1069,7 +1254,8 @@ function Intake() {
             <button
               type="button"
               onClick={handleProceed}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#2f67ff] px-6 py-2.5 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6]"
+              disabled={!submissionReady}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#2f67ff] px-6 py-2.5 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
             >
               <span>{intake.nextStep.label}</span>
               <ArrowRight className="h-4 w-4" />

@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app-shell";
 import { useDataset } from "@/lib/app-context";
 import { formUpload } from "@/lib/api";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import PlotlyChart from "@/components/plotly-chart";
 import AnimatedNumber from "@/components/animated-number";
 import {
@@ -22,7 +22,13 @@ import {
   rowsToCsv,
 } from "@/lib/full-report";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
 import { cn } from "@/lib/utils";
+import { trainedModelIdentity } from "@/lib/model-identity";
+import { devResumeParams, resumedPayloadMatches } from "@/lib/dev-resume-scope";
+import { appendSplitConfig, resolveSplitConfig } from "@/lib/split-config";
+import { EvidenceIdentity } from "@/components/evidence-identity";
+import { MODE_REGISTERED } from "@/lib/evaluation-evidence";
 
 type FeatureImportanceRow = {
   Feature: string;
@@ -37,6 +43,10 @@ type SampleShapRow = {
 
 type ShapInfo = {
   shap_available: boolean;
+  shap_unavailable_reason?: string | null;
+  sample_row_index?: unknown;
+  sample_predicted_pd?: number;
+  explained_rows?: number;
   shap_mean_abs?: Array<{ Feature: string; MeanAbsSHAP: number }>;
   sample_idx?: number;
   sample_reasoning?: string;
@@ -44,10 +54,30 @@ type ShapInfo = {
   sample_features?: Record<string, unknown>;
 };
 
+// Which model, rows and threshold an explanation describes (E6), as
+// recorded by the backend.
+type ExplainScope = {
+  registered_model_id: string;
+  training_run_id: string | null;
+  bundle_sha256: string | null;
+  rows: "registered_test_partition" | "supplied_dataset";
+  row_count: number;
+  row_index_sha256: string;
+  predictions_sha256: string;
+  dataset_sha256: string;
+  dataset_file_sha256: string | null;
+  operating_threshold: number;
+  threshold_status: string;
+  threshold_source: string;
+  feature_importance_unavailable_reason?: string | null;
+  shap_unavailable_reason?: string | null;
+};
+
 type ExplainabilityResponse = {
   feature_importance: FeatureImportanceRow[];
   shap: ShapInfo;
   summary?: string | null;
+  explain_scope?: ExplainScope;
 };
 
 export const Route = createFileRoute("/explainability")({
@@ -392,9 +422,16 @@ function Explainability() {
   const navigate = useNavigate();
   const { profile, file, trainingResult, preprocessingResult, featureEngineeringResult } = useDataset();
 
+  // Kept only for the "download trained model" button — it is never sent back
+  // to the server. The server explains the registered model by its exact ID,
+  // loading its own verified scoring bundle (uploaded pickles are rejected).
   const modelArtifact = trainingResult?.model_artifact ?? null;
   const trainingConfig = trainingResult?.training_config ?? {};
-  const hasEngine = Boolean(modelArtifact && file);
+  const trainedModel = trainedModelIdentity(trainingResult as Record<string, any> | null);
+  const registeredModelId = trainedModel.modelId;
+  // Explicitly not recorded at training → registered bundle cannot exist.
+  const lineageKnownMissing = Boolean(trainingResult?.lineage && trainedModel.lineageCaptured === false);
+  const hasEngine = Boolean(registeredModelId && file && !lineageKnownMissing);
 
   // Declared early (used by useMemo hooks below, which must not reference
   // consts declared later in the same function — that's a temporal-dead-zone
@@ -420,15 +457,39 @@ function Explainability() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Resume where the reviewer left off: if this session has no explainability
-  // result yet, pull the last saved /models/explain run from the backend.
-  const { data: resumedExplain } = useResumeState<ExplainabilityResponse>("dev_pipeline_log.csv", "explainability");
+  // Resume where the reviewer left off — only an explanation of exactly this
+  // registered model, its current training run and this dataset file (E7).
+  // Until all three are known nothing is restored.
+  const explainFileSha = useDatasetFileSha(file);
+  const explainScope = {
+    fileSha: explainFileSha,
+    registeredModelId,
+    trainingRunId: (trainingResult as Record<string, any> | null)?.training_run_id ?? trainingResult?.lineage?.training_run_id ?? null,
+    requireModel: true,
+  };
+  const explainResumeParams = devResumeParams(explainScope);
+  const { data: resumedExplain } = useResumeState<ExplainabilityResponse>("dev_pipeline_log.csv", "explainability", {
+    params: explainResumeParams ?? undefined,
+    enabled: explainResumeParams !== null,
+  });
   useEffect(() => {
-    if (!data && resumedExplain) {
+    if (!data && resumedExplain && resumedPayloadMatches(resumedExplain, explainScope)) {
       setData(resumedExplain);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedExplain]);
+  }, [resumedExplain, explainFileSha, registeredModelId]);
+  // A different model, training run or dataset invalidates what is on
+  // screen. Only a change between two fully known identities counts (the
+  // file hash arriving after mount is not a change of dataset).
+  const explainIdentity = explainFileSha && registeredModelId
+    ? `${registeredModelId}|${explainScope.trainingRunId ?? ""}|${explainFileSha}`
+    : null;
+  const shownIdentity = useRef<string | null>(null);
+  useEffect(() => {
+    if (!explainIdentity) return;
+    if (shownIdentity.current && shownIdentity.current !== explainIdentity) setData(null);
+    shownIdentity.current = explainIdentity;
+  }, [explainIdentity]);
 
   const [topN, setTopN] = useState(15);
   const [shapSamples, setShapSamples] = useState(150);
@@ -446,17 +507,12 @@ function Explainability() {
 
   const explainParams = () => {
     const form = new FormData();
-    // Sent as a file part (not a plain text field): the base64-encoded
-    // pipeline can be several MB, and multipart parsers cap plain form
-    // fields much lower than file parts, which was causing 400s here.
-    const modelArtifactBlob = new Blob([modelArtifact!], { type: "text/plain" });
-    form.append("model_artifact", modelArtifactBlob, "model_artifact.b64");
+    // The exact registered model ID; the server resolves and verifies the bundle.
+    form.append("registered_model_id", registeredModelId!);
     form.append("file", file!);
     form.append("target_col", targetColumn);
-    form.append("use_feature_engineering", String(Boolean(trainingConfig.use_feature_engineering)));
-    form.append("test_size", String(trainingConfig.test_size ?? 0.15));
-    form.append("val_size", String(trainingConfig.val_size ?? 0.15));
-    form.append("random_seed", String(trainingConfig.random_seed ?? 42));
+    // Rows, split and feature engineering come from the registered model's
+    // recorded lineage on the server, never from browser settings (E6).
     form.append("task_type", trainingResult?.task_type ?? "binary");
     if (trainingResult?.evaluation_metrics) {
       form.append("metrics", JSON.stringify(trainingResult.evaluation_metrics));
@@ -488,7 +544,7 @@ function Explainability() {
     setShapComputed(false);
     setSampleIdx(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasEngine, modelArtifact, file]);
+  }, [hasEngine, registeredModelId, file]);
 
   const computeShap = async () => {
     if (!hasEngine) return;
@@ -504,7 +560,7 @@ function Explainability() {
       if (response.shap.shap_available) {
         setShapComputed(true);
       } else {
-        setShapError("SHAP computation failed or not supported for this model. Try the Feature Importance tab.");
+        setShapError(`SHAP is unavailable: ${response.shap.shap_unavailable_reason ?? "no reason was returned"}`);
       }
     } catch (err) {
       setShapError(err instanceof Error ? err.message : "Failed to compute SHAP values");
@@ -733,8 +789,16 @@ function Explainability() {
           <div className="flex items-center gap-3">
             <AlertCircle className="h-5 w-5 text-amber-600" />
             <div>
-              <div className="font-semibold text-amber-900">No trained model</div>
-              <div className="text-sm text-amber-800">Complete model training first, then return here to explain the model.</div>
+              <div className="font-semibold text-amber-900">
+                {lineageKnownMissing ? "Model lineage not recorded" : registeredModelId ? "No dataset loaded" : "No registered model"}
+              </div>
+              <div className="text-sm text-amber-800">
+                {lineageKnownMissing
+                  ? `Model ${registeredModelId ?? ""} was trained but its scoring bundle was not recorded (${trainedModel.reason ?? "lineage capture failed"}), so it cannot be loaded for explanation. Retrain the model to record its lineage.`
+                  : registeredModelId
+                  ? "Load the dataset used for training, then return here."
+                  : "Explainability uses the registered model's verified scoring bundle. Complete model training (which registers the model) first, then return here."}
+              </div>
             </div>
           </div>
         </div>
@@ -796,6 +860,8 @@ function Explainability() {
       const form = new FormData();
       form.append("file", file);
       form.append("target_col", targetColumn);
+      // The split this model was actually trained with (E12).
+      appendSplitConfig(form, resolveSplitConfig(trainingConfig, preprocessingResult?.split_config));
       const res = await formUpload<any>("/data/feature-decision-log", form);
       if (res?.content_base64) {
         downloadBlob(base64ToBlob(res.content_base64, "text/csv"), res.file_name || "feature_decision_log.csv");
@@ -930,6 +996,32 @@ function Explainability() {
 
       {error && (
         <StatusBanner tone="error" icon={AlertCircle}>{error}</StatusBanner>
+      )}
+
+      {data?.explain_scope && (
+        <div data-testid="explain-scope">
+          <EvidenceIdentity
+            title="Explanation identity"
+            evidence={{
+              evaluation_mode: MODE_REGISTERED,
+              registered_model_id: data.explain_scope.registered_model_id,
+              training_run_id: data.explain_scope.training_run_id,
+              bundle_sha256: data.explain_scope.bundle_sha256,
+              dataset_sha256: data.explain_scope.dataset_sha256,
+              test_index_sha256: data.explain_scope.row_index_sha256,
+              test_rows: data.explain_scope.row_count,
+            }}
+          />
+          <p className="mt-1 text-[11px] text-slate-500">
+            Rows: {data.explain_scope.rows === "registered_test_partition" ? "the registered model's recorded test rows" : "the supplied dataset (not the training dataset)"}
+            {" · "}Threshold {data.explain_scope.operating_threshold.toFixed(4)} ({data.explain_scope.threshold_source})
+          </p>
+          {data.explain_scope.feature_importance_unavailable_reason && (
+            <p className="mt-1 text-[11px] text-amber-700" data-testid="importance-unavailable">
+              Feature importance unavailable: {data.explain_scope.feature_importance_unavailable_reason}
+            </p>
+          )}
+        </div>
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">

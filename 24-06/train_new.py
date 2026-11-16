@@ -75,6 +75,15 @@ from preprocessing_new import (
 )
 
 
+SPLIT_STRATEGY_STRATIFIED = "stratified_random"
+SPLIT_STRATEGY_TEMPORAL = "temporal"
+SPLIT_STRATEGIES = (SPLIT_STRATEGY_STRATIFIED, SPLIT_STRATEGY_TEMPORAL)
+
+
+def _class_counts(y: pd.Series) -> Dict[str, int]:
+    return {str(k): int(v) for k, v in pd.Series(y).value_counts().sort_index().items()} if pd.Series(y).nunique() <= 10 else {}
+
+
 def split_data(
     X: pd.DataFrame,
     y: pd.Series,
@@ -82,7 +91,15 @@ def split_data(
     val_size: float = 0.15,
     task_type: str = "binary",
     random_state: int = 42,
+    report: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    """Random train/val/test split, stratified on the target when possible.
+
+    If stratification fails (e.g. a class too small for a partition) the
+    split falls back to unstratified — that fallback is never silent: when a
+    `report` dict is passed it records the strategy actually achieved, each
+    fallback with its reason, and the resulting class counts per partition,
+    and marks the split `degraded`."""
     y_series = pd.Series(y)
     should_stratify = (
         task_type in ("binary", "multiclass")
@@ -90,27 +107,109 @@ def split_data(
         and len(y_series) >= 2 * y_series.nunique()
     )
     stratify = y_series if should_stratify else None
+    fallbacks: List[Dict[str, str]] = []
 
-    def _safe_split(arr_x, arr_y, split_size: float, split_stratify):
+    def _safe_split(arr_x, arr_y, split_size: float, split_stratify, stage: str):
         if split_size <= 0 or split_size >= 1:
             split_size = min(max(split_size, 0.05), 0.95)
         try:
             return train_test_split(
                 arr_x, arr_y, test_size=split_size, stratify=split_stratify, random_state=random_state
             )
-        except ValueError:
+        except ValueError as exc:
+            if split_stratify is not None:
+                fallbacks.append({"partition": stage, "reason": f"Stratified split failed ({exc}); split without stratification."})
             return train_test_split(
                 arr_x, arr_y, test_size=split_size, stratify=None, random_state=random_state
             )
 
-    X_train_val, X_test, y_train_val, y_test = _safe_split(X, y_series, test_size, stratify)
+    X_train_val, X_test, y_train_val, y_test = _safe_split(X, y_series, test_size, stratify, "test")
     adjusted_val = val_size / (1 - test_size)
     stratify_val = y_train_val if should_stratify and len(y_train_val.unique()) > 1 else None
+    if should_stratify and stratify_val is None:
+        fallbacks.append({"partition": "validation", "reason": "Only one class left after the test split; validation split not stratified."})
 
     X_train, X_val, y_train, y_val = _safe_split(
-        X_train_val, y_train_val, adjusted_val, stratify_val
+        X_train_val, y_train_val, adjusted_val, stratify_val, "validation"
     )
+    if report is not None:
+        report.update({
+            "strategy": SPLIT_STRATEGY_STRATIFIED,
+            "stratification_requested": bool(should_stratify),
+            "achieved": ("stratified" if should_stratify and not fallbacks
+                         else "random_fallback" if fallbacks else "random_not_stratifiable"),
+            "degraded": bool(fallbacks),
+            "fallbacks": fallbacks,
+            "random_seed": random_state, "test_size": test_size, "val_size": val_size,
+            "class_counts": {"train": _class_counts(y_train), "validation": _class_counts(y_val), "test": _class_counts(y_test)},
+        })
     return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def temporal_split(
+    X: pd.DataFrame,
+    y: pd.Series,
+    dates: pd.Series,
+    test_size: float = 0.15,
+    val_size: float = 0.15,
+    report: Optional[Dict[str, Any]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    """Chronological split: oldest rows train, then validation, then test
+    (most recent). No future row can reach the training partition. Requires a
+    parseable date for every row; the boundaries are recorded in `report`."""
+    when = pd.to_datetime(pd.Series(dates).reindex(X.index), errors="coerce")
+    if when.isna().any():
+        raise ValueError(f"Temporal split needs a valid date for every row; {int(when.isna().sum())} row(s) have none.")
+    order = when.sort_values(kind="mergesort").index
+    n = len(order)
+    n_test = max(1, int(round(n * test_size)))
+    n_val = max(1, int(round(n * val_size)))
+    if n - n_test - n_val < 1:
+        raise ValueError("Too few rows for a temporal train/validation/test split.")
+    parts = {"train": order[: n - n_test - n_val], "validation": order[n - n_test - n_val: n - n_test], "test": order[n - n_test:]}
+    X_train, X_val, X_test = (X.loc[parts[k]] for k in ("train", "validation", "test"))
+    y_s = pd.Series(y)
+    y_train, y_val, y_test = (y_s.loc[parts[k]] for k in ("train", "validation", "test"))
+    if report is not None:
+        bounds = {k: [str(when.loc[v].min().date()), str(when.loc[v].max().date())] for k, v in parts.items()}
+        ties = int(when.loc[parts["train"]].max() == when.loc[parts["validation"]].min()) + \
+            int(when.loc[parts["validation"]].max() == when.loc[parts["test"]].min())
+        issues = [{"partition": k, "reason": f"The {k} period contains a single target class."}
+                  for k, part_y in (("train", y_train), ("validation", y_val), ("test", y_test)) if part_y.nunique() < 2]
+        report.update({
+            "strategy": SPLIT_STRATEGY_TEMPORAL, "stratification_requested": False, "achieved": "temporal",
+            "degraded": bool(issues), "fallbacks": issues, "test_size": test_size, "val_size": val_size, "random_seed": None,
+            "boundaries": bounds,
+            "boundary_date_ties": ties,
+            "class_counts": {"train": _class_counts(y_train), "validation": _class_counts(y_val), "test": _class_counts(y_test)},
+        })
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def make_split(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    strategy: str = SPLIT_STRATEGY_STRATIFIED,
+    test_size: float = 0.15,
+    val_size: float = 0.15,
+    random_state: int = 42,
+    task_type: str = "binary",
+    dates: Optional[pd.Series] = None,
+    date_col: Optional[str] = None,
+) -> Tuple[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series], Dict[str, Any]]:
+    """The one place a split strategy is applied; returns (splits, report)."""
+    report: Dict[str, Any] = {}
+    if strategy == SPLIT_STRATEGY_TEMPORAL:
+        if dates is None:
+            raise ValueError("Temporal split requested without a date column.")
+        splits = temporal_split(X, y, dates, test_size=test_size, val_size=val_size, report=report)
+        report["date_col"] = date_col
+    elif strategy == SPLIT_STRATEGY_STRATIFIED:
+        splits = split_data(X, y, test_size=test_size, val_size=val_size, task_type=task_type, random_state=random_state, report=report)
+    else:
+        raise ValueError(f"Unknown split strategy '{strategy}'. Use one of {SPLIT_STRATEGIES}.")
+    return splits, report
 
 
 def compute_split_stats(X_train, X_val, X_test, y_train, y_val, y_test) -> Dict[str, Any]:

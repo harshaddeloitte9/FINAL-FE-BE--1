@@ -61,6 +61,34 @@ def test_replication_model_resolution_keeps_business_identity_and_estimator_sepa
     assert estimator_name == "XGBoost"
 
 
+def test_replication_model_resolution_maps_demo_aliases_to_real_estimators():
+    clean_business_name, clean_estimator = backend.resolve_replication_model_inputs(
+        model_name="Demo A — demonstration dataset",
+        algorithm="Demo workflow (illustrative)",
+    )
+    flawed_business_name, flawed_estimator = backend.resolve_replication_model_inputs(
+        model_name="Demo B — demonstration dataset",
+        algorithm="Demo workflow (illustrative)",
+    )
+    taiwan_business_name, taiwan_estimator = backend.resolve_replication_model_inputs(
+        model_name="Demo A — Taiwan benchmark",
+        algorithm="LightGBM workflow (illustrative)",
+    )
+    stale_demo_a_business_name, stale_demo_a_estimator = backend.resolve_replication_model_inputs(
+        model_name="Demo A — demonstration dataset",
+        algorithm="XGBoost",
+    )
+
+    assert clean_business_name == "Demo A — demonstration dataset"
+    assert clean_estimator == "LightGBM"
+    assert flawed_business_name == "Demo B — demonstration dataset"
+    assert flawed_estimator == "XGBoost"
+    assert taiwan_business_name == "Demo A — Taiwan benchmark"
+    assert taiwan_estimator == "LightGBM"
+    assert stale_demo_a_business_name == "Demo A — demonstration dataset"
+    assert stale_demo_a_estimator == "LightGBM"
+
+
 def test_register_validation_run_creates_validation_record_with_val_id_and_tracks_history():
     store = {"development": [], "models": [], "data_sources": [], "validation": [], "history": []}
 
@@ -246,7 +274,9 @@ def test_development_and_validation_register_separately_with_related_reference()
     development_entry = store["development"][0]
     validation_entry = store["validation"][0]
     assert development_entry["model_id"] == development_result["model_id"]
-    assert validation_entry["related_model_id"] == development_result["model_id"]
+    # No registered model ID was supplied, so the validation record is not
+    # linked to the same-named development model (no name-based linking).
+    assert validation_entry["related_model_id"] is None
     assert development_entry["status"] == "In Development"
     assert validation_entry["status"] == "Under Validation"
     assert development_entry["documentation_path"].endswith(".pdf")

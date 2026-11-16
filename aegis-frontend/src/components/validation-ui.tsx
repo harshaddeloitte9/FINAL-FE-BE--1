@@ -302,4 +302,32 @@ export function DefRow({ label, value, mono, highlight }: { label: string; value
   );
 }
 
+// Explains why newer saved runs were NOT restored on this page (legacy
+// format, another model/dataset, model retrained since, …). Renders nothing
+// when no run was passed over.
+export function ResumeExclusionNote({ counts, what = "saved run" }: { counts: Record<string, number>; what?: string }) {
+  const entries = Object.entries(counts ?? {});
+  if (!entries.length) return null;
+  const total = entries.reduce((n, [, c]) => n + c, 0);
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+      <div>
+        <div className="font-semibold text-slate-700">
+          {total} more recent {what}
+          {total === 1 ? " was" : "s were"} not restored because they are not valid evidence for the current model:
+        </div>
+        <ul className="mt-1 list-disc pl-4">
+          {entries.map(([reason, count]) => (
+            <li key={reason}>
+              {reason}
+              {count > 1 ? ` (${count})` : ""}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 export { Circle as PendingDot };

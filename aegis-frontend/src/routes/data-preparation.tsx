@@ -25,7 +25,10 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { computeFeatureRemovalProposal } from "@/lib/feature-removal";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
 import { cn } from "@/lib/utils";
+import { devResumeParams, resumedPayloadMatches } from "@/lib/dev-resume-scope";
+import { appendSplitConfig, resolveSplitConfig, sameSplit } from "@/lib/split-config";
 
 export const Route = createFileRoute("/data-preparation")({
   head: () => ({ meta: [{ title: "Data Preparation & Feature Engineering — Aegis Credit" }] }),
@@ -1574,7 +1577,14 @@ function PreprocessingSection({
 
   // Resume where the reviewer left off: if this session has no preprocessing
   // result yet, pull the last saved /data/preprocess run from the backend.
-  const { data: resumedPreprocess } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "preprocessing");
+  // Only a run on exactly this dataset file is eligible (E7).
+  const preprocessFileSha = useDatasetFileSha(file);
+  const preprocessResumeParams = devResumeParams({ fileSha: preprocessFileSha });
+  const { data: resumedPreprocessRaw } = useResumeState<Record<string, any>>("dev_pipeline_log.csv", "preprocessing", {
+    params: preprocessResumeParams ?? undefined,
+    enabled: preprocessResumeParams !== null,
+  });
+  const resumedPreprocess = resumedPayloadMatches(resumedPreprocessRaw, { fileSha: preprocessFileSha }) ? resumedPreprocessRaw : null;
   useEffect(() => {
     if (!preprocessingResult && resumedPreprocess) {
       setPreprocessingResult(resumedPreprocess);
@@ -1583,7 +1593,7 @@ function PreprocessingSection({
       setValSize(resumedPreprocess?.split_config?.val_size ?? 0.15);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedPreprocess]);
+  }, [resumedPreprocessRaw, preprocessFileSha]);
   // Not user-configurable in the UI — hardcoded to match the backend default.
   // Stage 4's seed-stability check (R4.6) varies the seed programmatically via
   // its own control on the Model Validation screen, independent of this value.
@@ -2510,17 +2520,29 @@ function FeaturesSection() {
   // Resume where the reviewer left off: if this session has no feature
   // engineering result yet, pull the last saved /data/feature-engineering
   // run from the backend.
+  // Only a run on exactly this dataset file AND the split locked in at
+  // Preprocessing is eligible (E7, E12); anything else would describe
+  // different training rows.
+  const splitConfig = resolveSplitConfig(preprocessingResult?.split_config);
+  const featuresFileSha = useDatasetFileSha(file);
+  const featuresResumeParams = devResumeParams({ fileSha: featuresFileSha });
   const { data: resumedFeatures } = useResumeState<FeatureEngineeringResponse>(
     "dev_pipeline_log.csv",
     "feature_engineering",
+    { params: featuresResumeParams ?? undefined, enabled: featuresResumeParams !== null },
   );
   useEffect(() => {
-    if (!featureEngineeringResult && resumedFeatures) {
+    if (
+      !featureEngineeringResult &&
+      resumedFeatures &&
+      resumedPayloadMatches(resumedFeatures, { fileSha: featuresFileSha }) &&
+      sameSplit((resumedFeatures as Record<string, any>).split_config, splitConfig)
+    ) {
       setFeatureEngineeringResult(resumedFeatures as unknown as Record<string, any>);
       setEngineeringResult(resumedFeatures);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedFeatures]);
+  }, [resumedFeatures, featuresFileSha]);
 
   const feRequestIdRef = useRef(0);
 
@@ -2553,6 +2575,7 @@ function FeaturesSection() {
       const form = new FormData();
       form.append("file", file);
       form.append("target_col", targetCol);
+      appendSplitConfig(form, splitConfig);
       const remove = overrideConfirmedRemove ?? confirmedRemoveCols;
       if (remove !== null && remove !== undefined) {
         form.append("confirmed_remove_cols", JSON.stringify(remove));
@@ -2647,6 +2670,7 @@ function FeaturesSection() {
       form.append("file", file);
       const target_col = profile.target_candidates && profile.target_candidates.length ? profile.target_candidates[0] : "";
       form.append("target_col", target_col);
+      appendSplitConfig(form, splitConfig);
       const res = await formUpload<any>("/data/feature-decision-log", form);
       if (res && res.content_base64) {
         const blob = new Blob([Uint8Array.from(atob(res.content_base64), c => c.charCodeAt(0))], { type: 'text/csv' });

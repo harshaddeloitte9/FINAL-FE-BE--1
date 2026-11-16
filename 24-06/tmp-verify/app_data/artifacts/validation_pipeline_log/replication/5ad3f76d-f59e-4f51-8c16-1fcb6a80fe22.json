@@ -1,0 +1,3393 @@
+{
+  "stage": "replication",
+  "flags": [],
+  "evidence": {
+    "run_id": "5ad3f76d-f59e-4f51-8c16-1fcb6a80fe22",
+    "validation_run_id": "VRUN-001",
+    "persisted": true,
+    "replication_mode": "unregistered_independent_refit",
+    "registered_model_id": null,
+    "training_run_id": null,
+    "execution_status": "COMPLETED",
+    "validation_model_id": "VAL-001",
+    "business_model_name": "Pretend Demo",
+    "algorithm": "XGBoost",
+    "dataset_name": null,
+    "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+    "dataset_file_sha256": "4e27a1606e2311365c70b0ad3c8886cfb8b6aa4050e3f125b00c3ed30e1d6934",
+    "dataset_rows": 120,
+    "target_col": "default",
+    "demo_dataset": false,
+    "executed_at": "2026-11-12T15:58:07.276481"
+  },
+  "report": {
+    "replication": {
+      "result": {
+        "success": true,
+        "error": null,
+        "metrics": {
+          "accuracy": 0.6667,
+          "precision": 0.75,
+          "recall": 0.375,
+          "f1": 0.5,
+          "confusion_matrix": [
+            [
+              9,
+              1
+            ],
+            [
+              5,
+              3
+            ]
+          ],
+          "classification_report": {
+            "0": {
+              "precision": 0.6428571428571429,
+              "recall": 0.9,
+              "f1-score": 0.75,
+              "support": 10.0
+            },
+            "1": {
+              "precision": 0.75,
+              "recall": 0.375,
+              "f1-score": 0.5,
+              "support": 8.0
+            },
+            "accuracy": 0.6666666666666666,
+            "macro avg": {
+              "precision": 0.6964285714285714,
+              "recall": 0.6375,
+              "f1-score": 0.625,
+              "support": 18.0
+            },
+            "weighted avg": {
+              "precision": 0.6904761904761905,
+              "recall": 0.6666666666666666,
+              "f1-score": 0.6388888888888888,
+              "support": 18.0
+            }
+          },
+          "threshold_used": 0.83,
+          "roc_auc": 0.7375,
+          "pr_auc": 0.7351,
+          "ks_statistic": 0.45,
+          "ks_pvalue": 0.2475,
+          "brier_score": 0.2263,
+          "threshold_provenance": {
+            "method": "f1_max",
+            "value": 0.83,
+            "source_partition": "validation",
+            "rows": 18,
+            "positives": 7,
+            "degraded": false,
+            "validation_f1": 1.0,
+            "reason": "F1-maximising threshold selected on the validation partition (test rows not used)."
+          },
+          "gini": 0.475,
+          "ks": 0.45
+        },
+        "seed_aucs": [
+          0.7375,
+          0.925,
+          0.9,
+          0.7625,
+          0.875
+        ],
+        "seed_runs": [
+          {
+            "seed": 42,
+            "status": "COMPLETED",
+            "auc": 0.7375,
+            "auc_se": 0.12893,
+            "auc_ci": [
+              0.4375,
+              0.95
+            ],
+            "test_rows": 18,
+            "test_positives": 8,
+            "test_negatives": 10,
+            "importance": {
+              "f0": 0.02,
+              "f1": -0.045,
+              "f2": 0.06,
+              "f3": -0.015,
+              "f4": 0.01,
+              "f5": 0.025,
+              "f6": 0.0225,
+              "f7": -0.0175
+            },
+            "importance_sd": {
+              "f0": 0.025921,
+              "f1": 0.022707,
+              "f2": 0.03687,
+              "f3": 0.024044,
+              "f4": 0.033541,
+              "f5": 0.067892,
+              "f6": 0.081202,
+              "f7": 0.014252
+            },
+            "selected": [
+              "f2"
+            ],
+            "direction": {
+              "f0": {
+                "delta_pd": 0.05397316440939903,
+                "sign": 1
+              },
+              "f1": {
+                "delta_pd": 0.06789452582597733,
+                "sign": 1
+              },
+              "f2": {
+                "delta_pd": 0.0029661888256669044,
+                "sign": 1
+              },
+              "f3": {
+                "delta_pd": 2.27558321057586e-05,
+                "sign": 1
+              },
+              "f4": {
+                "delta_pd": 0.12148024141788483,
+                "sign": 1
+              },
+              "f5": {
+                "delta_pd": 0.09621764719486237,
+                "sign": 1
+              },
+              "f6": {
+                "delta_pd": 0.12230021506547928,
+                "sign": 1
+              },
+              "f7": {
+                "delta_pd": -0.021424399688839912,
+                "sign": -1
+              }
+            },
+            "model_inputs": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f5",
+              "f6",
+              "f7"
+            ],
+            "split_strategy": "stratified_random",
+            "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+            "registered_model_id": null,
+            "training_run_id": null,
+            "test_index_sha256": "dff211212fcf29b0558e6fd602db6b9f6e07a1db93dbbb286d60879d4e56074a"
+          },
+          {
+            "seed": 43,
+            "status": "COMPLETED",
+            "auc": 0.925,
+            "auc_se": 0.0569,
+            "auc_ci": [
+              0.8,
+              1.0
+            ],
+            "test_rows": 18,
+            "test_positives": 8,
+            "test_negatives": 10,
+            "importance": {
+              "f0": 0.055,
+              "f1": 0.08,
+              "f2": 0.1325,
+              "f3": 0.0375,
+              "f4": 0.1725,
+              "f5": 0.0275,
+              "f6": 0.12,
+              "f7": -0.0025
+            },
+            "importance_sd": {
+              "f0": 0.032596,
+              "f1": 0.050467,
+              "f2": 0.132759,
+              "f3": 0.033072,
+              "f4": 0.072565,
+              "f5": 0.032355,
+              "f6": 0.092111,
+              "f7": 0.041833
+            },
+            "selected": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f6"
+            ],
+            "direction": {
+              "f0": {
+                "delta_pd": 0.055510811507701874,
+                "sign": 1
+              },
+              "f1": {
+                "delta_pd": 0.09669769555330276,
+                "sign": 1
+              },
+              "f2": {
+                "delta_pd": 0.05451236665248871,
+                "sign": 1
+              },
+              "f3": {
+                "delta_pd": 0.05616333708167076,
+                "sign": 1
+              },
+              "f4": {
+                "delta_pd": 0.11294857412576675,
+                "sign": 1
+              },
+              "f5": {
+                "delta_pd": 0.07960284501314163,
+                "sign": 1
+              },
+              "f6": {
+                "delta_pd": 0.07179192453622818,
+                "sign": 1
+              },
+              "f7": {
+                "delta_pd": 0.04202008247375488,
+                "sign": 1
+              }
+            },
+            "model_inputs": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f5",
+              "f6",
+              "f7"
+            ],
+            "split_strategy": "stratified_random",
+            "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+            "registered_model_id": null,
+            "training_run_id": null,
+            "test_index_sha256": "e602e4da51d50ffd4e19270251a44d4c1779c8437b076bb0a0578b2dc21f4e10"
+          },
+          {
+            "seed": 44,
+            "status": "COMPLETED",
+            "auc": 0.9,
+            "auc_se": 0.07562,
+            "auc_ci": [
+              0.7,
+              1.0
+            ],
+            "test_rows": 18,
+            "test_positives": 8,
+            "test_negatives": 10,
+            "importance": {
+              "f0": -0.0275,
+              "f1": 0.0275,
+              "f2": 0.05,
+              "f3": 0.035,
+              "f4": 0.1275,
+              "f5": -0.0375,
+              "f6": -0.0025,
+              "f7": -0.0175
+            },
+            "importance_sd": {
+              "f0": 0.040889,
+              "f1": 0.028504,
+              "f2": 0.053765,
+              "f3": 0.027099,
+              "f4": 0.068122,
+              "f5": 0.025,
+              "f6": 0.073101,
+              "f7": 0.01118
+            },
+            "selected": [
+              "f1",
+              "f2",
+              "f3",
+              "f4"
+            ],
+            "direction": {
+              "f0": {
+                "delta_pd": 0.12305143475532532,
+                "sign": 1
+              },
+              "f1": {
+                "delta_pd": 0.031099041923880577,
+                "sign": 1
+              },
+              "f2": {
+                "delta_pd": 0.05019957944750786,
+                "sign": 1
+              },
+              "f3": {
+                "delta_pd": 0.0410652831196785,
+                "sign": 1
+              },
+              "f4": {
+                "delta_pd": 0.15596985816955566,
+                "sign": 1
+              },
+              "f5": {
+                "delta_pd": 0.07400413602590561,
+                "sign": 1
+              },
+              "f6": {
+                "delta_pd": 0.08420246839523315,
+                "sign": 1
+              },
+              "f7": {
+                "delta_pd": 0.006718790158629417,
+                "sign": 1
+              }
+            },
+            "model_inputs": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f5",
+              "f6",
+              "f7"
+            ],
+            "split_strategy": "stratified_random",
+            "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+            "registered_model_id": null,
+            "training_run_id": null,
+            "test_index_sha256": "38c71372feb6b09b7705767fe2ba964ab4011e140076c3916c6d7aa002e926dc"
+          },
+          {
+            "seed": 45,
+            "status": "COMPLETED",
+            "auc": 0.7625,
+            "auc_se": 0.12182,
+            "auc_ci": [
+              0.4872,
+              0.9506
+            ],
+            "test_rows": 18,
+            "test_positives": 8,
+            "test_negatives": 10,
+            "importance": {
+              "f0": 0.01,
+              "f1": 0.01,
+              "f2": 0.055,
+              "f3": -0.015,
+              "f4": -0.0225,
+              "f5": 0.185,
+              "f6": 0.0925,
+              "f7": -0.005
+            },
+            "importance_sd": {
+              "f0": 0.053327,
+              "f1": 0.029843,
+              "f2": 0.050467,
+              "f3": 0.010458,
+              "f4": 0.074162,
+              "f5": 0.027099,
+              "f6": 0.074267,
+              "f7": 0.018957
+            },
+            "selected": [
+              "f2",
+              "f5",
+              "f6"
+            ],
+            "direction": {
+              "f0": {
+                "delta_pd": 0.1430809646844864,
+                "sign": 1
+              },
+              "f1": {
+                "delta_pd": 0.07330067455768585,
+                "sign": 1
+              },
+              "f2": {
+                "delta_pd": 0.01390084158629179,
+                "sign": 1
+              },
+              "f3": {
+                "delta_pd": 0.003883889177814126,
+                "sign": 1
+              },
+              "f4": {
+                "delta_pd": 0.1386602520942688,
+                "sign": 1
+              },
+              "f5": {
+                "delta_pd": 0.09122106432914734,
+                "sign": 1
+              },
+              "f6": {
+                "delta_pd": 0.12510868906974792,
+                "sign": 1
+              },
+              "f7": {
+                "delta_pd": -0.0018017017282545567,
+                "sign": -1
+              }
+            },
+            "model_inputs": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f5",
+              "f6",
+              "f7"
+            ],
+            "split_strategy": "stratified_random",
+            "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+            "registered_model_id": null,
+            "training_run_id": null,
+            "test_index_sha256": "6f5169bd5c1432486dde63d3b9283ee2ceab56663ab96160f8cbc58c1d0b475a"
+          },
+          {
+            "seed": 46,
+            "status": "COMPLETED",
+            "auc": 0.875,
+            "auc_se": 0.08575,
+            "auc_ci": [
+              0.6997,
+              1.0
+            ],
+            "test_rows": 18,
+            "test_positives": 8,
+            "test_negatives": 10,
+            "importance": {
+              "f0": -0.03,
+              "f1": 0.045,
+              "f2": 0.08,
+              "f3": 0.0175,
+              "f4": 0.0275,
+              "f5": 0.035,
+              "f6": 0.1025,
+              "f7": -0.0125
+            },
+            "importance_sd": {
+              "f0": 0.018957,
+              "f1": 0.025921,
+              "f2": 0.078362,
+              "f3": 0.042019,
+              "f4": 0.07624,
+              "f5": 0.035795,
+              "f6": 0.092449,
+              "f7": 0.0125
+            },
+            "selected": [
+              "f1",
+              "f2",
+              "f5",
+              "f6"
+            ],
+            "direction": {
+              "f0": {
+                "delta_pd": 0.1786215901374817,
+                "sign": 1
+              },
+              "f1": {
+                "delta_pd": 0.00557653047144413,
+                "sign": 1
+              },
+              "f2": {
+                "delta_pd": 0.036847714334726334,
+                "sign": 1
+              },
+              "f3": {
+                "delta_pd": 0.05436445400118828,
+                "sign": 1
+              },
+              "f4": {
+                "delta_pd": 0.15530283749103546,
+                "sign": 1
+              },
+              "f5": {
+                "delta_pd": 0.09522323310375214,
+                "sign": 1
+              },
+              "f6": {
+                "delta_pd": 0.18783175945281982,
+                "sign": 1
+              },
+              "f7": {
+                "delta_pd": 0.020033707842230797,
+                "sign": 1
+              }
+            },
+            "model_inputs": [
+              "f0",
+              "f1",
+              "f2",
+              "f3",
+              "f4",
+              "f5",
+              "f6",
+              "f7"
+            ],
+            "split_strategy": "stratified_random",
+            "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+            "registered_model_id": null,
+            "training_run_id": null,
+            "test_index_sha256": "5a529a9c22144176a252745f2aa452e6f2054e07bb461a2eca3887cb3c4aefe6"
+          }
+        ],
+        "ablation_runs": [
+          {
+            "feature": "f0",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.7625,
+            "auc_drop": -0.025,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f1",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.775,
+            "auc_drop": -0.0375,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f2",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.7375,
+            "auc_drop": 0.0,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f3",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.7625,
+            "auc_drop": -0.025,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f4",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.6,
+            "auc_drop": 0.1375,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f5",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.6625,
+            "auc_drop": 0.075,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f6",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.675,
+            "auc_drop": 0.0625,
+            "features_used": 7,
+            "feature_removed": true
+          },
+          {
+            "feature": "f7",
+            "status": "COMPLETED",
+            "baseline_auc": 0.7375,
+            "auc_without_feature": 0.7375,
+            "auc_drop": 0.0,
+            "features_used": 7,
+            "feature_removed": true
+          }
+        ],
+        "split_integrity": {
+          "id": "R4.7",
+          "title": "Train/test separation \u2014 no test contamination",
+          "severity": "high",
+          "status": "PASS",
+          "observed": "S1 Train / validation / test rows disjoint: PASS | S2 No test record identical to a training record: PASS | S3 Preprocessing depends on training rows only: PASS | S4 Model fitted on training rows only: PASS | S5 Feature-engineering plan learned from training rows only: NOT_APPLICABLE | S6 Split reproducible: PASS",
+          "threshold": "Disjoint splits; preprocessing, feature engineering and model fitted on training rows only; reproducible split",
+          "executed": true,
+          "_subchecks": [
+            {
+              "id": "S1",
+              "title": "Train / validation / test rows disjoint",
+              "status": "PASS",
+              "detail": "No shared row indices (train 84, validation 18, test 18)."
+            },
+            {
+              "id": "S2",
+              "title": "No test record identical to a training record",
+              "status": "PASS",
+              "detail": "None of the 18 test records duplicates a training record."
+            },
+            {
+              "id": "S3",
+              "title": "Preprocessing depends on training rows only",
+              "status": "PASS",
+              "detail": "Preprocessing (design and fitted statistics) on the test rows is identical to a fit on the training rows only."
+            },
+            {
+              "id": "S4",
+              "title": "Model fitted on training rows only",
+              "status": "PASS",
+              "detail": "The model's predicted probabilities on the test rows is identical to a fit on the training rows only."
+            },
+            {
+              "id": "S5",
+              "title": "Feature-engineering plan learned from training rows only",
+              "status": "NOT_APPLICABLE",
+              "detail": "Feature engineering was not used."
+            },
+            {
+              "id": "S6",
+              "title": "Split reproducible",
+              "status": "PASS",
+              "detail": "Test-set fingerprint dff211212fcf\u2026 reproduced."
+            }
+          ]
+        },
+        "stability": {
+          "runs": [
+            {
+              "seed": 42,
+              "status": "COMPLETED",
+              "auc": 0.7375,
+              "auc_se": 0.12893,
+              "auc_ci": [
+                0.4375,
+                0.95
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "importance": {
+                "f0": 0.02,
+                "f1": -0.045,
+                "f2": 0.06,
+                "f3": -0.015,
+                "f4": 0.01,
+                "f5": 0.025,
+                "f6": 0.0225,
+                "f7": -0.0175
+              },
+              "importance_sd": {
+                "f0": 0.025921,
+                "f1": 0.022707,
+                "f2": 0.03687,
+                "f3": 0.024044,
+                "f4": 0.033541,
+                "f5": 0.067892,
+                "f6": 0.081202,
+                "f7": 0.014252
+              },
+              "selected": [
+                "f2"
+              ],
+              "direction": {
+                "f0": {
+                  "delta_pd": 0.05397316440939903,
+                  "sign": 1
+                },
+                "f1": {
+                  "delta_pd": 0.06789452582597733,
+                  "sign": 1
+                },
+                "f2": {
+                  "delta_pd": 0.0029661888256669044,
+                  "sign": 1
+                },
+                "f3": {
+                  "delta_pd": 2.27558321057586e-05,
+                  "sign": 1
+                },
+                "f4": {
+                  "delta_pd": 0.12148024141788483,
+                  "sign": 1
+                },
+                "f5": {
+                  "delta_pd": 0.09621764719486237,
+                  "sign": 1
+                },
+                "f6": {
+                  "delta_pd": 0.12230021506547928,
+                  "sign": 1
+                },
+                "f7": {
+                  "delta_pd": -0.021424399688839912,
+                  "sign": -1
+                }
+              },
+              "model_inputs": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7"
+              ],
+              "split_strategy": "stratified_random",
+              "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+              "registered_model_id": null,
+              "training_run_id": null,
+              "test_index_sha256": "dff211212fcf29b0558e6fd602db6b9f6e07a1db93dbbb286d60879d4e56074a"
+            },
+            {
+              "seed": 43,
+              "status": "COMPLETED",
+              "auc": 0.925,
+              "auc_se": 0.0569,
+              "auc_ci": [
+                0.8,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "importance": {
+                "f0": 0.055,
+                "f1": 0.08,
+                "f2": 0.1325,
+                "f3": 0.0375,
+                "f4": 0.1725,
+                "f5": 0.0275,
+                "f6": 0.12,
+                "f7": -0.0025
+              },
+              "importance_sd": {
+                "f0": 0.032596,
+                "f1": 0.050467,
+                "f2": 0.132759,
+                "f3": 0.033072,
+                "f4": 0.072565,
+                "f5": 0.032355,
+                "f6": 0.092111,
+                "f7": 0.041833
+              },
+              "selected": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f6"
+              ],
+              "direction": {
+                "f0": {
+                  "delta_pd": 0.055510811507701874,
+                  "sign": 1
+                },
+                "f1": {
+                  "delta_pd": 0.09669769555330276,
+                  "sign": 1
+                },
+                "f2": {
+                  "delta_pd": 0.05451236665248871,
+                  "sign": 1
+                },
+                "f3": {
+                  "delta_pd": 0.05616333708167076,
+                  "sign": 1
+                },
+                "f4": {
+                  "delta_pd": 0.11294857412576675,
+                  "sign": 1
+                },
+                "f5": {
+                  "delta_pd": 0.07960284501314163,
+                  "sign": 1
+                },
+                "f6": {
+                  "delta_pd": 0.07179192453622818,
+                  "sign": 1
+                },
+                "f7": {
+                  "delta_pd": 0.04202008247375488,
+                  "sign": 1
+                }
+              },
+              "model_inputs": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7"
+              ],
+              "split_strategy": "stratified_random",
+              "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+              "registered_model_id": null,
+              "training_run_id": null,
+              "test_index_sha256": "e602e4da51d50ffd4e19270251a44d4c1779c8437b076bb0a0578b2dc21f4e10"
+            },
+            {
+              "seed": 44,
+              "status": "COMPLETED",
+              "auc": 0.9,
+              "auc_se": 0.07562,
+              "auc_ci": [
+                0.7,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "importance": {
+                "f0": -0.0275,
+                "f1": 0.0275,
+                "f2": 0.05,
+                "f3": 0.035,
+                "f4": 0.1275,
+                "f5": -0.0375,
+                "f6": -0.0025,
+                "f7": -0.0175
+              },
+              "importance_sd": {
+                "f0": 0.040889,
+                "f1": 0.028504,
+                "f2": 0.053765,
+                "f3": 0.027099,
+                "f4": 0.068122,
+                "f5": 0.025,
+                "f6": 0.073101,
+                "f7": 0.01118
+              },
+              "selected": [
+                "f1",
+                "f2",
+                "f3",
+                "f4"
+              ],
+              "direction": {
+                "f0": {
+                  "delta_pd": 0.12305143475532532,
+                  "sign": 1
+                },
+                "f1": {
+                  "delta_pd": 0.031099041923880577,
+                  "sign": 1
+                },
+                "f2": {
+                  "delta_pd": 0.05019957944750786,
+                  "sign": 1
+                },
+                "f3": {
+                  "delta_pd": 0.0410652831196785,
+                  "sign": 1
+                },
+                "f4": {
+                  "delta_pd": 0.15596985816955566,
+                  "sign": 1
+                },
+                "f5": {
+                  "delta_pd": 0.07400413602590561,
+                  "sign": 1
+                },
+                "f6": {
+                  "delta_pd": 0.08420246839523315,
+                  "sign": 1
+                },
+                "f7": {
+                  "delta_pd": 0.006718790158629417,
+                  "sign": 1
+                }
+              },
+              "model_inputs": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7"
+              ],
+              "split_strategy": "stratified_random",
+              "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+              "registered_model_id": null,
+              "training_run_id": null,
+              "test_index_sha256": "38c71372feb6b09b7705767fe2ba964ab4011e140076c3916c6d7aa002e926dc"
+            },
+            {
+              "seed": 45,
+              "status": "COMPLETED",
+              "auc": 0.7625,
+              "auc_se": 0.12182,
+              "auc_ci": [
+                0.4872,
+                0.9506
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "importance": {
+                "f0": 0.01,
+                "f1": 0.01,
+                "f2": 0.055,
+                "f3": -0.015,
+                "f4": -0.0225,
+                "f5": 0.185,
+                "f6": 0.0925,
+                "f7": -0.005
+              },
+              "importance_sd": {
+                "f0": 0.053327,
+                "f1": 0.029843,
+                "f2": 0.050467,
+                "f3": 0.010458,
+                "f4": 0.074162,
+                "f5": 0.027099,
+                "f6": 0.074267,
+                "f7": 0.018957
+              },
+              "selected": [
+                "f2",
+                "f5",
+                "f6"
+              ],
+              "direction": {
+                "f0": {
+                  "delta_pd": 0.1430809646844864,
+                  "sign": 1
+                },
+                "f1": {
+                  "delta_pd": 0.07330067455768585,
+                  "sign": 1
+                },
+                "f2": {
+                  "delta_pd": 0.01390084158629179,
+                  "sign": 1
+                },
+                "f3": {
+                  "delta_pd": 0.003883889177814126,
+                  "sign": 1
+                },
+                "f4": {
+                  "delta_pd": 0.1386602520942688,
+                  "sign": 1
+                },
+                "f5": {
+                  "delta_pd": 0.09122106432914734,
+                  "sign": 1
+                },
+                "f6": {
+                  "delta_pd": 0.12510868906974792,
+                  "sign": 1
+                },
+                "f7": {
+                  "delta_pd": -0.0018017017282545567,
+                  "sign": -1
+                }
+              },
+              "model_inputs": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7"
+              ],
+              "split_strategy": "stratified_random",
+              "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+              "registered_model_id": null,
+              "training_run_id": null,
+              "test_index_sha256": "6f5169bd5c1432486dde63d3b9283ee2ceab56663ab96160f8cbc58c1d0b475a"
+            },
+            {
+              "seed": 46,
+              "status": "COMPLETED",
+              "auc": 0.875,
+              "auc_se": 0.08575,
+              "auc_ci": [
+                0.6997,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "importance": {
+                "f0": -0.03,
+                "f1": 0.045,
+                "f2": 0.08,
+                "f3": 0.0175,
+                "f4": 0.0275,
+                "f5": 0.035,
+                "f6": 0.1025,
+                "f7": -0.0125
+              },
+              "importance_sd": {
+                "f0": 0.018957,
+                "f1": 0.025921,
+                "f2": 0.078362,
+                "f3": 0.042019,
+                "f4": 0.07624,
+                "f5": 0.035795,
+                "f6": 0.092449,
+                "f7": 0.0125
+              },
+              "selected": [
+                "f1",
+                "f2",
+                "f5",
+                "f6"
+              ],
+              "direction": {
+                "f0": {
+                  "delta_pd": 0.1786215901374817,
+                  "sign": 1
+                },
+                "f1": {
+                  "delta_pd": 0.00557653047144413,
+                  "sign": 1
+                },
+                "f2": {
+                  "delta_pd": 0.036847714334726334,
+                  "sign": 1
+                },
+                "f3": {
+                  "delta_pd": 0.05436445400118828,
+                  "sign": 1
+                },
+                "f4": {
+                  "delta_pd": 0.15530283749103546,
+                  "sign": 1
+                },
+                "f5": {
+                  "delta_pd": 0.09522323310375214,
+                  "sign": 1
+                },
+                "f6": {
+                  "delta_pd": 0.18783175945281982,
+                  "sign": 1
+                },
+                "f7": {
+                  "delta_pd": 0.020033707842230797,
+                  "sign": 1
+                }
+              },
+              "model_inputs": [
+                "f0",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7"
+              ],
+              "split_strategy": "stratified_random",
+              "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+              "registered_model_id": null,
+              "training_run_id": null,
+              "test_index_sha256": "5a529a9c22144176a252745f2aa452e6f2054e07bb461a2eca3887cb3c4aefe6"
+            }
+          ],
+          "independence": {
+            "split_strategy": "stratified_random",
+            "completed_runs": 5,
+            "distinct_test_sets": 5,
+            "independent": true,
+            "reason": null
+          },
+          "determinism": {
+            "assessed": true,
+            "deterministic": true,
+            "seed": 42,
+            "max_abs_difference": 0.0,
+            "detail": "Repeating seed 42 reproduced the run exactly."
+          },
+          "main_evaluation": {
+            "rows": 18,
+            "positives": 8,
+            "negatives": 10,
+            "iterations": 1000,
+            "available": true,
+            "auc": 0.7375,
+            "se": 0.11886007555656067,
+            "ci_low": 0.4871875000000003,
+            "ci_high": 0.95,
+            "confidence_level": 0.95
+          },
+          "temporal": {
+            "available": false,
+            "reason": "No date column in the evaluation data."
+          }
+        },
+        "cv_mean_auc": 0.7317,
+        "split_stats": {
+          "total": 120,
+          "train_n": 84,
+          "val_n": 18,
+          "test_n": 18,
+          "train_pct": 0.7,
+          "val_pct": 0.15,
+          "test_pct": 0.15,
+          "train_class_dist": {
+            "0": 0.5833333333333334,
+            "1": 0.4166666666666667
+          },
+          "val_class_dist": {
+            "0": 0.6111111111111112,
+            "1": 0.3888888888888889
+          },
+          "test_class_dist": {
+            "0": 0.5555555555555556,
+            "1": 0.4444444444444444
+          }
+        },
+        "timing_s": 16.3,
+        "ablation": {
+          "f0": -0.025,
+          "f1": -0.0375,
+          "f2": 0.0,
+          "f3": -0.025,
+          "f4": 0.1375,
+          "f5": 0.075,
+          "f6": 0.0625,
+          "f7": 0.0
+        },
+        "feature_importance": [
+          {
+            "Feature": "f6",
+            "Importance": 0.1974399983882904
+          },
+          {
+            "Feature": "f4",
+            "Importance": 0.19598999619483948
+          },
+          {
+            "Feature": "f5",
+            "Importance": 0.13097000122070312
+          },
+          {
+            "Feature": "f2",
+            "Importance": 0.12464000284671783
+          },
+          {
+            "Feature": "f3",
+            "Importance": 0.11799000203609467
+          },
+          {
+            "Feature": "f0",
+            "Importance": 0.09196999669075012
+          },
+          {
+            "Feature": "f1",
+            "Importance": 0.07616999745368958
+          },
+          {
+            "Feature": "f7",
+            "Importance": 0.06483999639749527
+          }
+        ],
+        "use_feature_engineering": false,
+        "model_params_used": {
+          "n_estimators": 200,
+          "learning_rate": 0.05,
+          "max_depth": 6,
+          "eval_metric": "logloss",
+          "random_state": 42,
+          "verbosity": 0
+        },
+        "split_report": {
+          "strategy": "stratified_random",
+          "stratification_requested": true,
+          "achieved": "stratified",
+          "degraded": false,
+          "fallbacks": [],
+          "random_seed": 42,
+          "test_size": 0.15,
+          "val_size": 0.15,
+          "class_counts": {
+            "train": {
+              "0": 49,
+              "1": 35
+            },
+            "validation": {
+              "0": 11,
+              "1": 7
+            },
+            "test": {
+              "0": 10,
+              "1": 8
+            }
+          }
+        },
+        "threshold_provenance": {
+          "method": "f1_max",
+          "value": 0.83,
+          "source_partition": "validation",
+          "rows": 18,
+          "positives": 7,
+          "degraded": false,
+          "validation_f1": 1.0,
+          "reason": "F1-maximising threshold selected on the validation partition (test rows not used)."
+        },
+        "X_val": null,
+        "y_val": null,
+        "cv_std_auc": 0.1081,
+        "col_types": {
+          "numeric": [
+            "f0",
+            "f1",
+            "f2",
+            "f3",
+            "f4",
+            "f5",
+            "f6",
+            "f7",
+            "default"
+          ],
+          "categorical": [],
+          "datetime": [],
+          "boolean": [],
+          "id": []
+        },
+        "task_type": "binary",
+        "prep_report": {
+          "numeric": {
+            "f0": {
+              "missing_pct": 0.0,
+              "skewness": 0.11023790321474992,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.1102,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f1": {
+              "missing_pct": 0.0,
+              "skewness": -0.21521136347561862,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.2152,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f2": {
+              "missing_pct": 0.0,
+              "skewness": -0.1698073256614743,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.1698,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f3": {
+              "missing_pct": 0.0,
+              "skewness": 0.020069230545972983,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.0201,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f4": {
+              "missing_pct": 0.0,
+              "skewness": -0.16985887097336205,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.1699,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f5": {
+              "missing_pct": 0.0,
+              "skewness": 0.25581970666382525,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.2558,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f6": {
+              "missing_pct": 0.0,
+              "skewness": -0.24600085227250246,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.246,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f7": {
+              "missing_pct": 0.0,
+              "skewness": 0.193051408244204,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.1931,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            }
+          },
+          "categorical": {},
+          "datetime": {},
+          "boolean": {},
+          "decisions": [
+            {
+              "column": "f0",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f1",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f2",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f3",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f4",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f5",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f6",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f7",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            }
+          ],
+          "missing_treatment": {},
+          "imputation_strategy": {
+            "method": "median",
+            "reason": "No columns were routed to statistical imputation.",
+            "diagnostics": {
+              "n_rows": 120,
+              "n_cols": 0
+            }
+          },
+          "review_flag_cols": [],
+          "missing_value_limitation_note": "MICE/KNN assume Missing At Random; informative missingness (MNAR) is a known limitation in credit data.",
+          "transform_choices": {},
+          "transform_recommendations": {
+            "f0": {
+              "transform": "none",
+              "skew": 0.1102,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f1": {
+              "transform": "none",
+              "skew": -0.2152,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f2": {
+              "transform": "none",
+              "skew": -0.1698,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f3": {
+              "transform": "none",
+              "skew": 0.0201,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f4": {
+              "transform": "none",
+              "skew": -0.1699,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f5": {
+              "transform": "none",
+              "skew": 0.2558,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f6": {
+              "transform": "none",
+              "skew": -0.246,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f7": {
+              "transform": "none",
+              "skew": 0.1931,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            }
+          },
+          "duplicates_removed": 0,
+          "post_default_cols_dropped": []
+        },
+        "prep_report_fe": {
+          "numeric": {
+            "f0": {
+              "missing_pct": 0.0,
+              "skewness": 0.11023790321474992,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.1102,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f1": {
+              "missing_pct": 0.0,
+              "skewness": -0.21521136347561862,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.2152,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f2": {
+              "missing_pct": 0.0,
+              "skewness": -0.1698073256614743,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.1698,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f3": {
+              "missing_pct": 0.0,
+              "skewness": 0.020069230545972983,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.0201,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f4": {
+              "missing_pct": 0.0,
+              "skewness": -0.16985887097336205,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.1699,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f5": {
+              "missing_pct": 0.0,
+              "skewness": 0.25581970666382525,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.2558,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f6": {
+              "missing_pct": 0.0,
+              "skewness": -0.24600085227250246,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": -0.246,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            },
+            "f7": {
+              "missing_pct": 0.0,
+              "skewness": 0.193051408244204,
+              "has_outliers": false,
+              "scaler": "standard",
+              "safety_net_imputer": "mean",
+              "needs_log": false,
+              "outlier_frac": 0.0,
+              "is_count": false,
+              "transform_recommendation": {
+                "transform": "none",
+                "skew": 0.1931,
+                "post_transform_skew": null,
+                "reason": "Approximately symmetric (|skew| < 0.5).",
+                "default_on": false
+              }
+            }
+          },
+          "categorical": {},
+          "datetime": {},
+          "boolean": {},
+          "decisions": [
+            {
+              "column": "f0",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f1",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f2",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f3",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f4",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f5",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f6",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            },
+            {
+              "column": "f7",
+              "type": "numeric",
+              "actions": [
+                "StandardScaler (no significant outliers)"
+              ]
+            }
+          ],
+          "missing_treatment": {},
+          "imputation_strategy": {
+            "method": "median",
+            "reason": "No columns were routed to statistical imputation.",
+            "diagnostics": {
+              "n_rows": 120,
+              "n_cols": 0
+            }
+          },
+          "review_flag_cols": [],
+          "missing_value_limitation_note": "MICE/KNN assume Missing At Random; informative missingness (MNAR) is a known limitation in credit data.",
+          "transform_choices": {},
+          "transform_recommendations": {
+            "f0": {
+              "transform": "none",
+              "skew": 0.1102,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f1": {
+              "transform": "none",
+              "skew": -0.2152,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f2": {
+              "transform": "none",
+              "skew": -0.1698,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f3": {
+              "transform": "none",
+              "skew": 0.0201,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f4": {
+              "transform": "none",
+              "skew": -0.1699,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f5": {
+              "transform": "none",
+              "skew": 0.2558,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f6": {
+              "transform": "none",
+              "skew": -0.246,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            },
+            "f7": {
+              "transform": "none",
+              "skew": 0.1931,
+              "post_transform_skew": null,
+              "reason": "Approximately symmetric (|skew| < 0.5).",
+              "default_on": false
+            }
+          },
+          "duplicates_removed": 0,
+          "post_default_cols_dropped": []
+        },
+        "methodology": {
+          "mode": "unregistered_independent_refit",
+          "registered_model_id": null,
+          "detail": "Independent refit from the configuration supplied in this request (algorithm, split sizes, optional parameters). It is NOT a reproduction of a registered model: no registered artifact, recorded hyperparameters, preprocessing or dataset lineage were used.",
+          "limitations": [
+            "Not linked to a registered model \u2014 cannot serve as replication evidence for a final verdict."
+          ],
+          "ignored_inputs": []
+        },
+        "replication_config_source": "registry_defaults_unavailable_config"
+      },
+      "checks": [
+        {
+          "id": "R4.1",
+          "title": "End-to-end training",
+          "severity": "high",
+          "status": "PASS",
+          "observed": "Trained in 16.3s \u2014 no errors",
+          "threshold": "Pipeline trains without errors",
+          "detail": "Model trained successfully using the submitted dataset and the platform pipeline."
+        },
+        {
+          "id": "R4.2",
+          "title": "Replicated AUC within \u00b10.03",
+          "severity": "high",
+          "status": "WARN",
+          "observed": "Replicated AUC = 0.7375 | Reported AUC not provided",
+          "threshold": "|\u0394 AUC| \u2264 0.03"
+        },
+        {
+          "id": "R4.3",
+          "title": "Gini within \u00b10.05 / KS within \u00b10.03",
+          "severity": "high",
+          "status": "WARN",
+          "observed": "Replicated Gini = 0.4750, KS = 0.4500 | Reported values not provided",
+          "threshold": "|\u0394 Gini| \u2264 0.05 and |\u0394 KS| \u2264 0.03"
+        },
+        {
+          "id": "R4.4",
+          "title": "Metrics within \u00b15% at reported threshold",
+          "severity": "medium",
+          "status": "WARN",
+          "observed": "No reported values entered \u2014 comparison not possible",
+          "threshold": "Relative difference \u2264 5% per metric",
+          "_table": [
+            {
+              "Metric": "Accuracy",
+              "Replicated": 0.6667,
+              "Reported": null,
+              "Rel. Diff": "N/A",
+              "Status": "SKIP"
+            },
+            {
+              "Metric": "Precision",
+              "Replicated": 0.75,
+              "Reported": null,
+              "Rel. Diff": "N/A",
+              "Status": "SKIP"
+            },
+            {
+              "Metric": "Recall",
+              "Replicated": 0.375,
+              "Reported": null,
+              "Rel. Diff": "N/A",
+              "Status": "SKIP"
+            },
+            {
+              "Metric": "F1",
+              "Replicated": 0.5,
+              "Reported": null,
+              "Rel. Diff": "N/A",
+              "Status": "SKIP"
+            }
+          ]
+        },
+        {
+          "id": "R4.5",
+          "title": "Feature stability across repeated runs",
+          "severity": "medium",
+          "status": "NOT_ASSESSED",
+          "observed": "Only 0 of 5 repeated run(s) completed with an adequate evaluation sample; at least 3 are needed.",
+          "threshold": "FAIL if a material numeric feature's effect direction agrees in < 0.8 of runs; if two material features whose importances differ significantly (Bonferroni-corrected t-test) swap order in > 20% of runs; or if a top-3 driver of one run makes no significant contribution in another (driver dropout). Mean Spearman of material-feature ranks < 0.6 without those conditions (swaps among statistically tied features) is a WARN.",
+          "executed": false,
+          "_diagnostic_note": "Statistical diagnostic of model behaviour \u2014 not a regulatory approval.",
+          "_methodology": "Repeated seeded re-split + retrain with the model's configuration; each run's test-row fingerprint is recorded and the runs count only if their test sets differ. Per run: permutation importance of every input on held-out rows (AUC drop when shuffled) and the direction of each numeric feature's effect on predicted PD. Stability = agreement of importance ranks (Spearman) and directions across runs, judged among material features (selected in at least half of the runs).",
+          "_runs_completed": 0,
+          "_runs_failed": 0,
+          "_limitations": [
+            "Acceptance criteria are PROVISIONAL defaults (stability_criteria.json); the policy values (min_mean_rank_correlation, min_pair_order_consistency, material_rank_shift_fraction, material_rank_shift_min, min_direction_consistency, top_k, min_class_count, max_ci_width) await Model Risk approval.",
+            "5 run(s) excluded: evaluation sample too small (fewer than 10 of a class, or AUC interval wider than 0.2), so importances are too noisy to compare.",
+            "Permutation importances are estimated on each run's held-out rows; smaller samples give noisier importances, which shows up as larger dispersion across runs."
+          ],
+          "_removal_diagnostics": {
+            "available": true,
+            "features_improving_auc_when_removed": [],
+            "margin_used": 0.23772,
+            "rule": "AUC gain on removal > 2.0 \u00d7 bootstrap SE of the baseline AUC",
+            "failed": [],
+            "note": "Diagnostic only: removing a feature and seeing AUC rise suggests noise or over-fitting; it is not by itself evidence of feature instability."
+          },
+          "_ablation": {
+            "f0": -0.025,
+            "f1": -0.0375,
+            "f2": 0.0,
+            "f3": -0.025,
+            "f4": 0.1375,
+            "f5": 0.075,
+            "f6": 0.0625,
+            "f7": 0.0
+          },
+          "_ablation_runs": [
+            {
+              "feature": "f0",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.7625,
+              "auc_drop": -0.025,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f1",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.775,
+              "auc_drop": -0.0375,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f2",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.7375,
+              "auc_drop": 0.0,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f3",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.7625,
+              "auc_drop": -0.025,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f4",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.6,
+              "auc_drop": 0.1375,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f5",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.6625,
+              "auc_drop": 0.075,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f6",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.675,
+              "auc_drop": 0.0625,
+              "features_used": 7,
+              "feature_removed": true
+            },
+            {
+              "feature": "f7",
+              "status": "COMPLETED",
+              "baseline_auc": 0.7375,
+              "auc_without_feature": 0.7375,
+              "auc_drop": 0.0,
+              "features_used": 7,
+              "feature_removed": true
+            }
+          ]
+        },
+        {
+          "id": "R4.6",
+          "title": "Predictive performance stability across repeated runs",
+          "severity": "medium",
+          "status": "NOT_ASSESSED",
+          "observed": "Test set has 8 defaults and 10 non-defaults; at least 10 of each are needed.",
+          "threshold": "Run-to-run AUC variation not significantly larger than sampling error (Cochran's Q, alpha=0.05); no run significantly below the pooled AUC and no period significantly below the overall AUC (one-sided, Bonferroni-corrected)",
+          "executed": false,
+          "_diagnostic_note": "Statistical diagnostic of model behaviour \u2014 not a regulatory approval.",
+          "_methodology": "Repeated seeded re-split + retrain with the model's configuration; each run's test-row fingerprint is recorded and the runs count only if their test sets differ. Per run: held-out ROC-AUC with a stratified-bootstrap standard error. Run-to-run variation is compared with sampling error (Cochran's Q heterogeneity test, I\u00b2); each run is tested for significant deterioration against the pooled AUC and each chronological period against the overall test AUC (one-sided, Bonferroni-corrected); the model's test AUC gets a stratified-bootstrap confidence interval.",
+          "_runs": [
+            {
+              "seed": 42,
+              "status": "COMPLETED",
+              "auc": 0.7375,
+              "auc_se": 0.12893,
+              "auc_ci": [
+                0.4375,
+                0.95
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "error": null
+            },
+            {
+              "seed": 43,
+              "status": "COMPLETED",
+              "auc": 0.925,
+              "auc_se": 0.0569,
+              "auc_ci": [
+                0.8,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "error": null
+            },
+            {
+              "seed": 44,
+              "status": "COMPLETED",
+              "auc": 0.9,
+              "auc_se": 0.07562,
+              "auc_ci": [
+                0.7,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "error": null
+            },
+            {
+              "seed": 45,
+              "status": "COMPLETED",
+              "auc": 0.7625,
+              "auc_se": 0.12182,
+              "auc_ci": [
+                0.4872,
+                0.9506
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "error": null
+            },
+            {
+              "seed": 46,
+              "status": "COMPLETED",
+              "auc": 0.875,
+              "auc_se": 0.08575,
+              "auc_ci": [
+                0.6997,
+                1.0
+              ],
+              "test_rows": 18,
+              "test_positives": 8,
+              "test_negatives": 10,
+              "error": null
+            }
+          ],
+          "_runs_completed": 0,
+          "_runs_failed": 0,
+          "_limitations": [
+            "Acceptance criteria are PROVISIONAL defaults (stability_criteria.json); the policy values (min_mean_rank_correlation, min_pair_order_consistency, material_rank_shift_fraction, material_rank_shift_min, min_direction_consistency, top_k, min_class_count, max_ci_width) await Model Risk approval.",
+            "5 run(s) excluded: fewer than 10 of a class in the evaluation sample.",
+            "Time-based comparison not performed: No date column in the evaluation data."
+          ],
+          "_main_evaluation": {
+            "rows": 18,
+            "positives": 8,
+            "negatives": 10,
+            "iterations": 1000,
+            "available": true,
+            "auc": 0.7375,
+            "se": 0.11886007555656067,
+            "ci_low": 0.4871875000000003,
+            "ci_high": 0.95,
+            "confidence_level": 0.95
+          },
+          "_temporal": {
+            "available": false,
+            "reason": "No date column in the evaluation data."
+          },
+          "_seeds": [
+            42,
+            43,
+            44,
+            45,
+            46
+          ],
+          "_seed_aucs": [
+            0.7375,
+            0.925,
+            0.9,
+            0.7625,
+            0.875
+          ]
+        },
+        {
+          "id": "R4.7",
+          "title": "Train/test separation \u2014 no test contamination",
+          "severity": "high",
+          "status": "PASS",
+          "observed": "S1 Train / validation / test rows disjoint: PASS | S2 No test record identical to a training record: PASS | S3 Preprocessing depends on training rows only: PASS | S4 Model fitted on training rows only: PASS | S5 Feature-engineering plan learned from training rows only: NOT_APPLICABLE | S6 Split reproducible: PASS",
+          "threshold": "Disjoint splits; preprocessing, feature engineering and model fitted on training rows only; reproducible split",
+          "executed": true,
+          "_subchecks": [
+            {
+              "id": "S1",
+              "title": "Train / validation / test rows disjoint",
+              "status": "PASS",
+              "detail": "No shared row indices (train 84, validation 18, test 18)."
+            },
+            {
+              "id": "S2",
+              "title": "No test record identical to a training record",
+              "status": "PASS",
+              "detail": "None of the 18 test records duplicates a training record."
+            },
+            {
+              "id": "S3",
+              "title": "Preprocessing depends on training rows only",
+              "status": "PASS",
+              "detail": "Preprocessing (design and fitted statistics) on the test rows is identical to a fit on the training rows only."
+            },
+            {
+              "id": "S4",
+              "title": "Model fitted on training rows only",
+              "status": "PASS",
+              "detail": "The model's predicted probabilities on the test rows is identical to a fit on the training rows only."
+            },
+            {
+              "id": "S5",
+              "title": "Feature-engineering plan learned from training rows only",
+              "status": "NOT_APPLICABLE",
+              "detail": "Feature engineering was not used."
+            },
+            {
+              "id": "S6",
+              "title": "Split reproducible",
+              "status": "PASS",
+              "detail": "Test-set fingerprint dff211212fcf\u2026 reproduced."
+            }
+          ]
+        },
+        {
+          "id": "R4.8",
+          "title": "CV mean AUC within \u00b10.02 of reported",
+          "severity": "medium",
+          "status": "SKIP",
+          "observed": "Reported CV mean AUC not available"
+        }
+      ]
+    },
+    "metrics": {
+      "accuracy": 0.6667,
+      "precision": 0.75,
+      "recall": 0.375,
+      "f1": 0.5,
+      "confusion_matrix": [
+        [
+          9,
+          1
+        ],
+        [
+          5,
+          3
+        ]
+      ],
+      "classification_report": {
+        "0": {
+          "precision": 0.6428571428571429,
+          "recall": 0.9,
+          "f1-score": 0.75,
+          "support": 10.0
+        },
+        "1": {
+          "precision": 0.75,
+          "recall": 0.375,
+          "f1-score": 0.5,
+          "support": 8.0
+        },
+        "accuracy": 0.6666666666666666,
+        "macro avg": {
+          "precision": 0.6964285714285714,
+          "recall": 0.6375,
+          "f1-score": 0.625,
+          "support": 18.0
+        },
+        "weighted avg": {
+          "precision": 0.6904761904761905,
+          "recall": 0.6666666666666666,
+          "f1-score": 0.6388888888888888,
+          "support": 18.0
+        }
+      },
+      "threshold_used": 0.83,
+      "roc_auc": 0.7375,
+      "pr_auc": 0.7351,
+      "ks_statistic": 0.45,
+      "ks_pvalue": 0.2475,
+      "brier_score": 0.2263,
+      "threshold_provenance": {
+        "method": "f1_max",
+        "value": 0.83,
+        "source_partition": "validation",
+        "rows": 18,
+        "positives": 7,
+        "degraded": false,
+        "validation_f1": 1.0,
+        "reason": "F1-maximising threshold selected on the validation partition (test rows not used)."
+      },
+      "gini": 0.475,
+      "ks": 0.45
+    },
+    "roc_curve": {
+      "points": [
+        {
+          "fpr": 0.0,
+          "tpr": 0.0
+        },
+        {
+          "fpr": 0.0,
+          "tpr": 0.125
+        },
+        {
+          "fpr": 0.0,
+          "tpr": 0.25
+        },
+        {
+          "fpr": 0.1,
+          "tpr": 0.25
+        },
+        {
+          "fpr": 0.1,
+          "tpr": 0.375
+        },
+        {
+          "fpr": 0.2,
+          "tpr": 0.375
+        },
+        {
+          "fpr": 0.2,
+          "tpr": 0.625
+        },
+        {
+          "fpr": 0.3,
+          "tpr": 0.625
+        },
+        {
+          "fpr": 0.3,
+          "tpr": 0.75
+        },
+        {
+          "fpr": 0.5,
+          "tpr": 0.75
+        },
+        {
+          "fpr": 0.5,
+          "tpr": 0.875
+        },
+        {
+          "fpr": 0.8,
+          "tpr": 0.875
+        },
+        {
+          "fpr": 0.8,
+          "tpr": 1.0
+        },
+        {
+          "fpr": 1.0,
+          "tpr": 1.0
+        }
+      ],
+      "auc": 0.7375,
+      "provenance": {
+        "prediction_source": "unregistered_refit",
+        "evaluation_partition": "test",
+        "rows": 18,
+        "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+        "test_index_sha256": "dff211212fcf29b0558e6fd602db6b9f6e07a1db93dbbb286d60879d4e56074a"
+      }
+    },
+    "pr_curve": {
+      "points": [
+        {
+          "recall": 1.0,
+          "precision": 0.4444444444444444
+        },
+        {
+          "recall": 1.0,
+          "precision": 0.47058823529411764
+        },
+        {
+          "recall": 1.0,
+          "precision": 0.5
+        },
+        {
+          "recall": 0.875,
+          "precision": 0.4666666666666667
+        },
+        {
+          "recall": 0.875,
+          "precision": 0.5
+        },
+        {
+          "recall": 0.875,
+          "precision": 0.5384615384615384
+        },
+        {
+          "recall": 0.875,
+          "precision": 0.5833333333333334
+        },
+        {
+          "recall": 0.75,
+          "precision": 0.5454545454545454
+        },
+        {
+          "recall": 0.75,
+          "precision": 0.6
+        },
+        {
+          "recall": 0.75,
+          "precision": 0.6666666666666666
+        },
+        {
+          "recall": 0.625,
+          "precision": 0.625
+        },
+        {
+          "recall": 0.625,
+          "precision": 0.7142857142857143
+        },
+        {
+          "recall": 0.5,
+          "precision": 0.6666666666666666
+        },
+        {
+          "recall": 0.375,
+          "precision": 0.6
+        },
+        {
+          "recall": 0.375,
+          "precision": 0.75
+        },
+        {
+          "recall": 0.25,
+          "precision": 0.6666666666666666
+        },
+        {
+          "recall": 0.25,
+          "precision": 1.0
+        },
+        {
+          "recall": 0.125,
+          "precision": 1.0
+        },
+        {
+          "recall": 0.0,
+          "precision": 1.0
+        }
+      ],
+      "average_precision": 0.7351,
+      "provenance": {
+        "prediction_source": "unregistered_refit",
+        "evaluation_partition": "test",
+        "rows": 18,
+        "dataset_sha256": "6c477067c75ad6a70ccba4dad0437b53b02e8a79366c129b8329b30bead2ca8a",
+        "test_index_sha256": "dff211212fcf29b0558e6fd602db6b9f6e07a1db93dbbb286d60879d4e56074a"
+      }
+    },
+    "confusion_matrix": {
+      "labels": [
+        0,
+        1
+      ],
+      "matrix": [
+        [
+          9,
+          1
+        ],
+        [
+          5,
+          3
+        ]
+      ]
+    },
+    "threshold_selection": {
+      "threshold": 0.83,
+      "source": "metrics_threshold_used",
+      "provenance": {
+        "method": "f1_max",
+        "value": 0.83,
+        "source_partition": "validation",
+        "rows": 18,
+        "positives": 7,
+        "degraded": false,
+        "validation_f1": 1.0,
+        "reason": "F1-maximising threshold selected on the validation partition (test rows not used)."
+      }
+    },
+    "score_distribution": {
+      "bins": [
+        {
+          "bin": "0.00-0.03",
+          "good": 3,
+          "bad": 1
+        },
+        {
+          "bin": "0.03-0.05",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.08-0.10",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.12-0.15",
+          "good": 0,
+          "bad": 1
+        },
+        {
+          "bin": "0.15-0.18",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.23-0.25",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.30-0.33",
+          "good": 0,
+          "bad": 1
+        },
+        {
+          "bin": "0.40-0.43",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.65-0.68",
+          "good": 0,
+          "bad": 1
+        },
+        {
+          "bin": "0.68-0.70",
+          "good": 0,
+          "bad": 1
+        },
+        {
+          "bin": "0.73-0.75",
+          "good": 1,
+          "bad": 0
+        },
+        {
+          "bin": "0.90-0.93",
+          "good": 0,
+          "bad": 1
+        },
+        {
+          "bin": "0.93-0.95",
+          "good": 1,
+          "bad": 1
+        },
+        {
+          "bin": "0.95-0.98",
+          "good": 0,
+          "bad": 1
+        }
+      ]
+    },
+    "calibration_chart": {
+      "points": [
+        {
+          "bin": "(0.00546, 0.00896]",
+          "actual_rate": 0.0,
+          "predicted_rate": 0.007420263020321727,
+          "n": 2
+        },
+        {
+          "bin": "(0.00896, 0.0219]",
+          "actual_rate": 0.5,
+          "predicted_rate": 0.01434184331446886,
+          "n": 2
+        },
+        {
+          "bin": "(0.0219, 0.0844]",
+          "actual_rate": 0.0,
+          "predicted_rate": 0.051519631408154964,
+          "n": 2
+        },
+        {
+          "bin": "(0.0844, 0.166]",
+          "actual_rate": 1.0,
+          "predicted_rate": 0.14613544940948486,
+          "n": 1
+        },
+        {
+          "bin": "(0.166, 0.278]",
+          "actual_rate": 0.0,
+          "predicted_rate": 0.2010539546608925,
+          "n": 2
+        },
+        {
+          "bin": "(0.278, 0.462]",
+          "actual_rate": 0.5,
+          "predicted_rate": 0.3693391680717468,
+          "n": 2
+        },
+        {
+          "bin": "(0.462, 0.679]",
+          "actual_rate": 1.0,
+          "predicted_rate": 0.6516876220703125,
+          "n": 1
+        },
+        {
+          "bin": "(0.679, 0.839]",
+          "actual_rate": 0.5,
+          "predicted_rate": 0.7106129825115204,
+          "n": 2
+        },
+        {
+          "bin": "(0.839, 0.934]",
+          "actual_rate": 0.5,
+          "predicted_rate": 0.9170658886432648,
+          "n": 2
+        },
+        {
+          "bin": "(0.934, 0.964]",
+          "actual_rate": 1.0,
+          "predicted_rate": 0.9550781548023224,
+          "n": 2
+        }
+      ]
+    },
+    "train_test_auc_gap": {
+      "cv_mean_auc": 0.7317,
+      "test_auc": 0.7375,
+      "gap": 0.0058,
+      "status": "PASS"
+    },
+    "metric_checks": [
+      {
+        "check": "ROC-AUC",
+        "threshold": ">= 0.70",
+        "status": "PASS",
+        "value": 0.7375
+      },
+      {
+        "check": "Gini",
+        "threshold": ">= 0.40",
+        "status": "PASS",
+        "value": 0.475
+      },
+      {
+        "check": "Recall",
+        "threshold": ">= 0.60",
+        "status": "FAIL",
+        "value": 0.375
+      },
+      {
+        "check": "Precision",
+        "threshold": ">= 0.50",
+        "status": "PASS",
+        "value": 0.75
+      },
+      {
+        "check": "F1 Score",
+        "threshold": ">= 0.55",
+        "status": "FAIL",
+        "value": 0.5
+      },
+      {
+        "check": "Brier Score",
+        "threshold": "< 0.25",
+        "status": "PASS",
+        "value": 0.2263
+      },
+      {
+        "check": "PR-AUC",
+        "threshold": ">= 0.30",
+        "status": "PASS",
+        "value": 0.7351
+      },
+      {
+        "check": "KS Statistic",
+        "threshold": ">= 0.30",
+        "status": "PASS",
+        "value": 0.45
+      }
+    ],
+    "compliance_findings": [
+      {
+        "check_id": "5.1",
+        "stage": "Stage 5: Performance Validation",
+        "title": "ROC-AUC \u2265 0.70",
+        "source": "SS1/23",
+        "principle": "P4.1",
+        "severity": "HIGH",
+        "status": "WARN",
+        "observed": "ROC-AUC \u2265 0.70 not stated in MDD \u2014 cannot verify",
+        "threshold": "ROC-AUC \u2265 0.70 on independent test set",
+        "detail": "Cross-reference against independently replicated metric in Stage 4",
+        "mdd_reference": null,
+        "check_type": "cross_reference"
+      },
+      {
+        "check_id": "5.2",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Recall \u2265 0.60",
+        "source": "SS1/23",
+        "principle": "P4.4",
+        "severity": "HIGH",
+        "status": "WARN",
+        "observed": "Recall \u2265 0.60 not stated in MDD \u2014 cannot verify",
+        "threshold": "Recall \u2265 0.60",
+        "detail": "Cross-reference against independently replicated metric in Stage 4",
+        "mdd_reference": null,
+        "check_type": "cross_reference"
+      },
+      {
+        "check_id": "5.3",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Gini \u2265 0.40",
+        "source": "SS11/13",
+        "principle": "\u00a710.3",
+        "severity": "HIGH",
+        "status": "WARN",
+        "observed": "Gini \u2265 0.40 not stated in MDD \u2014 cannot verify",
+        "threshold": "Gini \u2265 0.40",
+        "detail": "Cross-reference against independently replicated metric in Stage 4",
+        "mdd_reference": null,
+        "check_type": "cross_reference"
+      },
+      {
+        "check_id": "5.4",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Brier Score < 0.25",
+        "source": "SS11/13",
+        "principle": "\u00a710.5",
+        "severity": "HIGH",
+        "status": "WARN",
+        "observed": "Brier Score < 0.25 not stated in MDD \u2014 cannot verify",
+        "threshold": "Brier Score < 0.25",
+        "detail": "Cross-reference against independently replicated metric in Stage 4",
+        "mdd_reference": null,
+        "check_type": "cross_reference"
+      },
+      {
+        "check_id": "5.5",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Train/Test AUC Gap \u2264 0.10",
+        "source": "SS1/23",
+        "principle": "P4.4",
+        "severity": "MEDIUM",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS1/23 P4.4",
+        "detail": "This check requires manual review by the validator. Refer to SS1/23 P4.4.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.6",
+        "stage": "Stage 5: Performance Validation",
+        "title": "PR-AUC \u2265 0.30",
+        "source": "SS1/23",
+        "principle": "P3.3",
+        "severity": "MEDIUM",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS1/23 P3.3",
+        "detail": "This check requires manual review by the validator. Refer to SS1/23 P3.3.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.7",
+        "stage": "Stage 5: Performance Validation",
+        "title": "KS Statistic Computed",
+        "source": "SS11/13",
+        "principle": "\u00a710.3",
+        "severity": "MEDIUM",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS11/13 \u00a710.3",
+        "detail": "This check requires manual review by the validator. Refer to SS11/13 \u00a710.3.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.8",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Calibration Test Performed",
+        "source": "SS11/13",
+        "principle": "\u00a710.5",
+        "severity": "HIGH",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS11/13 \u00a710.5",
+        "detail": "This check requires manual review by the validator. Refer to SS11/13 \u00a710.5.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.9",
+        "stage": "Stage 5: Performance Validation",
+        "title": "SHAP Explainability Outputs Reviewed",
+        "source": "SS1/23",
+        "principle": "P4.2",
+        "severity": "HIGH",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS1/23 P4.2",
+        "detail": "This check requires manual review by the validator. Refer to SS1/23 P4.2.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.10",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Decision Threshold Justified",
+        "source": "SS1/23",
+        "principle": "P5.1",
+        "severity": "MEDIUM",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS1/23 P5.1",
+        "detail": "This check requires manual review by the validator. Refer to SS1/23 P5.1.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      },
+      {
+        "check_id": "5.11",
+        "stage": "Stage 5: Performance Validation",
+        "title": "Sensitivity Analysis Performed",
+        "source": "SS1/23",
+        "principle": "P4.3",
+        "severity": "MEDIUM",
+        "status": "PENDING",
+        "observed": "Manual validation required \u2014 not yet automated",
+        "threshold": "See SS1/23 P4.3",
+        "detail": "This check requires manual review by the validator. Refer to SS1/23 P4.3.",
+        "mdd_reference": null,
+        "check_type": "manual"
+      }
+    ],
+    "threshold_analysis": [
+      {
+        "threshold": 0.01,
+        "precision": 0.4666666666666667,
+        "recall": 0.875,
+        "f1": 0.6086956521739131
+      },
+      {
+        "threshold": 0.02,
+        "precision": 0.5,
+        "recall": 0.875,
+        "f1": 0.6363636363636364
+      },
+      {
+        "threshold": 0.03,
+        "precision": 0.5384615384615384,
+        "recall": 0.875,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.04,
+        "precision": 0.5384615384615384,
+        "recall": 0.875,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.05,
+        "precision": 0.5384615384615384,
+        "recall": 0.875,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.06,
+        "precision": 0.5384615384615384,
+        "recall": 0.875,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.07,
+        "precision": 0.5384615384615384,
+        "recall": 0.875,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.08,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.09,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.1,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.11,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.12,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.13,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.14,
+        "precision": 0.5833333333333334,
+        "recall": 0.875,
+        "f1": 0.7
+      },
+      {
+        "threshold": 0.15,
+        "precision": 0.5454545454545454,
+        "recall": 0.75,
+        "f1": 0.631578947368421
+      },
+      {
+        "threshold": 0.16,
+        "precision": 0.5454545454545454,
+        "recall": 0.75,
+        "f1": 0.631578947368421
+      },
+      {
+        "threshold": 0.17,
+        "precision": 0.5454545454545454,
+        "recall": 0.75,
+        "f1": 0.631578947368421
+      },
+      {
+        "threshold": 0.18,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.19,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.2,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.21,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.22,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.23,
+        "precision": 0.6,
+        "recall": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.24,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.25,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.26,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.27,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.28,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.29,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.3,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.31,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.32,
+        "precision": 0.6666666666666666,
+        "recall": 0.75,
+        "f1": 0.7058823529411765
+      },
+      {
+        "threshold": 0.33,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.34,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.35,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.36,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.37,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.38,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.39,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.4,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.41,
+        "precision": 0.625,
+        "recall": 0.625,
+        "f1": 0.625
+      },
+      {
+        "threshold": 0.42,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.43,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.44,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.45,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.46,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.47,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.48,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.49,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.5,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.51,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.52,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.53,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.54,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.55,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.56,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.57,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.58,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.59,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.6,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.61,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.62,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.63,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.64,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.65,
+        "precision": 0.7142857142857143,
+        "recall": 0.625,
+        "f1": 0.6666666666666666
+      },
+      {
+        "threshold": 0.66,
+        "precision": 0.6666666666666666,
+        "recall": 0.5,
+        "f1": 0.5714285714285714
+      },
+      {
+        "threshold": 0.67,
+        "precision": 0.6666666666666666,
+        "recall": 0.5,
+        "f1": 0.5714285714285714
+      },
+      {
+        "threshold": 0.68,
+        "precision": 0.6666666666666666,
+        "recall": 0.5,
+        "f1": 0.5714285714285714
+      },
+      {
+        "threshold": 0.69,
+        "precision": 0.6,
+        "recall": 0.375,
+        "f1": 0.46153846153846156
+      },
+      {
+        "threshold": 0.7,
+        "precision": 0.6,
+        "recall": 0.375,
+        "f1": 0.46153846153846156
+      },
+      {
+        "threshold": 0.71,
+        "precision": 0.6,
+        "recall": 0.375,
+        "f1": 0.46153846153846156
+      },
+      {
+        "threshold": 0.72,
+        "precision": 0.6,
+        "recall": 0.375,
+        "f1": 0.46153846153846156
+      },
+      {
+        "threshold": 0.73,
+        "precision": 0.6,
+        "recall": 0.375,
+        "f1": 0.46153846153846156
+      },
+      {
+        "threshold": 0.74,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.75,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.76,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.77,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.78,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.79,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.8,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.81,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.82,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.83,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.84,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.85,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.86,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.87,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.88,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.89,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.9,
+        "precision": 0.75,
+        "recall": 0.375,
+        "f1": 0.5
+      },
+      {
+        "threshold": 0.91,
+        "precision": 0.6666666666666666,
+        "recall": 0.25,
+        "f1": 0.36363636363636365
+      },
+      {
+        "threshold": 0.92,
+        "precision": 0.6666666666666666,
+        "recall": 0.25,
+        "f1": 0.36363636363636365
+      },
+      {
+        "threshold": 0.93,
+        "precision": 1.0,
+        "recall": 0.25,
+        "f1": 0.4
+      },
+      {
+        "threshold": 0.94,
+        "precision": 1.0,
+        "recall": 0.25,
+        "f1": 0.4
+      },
+      {
+        "threshold": 0.95,
+        "precision": 1.0,
+        "recall": 0.125,
+        "f1": 0.2222222222222222
+      },
+      {
+        "threshold": 0.96,
+        "precision": 1.0,
+        "recall": 0.125,
+        "f1": 0.2222222222222222
+      },
+      {
+        "threshold": 0.97,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      {
+        "threshold": 0.98,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      {
+        "threshold": 0.99,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    ],
+    "evaluation_consistency": {
+      "status": "PASS",
+      "test_rows": 18,
+      "test_positives": 8,
+      "confusion_matrix_total": 18,
+      "derived_from_confusion_matrix": {
+        "accuracy": 0.6667,
+        "precision": 0.75,
+        "recall": 0.375
+      },
+      "threshold_used": 0.83,
+      "detail": "Confusion matrix, threshold metrics and test set agree."
+    },
+    "reference_metrics": {
+      "values": {},
+      "sources": {},
+      "source_labels": {},
+      "verification": {},
+      "verification_labels": {},
+      "replacements": [],
+      "warnings": []
+    },
+    "metric_provenance": {
+      "schema_version": 2,
+      "metrics": "computed_from_model_predictions",
+      "reference_metrics": "none_supplied",
+      "reference_overrides_computed": false,
+      "reference_source_verification": {
+        "server_verified": [],
+        "browser_reported": []
+      }
+    }
+  }
+}

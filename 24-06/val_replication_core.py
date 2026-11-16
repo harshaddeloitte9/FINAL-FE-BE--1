@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, roc_curve
 
 from utils import detect_column_types, detect_target_candidates, detect_task_type
-from preprocessing_new import build_preprocessing_report, prepare_data, rebuild_preprocessor_for
+from preprocessing_new import build_preprocessing_report, finalize_xy, rebuild_preprocessor_for
 import split_integrity as si
 import stability_checks as stability
 
@@ -40,7 +40,7 @@ def _temporal_evidence(df: pd.DataFrame, y_test, y_proba, criteria: Dict[str, An
         return {"available": False, "reason": f"Time-based comparison failed: {type(exc).__name__}: {exc}"}
 from feature_engineering import analyze_for_feature_engineering, apply_feature_engineering
 from train_new import split_data, compute_split_stats, train_model
-from evaluate_new import compute_binary_metrics
+from evaluate_new import compute_binary_metrics, select_operating_threshold
 from model_selector import CLASSIFICATION_MODELS
 from explainability import extract_feature_importance
 
@@ -99,6 +99,7 @@ _MDD_METRIC_PATTERNS: List = [
     ("mdd_precision", [r"precision[\s:=]+([0-9]\.[0-9]{2,4})", r"positive predictive value[\s:=]+([0-9]\.[0-9]{2,4})", r"ppv[\s:=]+([0-9]\.[0-9]{2,4})"]),
     ("mdd_recall", [r"recall[\s:=]+([0-9]\.[0-9]{2,4})", r"sensitivity[\s:=]+([0-9]\.[0-9]{2,4})", r"true positive rate[\s:=]+([0-9]\.[0-9]{2,4})", r"tpr[\s:=]+([0-9]\.[0-9]{2,4})"]),
     ("mdd_f1", [r"f[\s\-]?1[\s\-]?(?:score)?[\s:=]+([0-9]\.[0-9]{2,4})", r"f[\s\-]?measure[\s:=]+([0-9]\.[0-9]{2,4})"]),
+    ("mdd_brier_score", [r"brier[\s\-]?score[\s:=]+([0-9]\.[0-9]{2,4})"]),
 ]
 
 
@@ -114,6 +115,7 @@ def extract_metrics_from_mdd(mdd_text: str) -> Dict[str, Optional[float]]:
         "mdd_precision":  "precision",
         "mdd_recall":     "recall",
         "mdd_f1":         "f1",
+        "mdd_brier_score": "brier_score",
     }
     for ss_key, patterns in _MDD_METRIC_PATTERNS:
         result_key = _key_map[ss_key]
@@ -214,6 +216,7 @@ def _fit_core(
     cv_folds: int,
     use_feature_engineering: bool = False,
     model_params: Optional[Dict[str, Any]] = None,
+    operating_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Shared train/split/fit core used by both full replication and the
     lighter-weight bias check — factored out so a bias-check run doesn't
@@ -236,17 +239,27 @@ def _fit_core(
     """
     col_types = detect_column_types(df)
     task_type = detect_task_type(df[target_col])
-    X, y, _, prep_report, _ = prepare_data(df, col_types, target_col)
+    X, y, _ = finalize_xy(df, col_types, target_col)
 
+    split_report: Dict[str, Any] = {}
     X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test = split_data(
         X, y,
         test_size=test_size,
         val_size=val_size,
         task_type=task_type,
         random_state=random_seed,
+        report=split_report,
     )
     split_stats = compute_split_stats(
         X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test
+    )
+
+    # Build the preprocessing design from the TRAIN split only. This is the
+    # leak that previously caused the S3 train/test separation failure: a full-
+    # dataset report was being computed before the split and then reused during
+    # validation/test scoring.
+    prep_report = build_preprocessing_report(
+        X_train_raw.assign(**{target_col: y_train}), col_types, target_col
     )
 
     import copy as _copy
@@ -299,14 +312,15 @@ def _fit_core(
     if y_proba is None:
         raise RuntimeError("Model does not support predict_proba — AUC cannot be computed.")
 
-    metrics = compute_binary_metrics(
-        y_test.values, y_pred, y_proba_2d,
-        # None auto-selects the F1-maximizing threshold, same as production
-        # training/evaluation (see main.py's _build_metrics_and_eval_data) —
-        # a hardcoded 0.5 cut-off here would make replicated accuracy/
-        # precision/recall/F1 diverge from what was actually reported.
-        threshold=None,
+    # The operating threshold is chosen on the validation partition (never
+    # on the test rows it is then evaluated on), unless the caller fixes it.
+    threshold_provenance = select_operating_threshold(
+        y_val.values, _proba_2d(pipeline, X_val), manual=operating_threshold,
     )
+    metrics = compute_binary_metrics(
+        y_test.values, y_pred, y_proba_2d, threshold=threshold_provenance["value"],
+    )
+    metrics["threshold_provenance"] = threshold_provenance
     try:
         metrics["roc_auc"] = round(float(roc_auc_score(y_test.values, y_proba)), 4)
     except Exception:
@@ -323,7 +337,8 @@ def _fit_core(
         "model_cls": model_cls, "default_params": merged_params,
         "pipeline": pipeline, "training_info": training_info,
         "y_proba": y_proba, "y_pred": y_pred,
-        "metrics": metrics, "split_stats": split_stats,
+        "metrics": metrics, "split_stats": split_stats, "split_report": split_report,
+        "threshold_provenance": threshold_provenance,
         "use_feature_engineering": use_feature_engineering,
         "model_params_used": merged_params,
         # Evidence for R4.7 (split_integrity): the validation split, the
@@ -396,6 +411,7 @@ def run_replication(
     model_params: Optional[Dict[str, Any]] = None,
     compute_seed_stability: bool = True,
     compute_split_integrity: bool = True,
+    dataset_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Wraps the original _run_replication but returns JSON-serializable outputs
     out = {
@@ -439,6 +455,9 @@ def run_replication(
         pipeline = fit["pipeline"]
         y_proba, y_pred, metrics = fit["y_proba"], fit["y_pred"], fit["metrics"]
         out["split_stats"] = fit["split_stats"]
+        out["split_report"] = fit["split_report"]
+        out["threshold_provenance"] = fit["threshold_provenance"]
+        out["X_val"], out["y_val"] = fit["X_val"], fit["y_val"]
 
         # Feature importance of the replicated model, exposed so Stage 7
         # (Explainability & Fairness) can chart it without re-running
@@ -526,7 +545,12 @@ def run_replication(
             )
             if _proba_1d(pipe_s, Xte_fe_s) is None:
                 raise RuntimeError("Model returned no predicted probabilities.")
-            return stability.evaluate_run(s, pipe_s, Xtr_fe_s, Xte_fe_s, yte_s, criteria)
+            return stability.evaluate_run(s, pipe_s, Xtr_fe_s, Xte_fe_s, yte_s, criteria, context=run_context)
+
+        # Identity recorded with every seed execution (an unregistered refit
+        # always uses the seeded stratified random split).
+        run_context = {"split_strategy": "stratified_random", "dataset_sha256": dataset_sha256,
+                       "registered_model_id": None, "training_run_id": None}
 
         if compute_seed_stability:
             criteria = stability.load_criteria()
@@ -534,17 +558,18 @@ def run_replication(
                 try:
                     seed_runs.append(_seed_execution(s))
                 except Exception as exc:
-                    seed_runs.append(stability.failed_run(s, exc))
+                    seed_runs.append(stability.failed_run(s, exc, context=run_context))
             first_ok = next((r for r in seed_runs if r["status"] == "COMPLETED"), None)
             repeat = None
             if first_ok is not None:
                 try:
                     repeat = _seed_execution(first_ok["seed"])
                 except Exception as exc:
-                    repeat = stability.failed_run(first_ok["seed"], exc)
+                    repeat = stability.failed_run(first_ok["seed"], exc, context=run_context)
             r46c = criteria["r46"]
             out["stability"] = {
                 "runs": seed_runs,
+                "independence": stability.seed_run_independence(seed_runs, "stratified_random"),
                 "determinism": stability.determinism_check(first_ok, repeat),
                 # The model's own test-set AUC with a stratified-bootstrap CI.
                 "main_evaluation": stability.stratified_bootstrap_auc(
@@ -648,16 +673,57 @@ def run_bias_check(
 
     try:
         fit = _fit_core(df, target_col, model_name, test_size, val_size, random_seed, cv_folds)
-        y_test = fit["y_test"]
-        y_proba = fit["y_proba"]
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    return bias_from_predictions(df, fit["y_test"], fit["y_proba"], protected_col)
 
+
+def _bucket_protected_values(series: pd.Series) -> pd.Series:
+    """Bucket continuous protected characteristics into ranges before assessing AUC gaps.
+
+    Exact-value comparisons for variables such as age create one group per unique
+    value and make the fairness check effectively meaningless when age is a true
+    continuous field. If the field is numeric-like and has many distinct values,
+    group it into a small number of quantile bins instead.
+    """
+    raw = series.copy()
+    if raw.empty:
+        return raw.astype(str)
+
+    numeric = pd.to_numeric(raw, errors="coerce")
+    if numeric.notna().sum() > 0 and numeric.nunique() > 8:
+        q = min(5, int(numeric.nunique()))
+        bins = pd.qcut(numeric, q=q, duplicates="drop", precision=1)
+        out = pd.Series("Unknown", index=raw.index, dtype=object)
+        valid = bins.notna()
+        out.loc[valid] = bins[valid].astype(str)
+        out.loc[numeric.isna()] = "Unknown"
+        return out
+    return raw.fillna("Unknown").astype(str)
+
+
+def bias_from_predictions(df: pd.DataFrame, y_test: pd.Series, y_proba, protected_col: str) -> Dict[str, Any]:
+    """AUC per protected group on given test rows and predictions — the
+    registered model's own (from its scoring bundle) or an independent
+    refit's. y_test's index identifies the rows in df."""
+    out: Dict[str, Any] = {
+        "success": False,
+        "error": None,
+        "protected_columns": detect_protected_columns(df),
+        "bias_col": protected_col,
+        "rows": [],
+        "check": None,
+    }
+    try:
+        y_proba = np.asarray(y_proba)
         if protected_col not in df.columns:
             out["error"] = f"Column '{protected_col}' not found in dataset."
             return out
 
         test_idx = y_test.index
-        bias_vals = df.loc[test_idx, protected_col].fillna("Unknown").astype(str)
-        groups = sorted(bias_vals.unique())
+        bias_vals = _bucket_protected_values(df.loc[test_idx, protected_col])
+        groups = list(pd.Index(bias_vals.unique()))
 
         rows = []
         excluded_groups = []
@@ -821,7 +887,18 @@ def evaluate_replication_checks(
     # a result without it (older runs, or seeds not run) is NOT_ASSESSED.
     stab = result.get("stability")
     ablation_runs = result.get("ablation_runs") or []
-    if isinstance(stab, dict) and stab.get("runs") is not None:
+    independence = stab.get("independence") if isinstance(stab, dict) else None
+    if isinstance(stab, dict) and stab.get("runs") is not None and not (independence or {}).get("independent"):
+        # Repeated evaluation of identical (or unrecorded) test rows is not
+        # independent evidence: never PASS on it (G1).
+        reason = (independence or {}).get("reason") or \
+            "Seed runs did not record the test rows they evaluated, so their independence cannot be verified."
+        for cid in ("R4.5", "R4.6"):
+            check = stability.not_assessed(cid, reason)
+            check["_independence"] = independence
+            check["_runs"] = stab.get("runs")
+            checks.append(check)
+    elif isinstance(stab, dict) and stab.get("runs") is not None:
         criteria = stability.load_criteria()
         main_eval = stab.get("main_evaluation") or {}
         removal = stability.removal_diagnostics(ablation_runs, main_eval.get("se") if main_eval.get("available") else None, criteria)

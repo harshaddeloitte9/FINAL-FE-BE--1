@@ -22,6 +22,7 @@ _FRAMEWORK_ALIASES = {
     "IFRS9": ["ifrs 9", "ifrs9"],
     "SS1/23": ["ss1/23"],
     "RBI": ["rbi", "chapter iv", "regulatory principles for model risk management"],
+    "RBI Model Risk Management": ["rbi", "rbi model risk management", "chapter iv", "regulatory principles for model risk management"],
 }
 
 
@@ -240,6 +241,7 @@ class Agent2:
         stage: str | None = None,
         only_rule_ids: list[str] | None = None,
         frameworks: list[str] | None = None,
+        skip_reason: str = "No document uploaded yet.",
     ) -> list[dict]:
         """
         LLM-based conceptual/qualitative rule check.
@@ -286,12 +288,13 @@ class Agent2:
         early_return = not doc_text
 
         if early_return:
-            # No document uploaded yet — surface every candidate rule as
-            # PENDING so the "RAG Agent Rules" column still lists them
-            # (mirrors check_mdd_keywords' behaviour with empty mdd_text).
+            # Not run: surface every candidate rule as PENDING (skipped) so
+            # the "RAG Agent Rules" column still lists them. `skip_reason`
+            # says why — callers that defer the LLM call to a follow-up
+            # request pass their own reason instead of claiming no document.
             return [
-                self._llm_finding(rule, status="PENDING", observed="No document uploaded yet.",
-                                   reasoning="", check_source="llm")
+                self._llm_finding(rule, status="PENDING", observed=skip_reason,
+                                   reasoning="", check_source="llm_skipped")
                 for rule in candidate_rules
             ]
 
@@ -312,10 +315,11 @@ class Agent2:
             verdicts_by_id, verdicts_by_index, verdicts_in_order = self._parse_llm_verdicts(completion)
 
         except (LLMProviderError, ValueError) as exc:
-            # Providers failed, response empty, or invalid JSON — return WARN for all rules
+            # Providers failed, response empty, or invalid JSON — the rules were
+            # not assessed (NOT_ASSESSED, not a WARN finding).
             for rule in candidate_rules:
                 results.append(self._llm_finding(
-                    rule, status="WARN", observed=f"LLM check unavailable: {exc}",
+                    rule, status="NOT_ASSESSED", observed=f"LLM check failed — not assessed: {exc}",
                     reasoning="", check_source="llm_error",
                 ))
             return results
@@ -330,7 +334,7 @@ class Agent2:
             )
             for rule in candidate_rules:
                 results.append(self._llm_finding(
-                    rule, status="WARN", observed=diag,
+                    rule, status="NOT_ASSESSED", observed=diag,
                     reasoning="", check_source="llm_error",
                 ))
             return results
@@ -351,14 +355,21 @@ class Agent2:
                     f"IDs seen: {got_ids[:8]}"
                 )
                 results.append(self._llm_finding(
-                    rule, status="WARN", observed=diag,
+                    rule, status="NOT_ASSESSED", observed=diag,
                     reasoning="", check_source="llm_error",
                 ))
                 continue
 
-            status = str(verdict.get("status", "WARN")).upper()
+            status = str(verdict.get("status", "")).upper()
             if status not in ("PASS", "WARN", "FAIL"):
-                status = "WARN"
+                # An unrecognised or missing verdict is not a WARN finding;
+                # the rule was not assessed.
+                results.append(self._llm_finding(
+                    rule, status="NOT_ASSESSED",
+                    observed=f"LLM ({provider_used}) returned no usable verdict (status {verdict.get('status')!r}).",
+                    reasoning=verdict.get("reasoning", ""), check_source="llm_error",
+                ))
+                continue
             evidence = str(verdict.get("evidence") or "").strip()
             if not evidence:
                 evidence = "Not found" if status == "FAIL" else "LLM gave a verdict but no supporting evidence text."
@@ -376,7 +387,13 @@ class Agent2:
 
     @staticmethod
     def _llm_finding(rule: dict, status: str, observed: str, reasoning: str, check_source: str) -> dict:
+        # execution_status separates what happened to the LLM call from the
+        # verdict: executed (the LLM returned a usable verdict), failed (no
+        # usable verdict — reported as NOT_ASSESSED, never as WARN/PASS), or
+        # skipped (not run yet / nothing to review).
+        execution_status = {"llm_error": "failed", "llm_skipped": "skipped"}.get(check_source, "executed")
         return {
+            "execution_status": execution_status,
             "check_id":       rule.get("id", rule.get("check", "?")),
             "title":          rule.get("rule", rule.get("flag", "")),
             "severity":       rule.get("severity", "medium"),

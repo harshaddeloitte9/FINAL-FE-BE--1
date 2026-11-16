@@ -26,21 +26,52 @@ automatically appear in /history/dev, /history/validation, /history/latest,
 """
 
 import csv
+import hashlib
 import json
+import os
 import re
+import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 import traceback
 
-BACKEND_DIR = Path(__file__).resolve().parent
+REAL_BACKEND_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = REAL_BACKEND_DIR
 APP_DATA_DIR = BACKEND_DIR / "app_data"
 ARTIFACTS_DIR = APP_DATA_DIR / "artifacts"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def set_test_storage_root(root: Path):
+    """Switch all storage paths to the pytest temp directory while preserving the real app paths outside tests."""
+    root = Path(root)
+    global BACKEND_DIR, APP_DATA_DIR, ARTIFACTS_DIR
+    BACKEND_DIR = root
+    APP_DATA_DIR = root / "app_data"
+    ARTIFACTS_DIR = APP_DATA_DIR / "artifacts"
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["AEGIS_TEST_STORAGE_ROOT"] = str(root)
+
+
+def _is_pytest_session():
+    return os.environ.get("AEGIS_TEST_STORAGE_ROOT") is not None
+
+
+def _assert_write_allowed(path: Optional[Path | str] = None):
+    """Reject writes aimed at the real app_data tree during pytest."""
+    if not _is_pytest_session():
+        return
+    target = Path(path) if path is not None else APP_DATA_DIR
+    resolved = target.resolve(strict=False)
+    real_app_data = REAL_BACKEND_DIR / "app_data"
+    if resolved == real_app_data or real_app_data in resolved.parents:
+        raise RuntimeError(f"pytest attempted to write to the real app_data directory: {resolved}")
 
 DEV_PIPELINE_LOG = "dev_pipeline_log.csv"
 VALIDATION_PIPELINE_LOG = "validation_pipeline_log.csv"
@@ -48,33 +79,141 @@ MODEL_INVENTORY_FILENAME = "model_inventory.json"
 
 _FIELDNAMES = ["run_id", "timestamp", "stage", "summary", "artifact_path"]
 
+# ── Run identity / record format ────────────────────────────────────────────
+# Every row written from now on carries summary["record_version"]. Rows
+# without it were written before run-identity tracking and are LEGACY: they
+# are preserved and still listed, but never selected as the latest valid run
+# unless a caller explicitly asks to include legacy rows.
+RECORD_FORMAT_VERSION = 4
+LEGACY_RECORD_REASON = (
+    "Recorded before run-identity tracking; its model, dataset and evidence cannot be verified."
+)
+
+# The only log files history endpoints may read, and the stage names each
+# one is written with. Anything else is rejected rather than silently
+# returning nothing (or reading an arbitrary file).
+LOG_STAGES: Dict[str, set] = {
+    DEV_PIPELINE_LOG: {"data_upload", "preprocessing", "feature_engineering", "training", "evaluation", "explainability",
+                       "registration"},
+    VALIDATION_PIPELINE_LOG: {"intake", "data_validation", "conceptual_soundness", "replication", "performance",
+                              "stress_testing", "fair_lending_bias", "findings", "independence_attestation",
+                              "governance_attestation"},
+}
+# Stage names that existed in older versions of the app. Their rows are kept
+# as history, but a lookup by the old name is refused with the current name.
+LEGACY_STAGE_NAMES: Dict[str, str] = {"benchmarking": "performance"}
+
+
+class HistoryRequestError(ValueError):
+    """Invalid log file or stage name in a history request."""
+
+
+def validate_history_request(log_file: str, stage: Optional[str] = None) -> None:
+    if log_file not in LOG_STAGES:
+        raise HistoryRequestError(f"Unknown log file '{log_file}'. Allowed: {sorted(LOG_STAGES)}.")
+    if stage is None:
+        return
+    if stage in LEGACY_STAGE_NAMES and stage not in LOG_STAGES[log_file]:
+        raise HistoryRequestError(
+            f"Stage '{stage}' is a legacy name that is no longer written; current runs use "
+            f"'{LEGACY_STAGE_NAMES[stage]}'. Rows saved under '{stage}' are kept as legacy history only."
+        )
+    if stage not in LOG_STAGES[log_file]:
+        raise HistoryRequestError(f"Unknown stage '{stage}' for {log_file}. Known stages: {sorted(LOG_STAGES[log_file])}.")
+
+
+def record_status(row: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+    try:
+        version = int(summary.get("record_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if row.get("stage") in LEGACY_STAGE_NAMES:
+        return {"record_status": "legacy", "record_status_reason":
+                f"Saved under the retired stage name '{row.get('stage')}'. " + LEGACY_RECORD_REASON}
+    if version >= RECORD_FORMAT_VERSION:
+        return {"record_status": "current", "record_status_reason": None}
+    return {"record_status": "legacy", "record_status_reason": LEGACY_RECORD_REASON}
+
+
+def normalize_dataset_name(name: Any) -> Optional[str]:
+    """'Demo A dataset' and 'Demo A dataset.csv' are the same dataset name."""
+    if name in (None, ""):
+        return None
+    text = str(name).strip()
+    for ext in (".csv", ".xlsx", ".xls"):
+        if text.lower().endswith(ext):
+            text = text[: -len(ext)]
+            break
+    return text.strip().casefold() or None
+
+
+class ImmutableArtifactError(Exception):
+    """A run artifact already exists; run artifacts are written once and never
+    overwritten (later facts, e.g. registration, are logged as new events)."""
+
+
+def artifact_sha256(rel_path: Optional[str]) -> Optional[str]:
+    """SHA-256 of a saved run artifact (relative to the backend folder)."""
+    if not rel_path:
+        return None
+    path = BACKEND_DIR / rel_path
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 def save_artifact(log_file: str, stage: str, run_id: str, full_payload: dict) -> str:
+    """Write a run's artifact exactly once. An existing artifact is never
+    overwritten (ImmutableArtifactError), so its recorded hash stays valid."""
     log_stem = Path(log_file).stem
     artifact_dir = ARTIFACTS_DIR / log_stem / stage
+    _assert_write_allowed(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / f"{run_id}.json"
-    artifact_path.write_text(json.dumps(full_payload, default=str, indent=2), encoding="utf-8")
+    data = json.dumps(full_payload, default=str, indent=2)
+    try:
+        with open(artifact_path, "x", encoding="utf-8") as fh:   # exclusive create: fails if it exists
+            fh.write(data)
+    except FileExistsError:
+        raise ImmutableArtifactError(
+            f"Artifact for run {run_id} ({stage}) already exists; run artifacts are immutable.")
     return str(artifact_path.relative_to(BACKEND_DIR))
 
 
-def log_event(log_file: str, stage: str, payload: dict, full_payload: Optional[dict] = None) -> str:
-    run_id = str(uuid.uuid4())
+def log_event(
+    log_file: str,
+    stage: str,
+    payload: dict,
+    full_payload: Optional[dict] = None,
+    run_id: Optional[str] = None,
+) -> str:
+    """`run_id` may be pre-assigned by the caller so the saved artifact can
+    contain its own run_id (used as verifiable evidence by later stages).
+    Omitted, a new UUID4 is generated exactly as before."""
+    run_id = run_id or str(uuid.uuid4())
     timestamp = pd.Timestamp.now().isoformat()
 
     artifact_path = ""
     if full_payload is not None:
         artifact_path = save_artifact(log_file, stage, run_id, full_payload)
 
+    # Stamp the record format so history lookups can tell current-format
+    # rows from legacy ones (see record_status). The artifact's SHA-256 is
+    # recorded with the row so later tampering is detectable.
+    summary = {**(payload or {}), "record_version": RECORD_FORMAT_VERSION}
+    if artifact_path:
+        summary["artifact_sha256"] = artifact_sha256(artifact_path)
     row = {
         "run_id": run_id,
         "timestamp": timestamp,
         "stage": stage,
-        "summary": json.dumps(payload, default=str),
+        "summary": json.dumps(summary, default=str),
         "artifact_path": artifact_path,
     }
 
     log_path = APP_DATA_DIR / log_file
+    _assert_write_allowed(log_path)
     file_exists = log_path.exists()
 
     with open(log_path, "a", newline="", encoding="utf-8") as f:
@@ -105,48 +244,145 @@ def read_log(log_file: str) -> list:
     return rows
 
 
+def list_runs(log_file: str) -> list:
+    """read_log rows, each labelled with its record_status (current/legacy)."""
+    return [{**row, **record_status(row)} for row in read_log(log_file)]
+
+
+# Summary fields a history lookup may be scoped by. dataset_name is compared
+# normalised (case and file extension ignored); the others must match exactly.
+IDENTITY_FILTER_FIELDS = ("registered_model_id", "dataset_sha256", "dataset_file_sha256", "replication_run_id",
+                          "training_run_id", "business_model_name", "dataset_name")
+MAX_EXCLUDED_LISTED = 10
+
+
+def _load_payload(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    artifact_path = row.get("artifact_path")
+    if not artifact_path:
+        return None
+    candidate = BACKEND_DIR / artifact_path
+    if not candidate.exists():
+        return None
+    try:
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _filter_mismatch(summary: Dict[str, Any], filters: Dict[str, Any]) -> Optional[str]:
+    for field in IDENTITY_FILTER_FIELDS:
+        wanted = filters.get(field)
+        if wanted in (None, ""):
+            continue
+        logged = summary.get(field)
+        if field == "dataset_name":
+            same = normalize_dataset_name(logged) == normalize_dataset_name(wanted)
+        else:
+            same = logged not in (None, "") and str(logged).strip() == str(wanted).strip()
+        if not same:
+            if logged in (None, ""):
+                return f"Does not record {field}."
+            return f"Different {field.replace('_', ' ')} ('{logged}')."
+    return None
+
+
+def find_latest_run(
+    log_file: str,
+    stage: str,
+    filters: Optional[Dict[str, Any]] = None,
+    include_legacy: bool = False,
+    validator: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+) -> Dict[str, Any]:
+    """Newest run of `stage` that is valid for the given identity.
+
+    A row is skipped — and reported in `excluded` with the reason — when it is
+    legacy (unless include_legacy), when its logged identity does not match
+    `filters`, or when `validator(row)` returns a reason (e.g. the registered
+    model has been retrained since). Rows are examined newest first and the
+    search stops at the first valid one, so `excluded` lists (up to
+    MAX_EXCLUDED_LISTED) and `excluded_counts` counts by reason exactly the
+    rows newer than the selected run that were passed over — or every row,
+    if none was valid. Nothing is modified or deleted.
+    """
+    filters = {k: v for k, v in (filters or {}).items() if v not in (None, "")}
+    rows = sorted(
+        (r for r in read_log(log_file) if r.get("stage") == stage),
+        key=lambda r: r.get("timestamp") or "",
+        reverse=True,
+    )
+    excluded: List[Dict[str, Any]] = []
+    excluded_counts: Dict[str, int] = {}
+    selected = None
+    for row in rows:
+        status = record_status(row)
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        reason = None
+        if status["record_status"] == "legacy" and not include_legacy:
+            reason = status["record_status_reason"]
+        if reason is None:
+            reason = _filter_mismatch(summary, filters)
+        # The validator decides whether a CURRENT-format run is still valid
+        # evidence (e.g. not superseded by a retrain). Legacy rows can never
+        # be valid evidence; when explicitly included they are returned for
+        # audit browsing, labelled record_status="legacy".
+        if reason is None and validator is not None and status["record_status"] == "current":
+            reason = validator(row)
+        if reason is None:
+            selected = (row, status)
+            break
+        excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
+        if len(excluded) < MAX_EXCLUDED_LISTED:
+            excluded.append({"run_id": row.get("run_id"), "timestamp": row.get("timestamp"), "reason": reason})
+    latest = None
+    if selected is not None:
+        row, status = selected
+        latest = {
+            "run_id": row.get("run_id"),
+            "timestamp": row.get("timestamp"),
+            "stage": row.get("stage"),
+            "summary": row.get("summary"),
+            "full_payload": _load_payload(row),
+            **status,
+        }
+    return {
+        "latest": latest,
+        "excluded": excluded,
+        "excluded_counts": excluded_counts,
+        "criteria": {"log_file": log_file, "stage": stage, "filters": filters, "include_legacy": include_legacy},
+    }
+
+
 def get_latest(
     log_file: str,
     stage: str,
     business_model_name: Optional[str] = None,
     dataset_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Most recent logged row for a stage, optionally scoped to one model
-    and/or one dataset.
-
-    `business_model_name` and `dataset_name`, each independently optional,
-    restrict to rows whose logged `summary.business_model_name` /
-    `summary.dataset_name` match exactly (both must match when both are
-    given — this is an AND, not an OR). Used by /validation/replication's
-    resume so a reviewer looking at model A's Setup can never be shown model
-    A run against a DIFFERENT dataset, or a different model entirely, just
-    because it happened more recently system-wide. A row logged before
-    `dataset_name` existed has no such field, so `summary.get("dataset_name")
-    == dataset_name` is false and it is correctly excluded rather than
-    treated as a match — no backfill/migration needed.
-
-    Left both unset, behavior is unchanged for every other caller
-    (intake/training/explainability/etc. resume, none of which scope by
-    model or dataset).
-    """
-    rows = [r for r in read_log(log_file) if r.get("stage") == stage]
-    if business_model_name:
-        rows = [
-            r for r in rows
-            if isinstance(r.get("summary"), dict) and r["summary"].get("business_model_name") == business_model_name
-        ]
-    if dataset_name:
-        rows = [
-            r for r in rows
-            if isinstance(r.get("summary"), dict) and r["summary"].get("dataset_name") == dataset_name
-        ]
-    if not rows:
+    """Backwards-compatible wrapper: newest row for a stage (legacy rows
+    included), optionally scoped by business_model_name / dataset_name.
+    New callers should use find_latest_run, which also excludes legacy rows
+    and explains every exclusion."""
+    found = find_latest_run(
+        log_file, stage,
+        filters={"business_model_name": business_model_name, "dataset_name": dataset_name},
+        include_legacy=True,
+    )["latest"]
+    if found is None:
         return None
+    return {k: found[k] for k in ("run_id", "timestamp", "summary", "full_payload")}
 
-    latest = max(rows, key=lambda r: r.get("timestamp") or "")
 
+def get_run(log_file: str, run_id: str) -> Optional[Dict[str, Any]]:
+    """One logged run by run_id: its stage, timestamp, summary and full
+    payload together, so a caller can verify WHAT kind of run it is (and
+    whose) before trusting its payload. None if the run_id is unknown."""
+    if not run_id:
+        return None
+    match = next((r for r in read_log(log_file) if r.get("run_id") == run_id), None)
+    if match is None:
+        return None
     full_payload = None
-    artifact_path = latest.get("artifact_path")
+    artifact_path = match.get("artifact_path")
     if artifact_path:
         candidate = BACKEND_DIR / artifact_path
         if candidate.exists():
@@ -154,12 +390,13 @@ def get_latest(
                 full_payload = json.loads(candidate.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 full_payload = None
-
     return {
-        "run_id": latest.get("run_id"),
-        "timestamp": latest.get("timestamp"),
-        "summary": latest.get("summary"),
+        "run_id": match.get("run_id"),
+        "timestamp": match.get("timestamp"),
+        "stage": match.get("stage"),
+        "summary": match.get("summary") if isinstance(match.get("summary"), dict) else {},
         "full_payload": full_payload,
+        **record_status(match),
     }
 
 
@@ -645,6 +882,9 @@ def _ensure_development_documentation_path(model_name: str, model_entry: Optiona
 
 
 def ensure_model_inventory_seed() -> Dict[str, Any]:
+    """Load the inventory, generate any missing development model reports,
+    and SAVE. Writes to disk — call it only from write endpoints. Read-only
+    requests use load_model_inventory()."""
     store = load_model_inventory()
     for model in store.get("development", []):
         if not isinstance(model, dict):
@@ -671,7 +911,7 @@ def next_model_id(store: Dict[str, Any]) -> str:
         index += 1
 
 
-def append_history_event(store: Dict[str, Any], model_id: str, event: str, description: str, user: Optional[str] = None, validation_run_id: Optional[str] = None) -> Dict[str, Any]:
+def append_history_event(store: Dict[str, Any], model_id: str, event: str, description: str, user: Optional[str] = None, validation_run_id: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     entry = {
         "model_id": model_id,
         "event": event,
@@ -681,11 +921,21 @@ def append_history_event(store: Dict[str, Any], model_id: str, event: str, descr
     }
     if validation_run_id:
         entry["validation_run_id"] = validation_run_id
+    # Extra identity fields (execution mode, run id, registered model id) are
+    # written as given, including None, so "no registered model" is explicit.
+    for key, value in (details or {}).items():
+        entry.setdefault(key, value)
     store.setdefault("history", []).append(entry)
     return entry
 
 
+VALIDATION_RUN_ID_PREFIX = "VRUN-"
+
+
 def next_validation_run_id(store: Dict[str, Any]) -> str:
+    """Next validation run id, VRUN-nnn. Distinct from validation record ids
+    (VAL-nnn). Runs logged before this change keep their VAL-nnn ids; only
+    VRUN- ids are counted, so numbering starts at VRUN-001."""
     existing_ids = {
         item.get("validation_run_id")
         for item in store.get("history", [])
@@ -693,7 +943,7 @@ def next_validation_run_id(store: Dict[str, Any]) -> str:
     }
     index = 1
     while True:
-        candidate = f"VAL-{index:03d}"
+        candidate = f"{VALIDATION_RUN_ID_PREFIX}{index:03d}"
         if candidate not in existing_ids:
             return candidate
         index += 1
@@ -824,6 +1074,35 @@ def _find_validation_inventory_entry(store: Dict[str, Any], business_model_name:
             None,
         )
     return None
+
+
+# Execution modes of a validation (replication) run — same values as
+# model_lineage.REPLICATION_MODE_* (kept here to avoid a circular import).
+EXECUTION_MODE_REGISTERED = "registered_model_reproduction"
+EXECUTION_MODE_UNREGISTERED = "unregistered_independent_refit"
+
+
+def _find_validation_record_for_run(store: Dict[str, Any], business_model_name: str,
+                                    verified_registered_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The validation record a new run belongs to. Records never mix
+    execution modes:
+      * registered run  -> only a record already linked to that exact
+                           registered model ID (names are not used);
+      * independent refit -> only an UNLINKED, non-registered record with the
+                           same name; a record linked to any registered model
+                           is never reused for a refit.
+    None -> the caller creates a new record."""
+    records = [r for r in store.get("validation", []) if isinstance(r, dict)]
+    if verified_registered_id:
+        return next((r for r in records
+                     if str(r.get("related_model_id") or "").strip() == verified_registered_id), None)
+    name = (business_model_name or "").strip().casefold()
+    if not name:
+        return None
+    return next((r for r in records
+                 if not str(r.get("related_model_id") or "").strip()
+                 and r.get("execution_mode") != EXECUTION_MODE_REGISTERED
+                 and str(r.get("model_name") or "").strip().casefold() == name), None)
 
 
 def _find_development_inventory_entry(store: Dict[str, Any], business_model_name: Optional[str], model_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1330,17 +1609,9 @@ def register_development_model(
             "uploaded_at": dataset_payload.get("uploaded_at") or now,
         })
 
-    # Attempt to update the single matching training artifact (if any) with
-    # the assigned `model_id` and `documentation_path`. Use the strict helper
-    # which will raise if multiple candidates are found to avoid bulk updates.
-    doc = existing.get("documentation_path") if isinstance(existing, dict) else None
-    try:
-        _update_latest_training_artifact_with_model_id(business_model_name, model_id, documentation_path=doc)
-    except Exception:
-        # Per policy, fail loudly rather than silently swallowing ambiguous
-        # matches or other issues — let the caller handle/report the error.
-        raise
-
+    # Training artifacts are immutable: the assigned model_id is NOT written
+    # back into the training artifact. The caller logs a separate
+    # "registration" event linking model_id to the training run.
     return {
         "model_id": model_id,
         "model_name": business_model_name,
@@ -1349,150 +1620,12 @@ def register_development_model(
 
 
 def _update_latest_training_artifact_with_model_id(model_name: str, model_id: str, documentation_path: Optional[str] = None) -> Optional[str]:
-    """
-    Find the most recent training artifact in DEV_PIPELINE_LOG for `model_name`
-    and write `model_id` (and documentation_path) into that JSON artifact. Returns
-    the relative artifact path if updated, else None.
-    """
-    # Improved matching: prefer explicit run-level linkage where available,
-    # then artifact-level/model_name matches (case-insensitive), then timestamp
-    # proximity to the registration event. Perform atomic write and verify.
-    log_path = APP_DATA_DIR / DEV_PIPELINE_LOG
-    if not log_path.exists():
-        raise Exception(f"Dev pipeline log not found at {log_path}")
+    """Retired. Training artifacts are immutable evidence (their SHA-256 is
+    recorded at creation); registration is recorded as its own
+    "registration" event instead of rewriting the training artifact."""
+    raise ImmutableArtifactError(
+        "Training artifacts are immutable; registration is logged as a separate 'registration' event.")
 
-    # Try to read registration timestamp from last_development_registered.json
-    reg_ts = None
-    last_reg_path = APP_DATA_DIR / "last_development_registered.json"
-    try:
-        if last_reg_path.exists():
-            j = json.loads(last_reg_path.read_text(encoding='utf-8'))
-            reg_ts = j.get('timestamp')
-    except Exception:
-        reg_ts = None
-
-    # Collect candidate training rows from log (use read_log to parse summaries)
-    rows = [r for r in read_log(DEV_PIPELINE_LOG) if r.get('stage') == 'training']
-    if not rows:
-        raise Exception("No training rows found in dev pipeline log")
-
-    candidates = []
-    target_norm = str(model_name or "").strip().casefold()
-
-    for r in rows:
-        run_id = r.get('run_id')
-        timestamp = r.get('timestamp')
-        summary = r.get('summary') or {}
-        artifact_path = r.get('artifact_path') or ''
-
-        # Normalize possible model name keys in summary or in artifact content
-        summary_names = []
-        if isinstance(summary, dict):
-            for key in ('model_name', 'business_model_name', 'business_model', 'model'):
-                v = summary.get(key)
-                if v:
-                    summary_names.append(str(v).strip().casefold())
-
-        # Prepare candidate info
-        candidates.append({
-            'run_id': run_id,
-            'timestamp': timestamp,
-            'summary': summary,
-            'artifact_path': artifact_path,
-            'summary_names': summary_names,
-        })
-
-    # First-pass: exact run_id linking is not available here (registration flow
-    # does not pass run_id). Next: find rows whose summary names match model_name
-    matched = [c for c in candidates if target_norm and target_norm in (c.get('summary_names') or [])]
-
-    # If no summary match, inspect artifact JSON content for model name variants
-    if not matched:
-        for c in candidates:
-            art_path_raw = c.get('artifact_path')
-            if not art_path_raw:
-                continue
-            candidate_path = BACKEND_DIR / art_path_raw
-            if not candidate_path.exists():
-                # try constructed path using run id
-                candidate_path = ARTIFACTS_DIR / 'dev_pipeline_log' / 'training' / f"{c.get('run_id')}.json"
-            try:
-                if candidate_path.exists():
-                    art = json.loads(candidate_path.read_text(encoding='utf-8'))
-                    for key in ('model_name', 'business_model_name', 'business_model', 'model'):
-                        if art.get(key) and str(art.get(key)).strip().casefold() == target_norm:
-                            matched = [c]
-                            break
-                    if matched:
-                        break
-            except Exception:
-                continue
-
-    if not matched:
-        # No reliable candidate found - provide clear error
-        raise Exception(f"No training artifact reliably matched for model_name='{model_name}'")
-
-    # Ensure we only update a single exact artifact. If multiple candidates
-    # match, refuse to proceed to avoid accidental bulk updates.
-    if len(matched) > 1:
-        raise Exception(f"Multiple training artifacts matched for model_name='{model_name}'; refusing to update any. Candidates: {len(matched)}")
-
-    chosen = matched[0]
-    art_path_raw = chosen.get('artifact_path') or ''
-    run_id = chosen.get('run_id')
-    candidate = None
-    if art_path_raw:
-        candidate = BACKEND_DIR / art_path_raw
-    if candidate is None or not candidate.exists():
-        candidate = ARTIFACTS_DIR / 'dev_pipeline_log' / 'training' / f"{run_id}.json"
-
-    if not candidate.exists():
-        raise Exception(f"Candidate artifact does not exist: {candidate}")
-
-    # Concise logging required by user
-    print(f"Artifact selected: {candidate}")
-    print(f"Artifact model_name: {model_name}")
-    print(f"Artifact run_id: {run_id}")
-
-    try:
-        data = json.loads(candidate.read_text(encoding='utf-8'))
-    except Exception as e:
-        raise Exception(f"Failed to read artifact {candidate}: {e}")
-
-    data['model_id'] = model_id
-
-    # Fallback to inventory if documentation_path not provided
-    doc_to_write = documentation_path
-    if not doc_to_write:
-        try:
-            inv = load_model_inventory()
-            for item in inv.get('development', []) if isinstance(inv.get('development'), list) else []:
-                if isinstance(item, dict) and str(item.get('model_id') or '').strip() == str(model_id or '').strip():
-                    if item.get('documentation_path'):
-                        doc_to_write = item.get('documentation_path')
-                        break
-        except Exception:
-            doc_to_write = doc_to_write
-
-    data['documentation_path'] = doc_to_write
-
-    tmp = candidate.with_suffix('.tmp')
-    try:
-        tmp.write_text(json.dumps(data, default=str, indent=2), encoding='utf-8')
-        tmp.replace(candidate)
-        # verify
-        verify = json.loads(candidate.read_text(encoding='utf-8'))
-        print(f"Assigned model_id: {model_id}")
-        print(f"Artifact update successful: {bool(verify.get('model_id'))}")
-        print(f"Artifact path: {candidate.relative_to(BACKEND_DIR)}")
-        return str(candidate.relative_to(BACKEND_DIR))
-    except Exception as e:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
-        raise Exception(f"Failed to update artifact {candidate}: {e}")
 
 
 def register_validation_run(
@@ -1503,7 +1636,12 @@ def register_validation_run(
     dataset_payload: Optional[Dict[str, Any]] = None,
     target_col: Optional[str] = None,
     user: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Register the START of a validation run on its validation record.
+    Only "Validation Run Started" is written here; the caller records the
+    outcome with record_validation_run_outcome() once execution has finished.
+    `run_id` is the replication log run id of this execution."""
     intake_payload = intake_payload or {}
     dataset_payload = dataset_payload or {}
     business_model_name = (business_model_name or "").strip() or (estimator_name or "").strip()
@@ -1511,8 +1649,20 @@ def register_validation_run(
 
     validation_store = store.setdefault("validation", [])
     incoming_model_id = _normalize_metadata_value(intake_payload.get("model_id") or dataset_payload.get("model_id"))
-    related_development = _find_development_inventory_entry(store, business_model_name, incoming_model_id)
-    existing = _find_validation_inventory_entry(store, business_model_name, incoming_model_id)
+    # A validation engagement is linked to a development model ONLY when the
+    # caller supplied that registered model's ID and it exists in the
+    # Development Inventory. Never by name: an independent refit that shares
+    # a development model's name did not use that model. With no verified ID,
+    # a new record gets no link and an existing record keeps whatever link it
+    # already had (history is not rewritten).
+    verified_related_id = None
+    if incoming_model_id:
+        match = next((item for item in store.get("development", [])
+                      if isinstance(item, dict) and str(item.get("model_id") or "").strip() == incoming_model_id), None)
+        if match is not None:
+            verified_related_id = incoming_model_id
+    execution_mode = EXECUTION_MODE_REGISTERED if verified_related_id else EXECUTION_MODE_UNREGISTERED
+    existing = _find_validation_record_for_run(store, business_model_name, verified_related_id)
 
     now = pd.Timestamp.now().isoformat()
     validation_run_id = next_validation_run_id(store)
@@ -1545,7 +1695,8 @@ def register_validation_run(
         model_id = next_validation_model_id(store)
         entry = {
             "model_id": model_id,
-            "related_model_id": related_development.get("model_id") if isinstance(related_development, dict) and related_development.get("model_id") else incoming_model_id if incoming_model_id and incoming_model_id.startswith("MOD-") else None,
+            "related_model_id": verified_related_id,
+            "execution_mode": execution_mode,
             "model_name": business_model_name,
             "model_type": _prefer_real_value(intake_payload.get("model_type"), "Custom") or "Custom",
             "business_purpose": _prefer_real_value(
@@ -1572,7 +1723,8 @@ def register_validation_run(
     else:
         model_id = existing.get("model_id")
         existing["model_name"] = business_model_name
-        existing["related_model_id"] = related_development.get("model_id") if isinstance(related_development, dict) and related_development.get("model_id") else existing.get("related_model_id") or (incoming_model_id if incoming_model_id and incoming_model_id.startswith("MOD-") else None)
+        # related_model_id is never changed here: a reused record already has
+        # this run's link (registered) or none (refit).
         existing["model_type"] = _prefer_real_value(existing.get("model_type"), intake_payload.get("model_type"), "Custom") or "Custom"
         existing["model_owner"] = model_owner
         existing["business_unit"] = business_unit
@@ -1629,14 +1781,47 @@ def register_validation_run(
             seen.add(key)
     store["models"] = deduped
 
-    append_history_event(store, model_id, "Validation Run Started", f"Validation run {validation_run_id} started for {business_model_name} using {estimator_name}.", user=user or intake_payload.get("model_owner") or "system", validation_run_id=validation_run_id)
-    append_history_event(store, model_id, "Validation Run Completed", f"Validation run {validation_run_id} completed for {business_model_name}.", user=user or intake_payload.get("model_owner") or "system", validation_run_id=validation_run_id)
+    append_history_event(
+        store, model_id, "Validation Run Started",
+        f"Validation run {validation_run_id} started for {business_model_name} using {estimator_name} ({execution_mode}).",
+        user=user or intake_payload.get("model_owner") or "system", validation_run_id=validation_run_id,
+        details={"execution_mode": execution_mode, "run_id": run_id, "registered_model_id": verified_related_id},
+    )
     return {
+        "validation_run_id": validation_run_id,
+        "execution_mode": execution_mode,
+        "registered_model_id": verified_related_id,
         "model_id": model_id,
         "model_name": business_model_name,
         "algorithm": estimator_name,
     }
     return result
+
+
+def record_validation_run_outcome(
+    store: Dict[str, Any],
+    validation_model_id: str,
+    validation_run_id: str,
+    succeeded: bool,
+    *,
+    execution_mode: Optional[str],
+    run_id: Optional[str],
+    registered_model_id: Optional[str],
+    detail: Optional[str] = None,
+    user: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Append "Validation Run Completed" (succeeded=True) or "Validation Run
+    Failed" for a run previously started with register_validation_run. Only
+    a history event is appended; no existing record or event is changed."""
+    event = "Validation Run Completed" if succeeded else "Validation Run Failed"
+    verb = "completed" if succeeded else "failed"
+    description = f"Validation run {validation_run_id} {verb} ({execution_mode})." + (f" {detail}" if detail else "")
+    return append_history_event(
+        store, validation_model_id, event, description, user=user or "system", validation_run_id=validation_run_id,
+        details={"execution_mode": execution_mode, "run_id": run_id, "registered_model_id": registered_model_id,
+                 "outcome": "COMPLETED" if succeeded else "FAILED"},
+    )
+
 
 def apply_latest_explainability_to_last_registered_model(store: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Attach the latest explainability artifact (if any) to the last registered

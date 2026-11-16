@@ -1,0 +1,33 @@
+{
+  "dataset_name": "Default of Credit Card Clients",
+  "dataset_alias": "Taiwan Credit Card Default",
+  "official_source_url": "https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients",
+  "download_url": "https://archive.ics.uci.edu/static/public/350/default+of+credit+card+clients.zip",
+  "retrieved_at": "2026-11-15T14:41:17Z",
+  "source_filename": "default of credit card clients.xls",
+  "source_sha256": "30c6be3abd8dcfd3e6096c828bad8c2f011238620f5369220bd60cfc82700933",
+  "source_zip_sha256": "56c885f84457f6680f8438f02bfcdac9579323d8a94465ee5f26e32baa727602",
+  "original_dimensions": {
+    "rows": 30000,
+    "columns": 25
+  },
+  "sample_filename": "taiwan_portfolio.csv",
+  "sample_dimensions": {
+    "rows": 700,
+    "columns": 25
+  },
+  "sample_seed": 42,
+  "sample_sha256": "6a7859211690faa35d82653f4ce503fc00422368a8bb77e9fa4b005b0cff815f",
+  "target_column": "default",
+  "target_definition": "1 = default payment next month, 0 = non-default",
+  "default_count": 156,
+  "non_default_count": 544,
+  "default_rate": 0.222857,
+  "license": "CC BY 4.0",
+  "attribution": "Yeh, I.-C. (2009). Default of Credit Card Clients [Dataset]. UCI Machine Learning Repository. DOI: 10.24432/C55S3H.",
+  "authenticity": "Real observational credit-card default dataset from Taiwan; not synthetic, anonymised, or fabricated.",
+  "notes": "The source file is preserved in demo_data/taiwan_provenance. The sample is a documented no-replacement subset used for Validation study demos only.",
+  "excluded_columns": {
+    "customer_id": "Unique identifier excluded from predictors; not a model feature."
+  }
+}

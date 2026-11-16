@@ -1,0 +1,114 @@
+{
+  "development": [],
+  "validation": [
+    {
+      "model_id": "VAL-001",
+      "related_model_id": null,
+      "execution_mode": "unregistered_independent_refit",
+      "model_name": "Pretend Demo",
+      "model_type": "PD (Probability of Default)",
+      "business_purpose": "Validation model",
+      "model_owner": "Unknown",
+      "business_unit": "Risk",
+      "model_version": "1.0",
+      "regulatory_framework": "Internal",
+      "algorithm": "XGBoost",
+      "documentation_path": "demo_data/clean_mdd.txt",
+      "status": "Under Validation",
+      "validation_status": "Under Validation",
+      "validation_stage": "data_validation",
+      "validation_date": "2026-11-12T15:57:50.215973",
+      "created_at": "2026-11-12T15:57:50.215973",
+      "updated_at": "2026-11-12T15:57:50.215973",
+      "data_validation_status": "In Progress",
+      "last_validation": "2026-11-12T15:57:50.215973",
+      "overall_status": "Under Validation"
+    }
+  ],
+  "models": [
+    {
+      "model_id": "VAL-001",
+      "related_model_id": null,
+      "execution_mode": "unregistered_independent_refit",
+      "model_name": "Pretend Demo",
+      "model_type": "PD (Probability of Default)",
+      "business_purpose": "Validation model",
+      "model_owner": "Unknown",
+      "business_unit": "Risk",
+      "model_version": "1.0",
+      "regulatory_framework": "Internal",
+      "algorithm": "XGBoost",
+      "documentation_path": "demo_data/clean_mdd.txt",
+      "status": "Under Validation",
+      "validation_status": "Under Validation",
+      "validation_stage": "data_validation",
+      "validation_date": "2026-11-12T15:57:50.215973",
+      "created_at": "2026-11-12T15:57:50.215973",
+      "updated_at": "2026-11-12T15:57:50.215973",
+      "data_validation_status": "In Progress",
+      "last_validation": "2026-11-12T15:57:50.215973",
+      "overall_status": "Under Validation"
+    }
+  ],
+  "data_sources": [
+    {
+      "data_source_id": "DS-001",
+      "model_id": "VAL-001",
+      "file_name": "uploaded_dataset",
+      "source_type": "file",
+      "purpose": "Validation dataset",
+      "uploaded_by": "user",
+      "uploaded_at": "2026-11-12T15:57:50.215888",
+      "record_count": 120,
+      "column_count": 9,
+      "target_variable": "default",
+      "storage_reference": "uploaded_dataset"
+    }
+  ],
+  "history": [
+    {
+      "model_id": "VAL-001",
+      "event": "Validation Inventory Registered",
+      "description": "Validation engagement Pretend Demo was added to the Validation Inventory.",
+      "timestamp": "2026-11-12T15:57:50.216013",
+      "user": "user"
+    },
+    {
+      "model_id": "VAL-001",
+      "event": "Data Source Linked",
+      "description": "Linked data source uploaded_dataset to model VAL-001",
+      "timestamp": "2026-11-12T15:57:50.216031",
+      "user": "user"
+    },
+    {
+      "model_id": "VAL-001",
+      "event": "Data Validation",
+      "description": "Validation run started",
+      "timestamp": "2026-11-12T15:57:50.216050",
+      "user": "user"
+    },
+    {
+      "model_id": "VAL-001",
+      "event": "Validation Run Started",
+      "description": "Validation run VRUN-001 started for Pretend Demo using XGBoost (unregistered_independent_refit).",
+      "timestamp": "2026-11-12T15:57:50.216063",
+      "user": "user",
+      "validation_run_id": "VRUN-001",
+      "execution_mode": "unregistered_independent_refit",
+      "run_id": "5ad3f76d-f59e-4f51-8c16-1fcb6a80fe22",
+      "registered_model_id": null
+    },
+    {
+      "model_id": "VAL-001",
+      "event": "Validation Run Completed",
+      "description": "Validation run VRUN-001 completed (unregistered_independent_refit).",
+      "timestamp": "2026-11-12T15:58:07.368666",
+      "user": "user",
+      "validation_run_id": "VRUN-001",
+      "execution_mode": "unregistered_independent_refit",
+      "run_id": "5ad3f76d-f59e-4f51-8c16-1fcb6a80fe22",
+      "registered_model_id": null,
+      "outcome": "COMPLETED"
+    }
+  ]
+}

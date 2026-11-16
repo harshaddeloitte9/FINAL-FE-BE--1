@@ -49,7 +49,34 @@ type Stage8Response = {
   model_tier: string;
   stated_auc: number | null;
   replicated_auc: number | null;
+  // Present on verdicts issued by the evidence-based policy. Absent on
+  // older saved verdicts, which are therefore never resumed.
+  verdict_basis?: {
+    policy_version: number;
+    findings_verdict: string;
+    replication: {
+      status: "PASS" | "FAIL" | "INCONCLUSIVE" | "NOT_ASSESSED";
+      run_id: string | null;
+      reasons: string[];
+      metrics: Record<string, number>;
+      reference_metrics: Record<string, number>;
+      mandatory_checks: Array<{ id: string; title: string; status: string; observed?: string }>;
+      executed_at: string | null;
+    };
+    benchmark: { status: string; run_id: string | null; reasons: string[]; metrics: Record<string, number>; model_name?: string };
+    // Verdict policy 5: server-side status of every non-replication evidence item.
+    evidence_completeness?: {
+      policy_version: number;
+      complete: boolean;
+      items: Record<string, { evidence: string; title: string; requirement: string; status: string; detail: string; run_id?: string }>;
+      gaps: Array<{ evidence: string; title: string; status: string; detail: string }>;
+    };
+  };
 };
+
+// Saved verdicts are only reused when issued under this verdict policy (or
+// later): older ones predate evidence completeness and could hide gaps.
+const MIN_VERDICT_POLICY_VERSION = 7;
 
 type RemediationRow = {
   finding: string;
@@ -60,10 +87,12 @@ type RemediationRow = {
   status: string;
 };
 
-const VERDICT_BADGE_TONE: Record<string, "emerald" | "amber" | "rose"> = {
+const VERDICT_BADGE_TONE: Record<string, "emerald" | "amber" | "rose" | "slate"> = {
   APPROVED: "emerald",
   "CONDITIONALLY APPROVED": "amber",
   REJECTED: "rose",
+  INCONCLUSIVE: "amber",
+  "NOT ASSESSED": "slate",
 };
 
 // Text-color counterpart to VERDICT_BADGE_TONE, used for the large verdict
@@ -73,12 +102,16 @@ const VERDICT_TEXT_TONE: Record<string, string> = {
   APPROVED: "text-emerald-600",
   "CONDITIONALLY APPROVED": "text-amber-600",
   REJECTED: "text-rose-600",
+  INCONCLUSIVE: "text-amber-600",
+  "NOT ASSESSED": "text-slate-500",
 };
 
 const VERDICT_ICON: Record<string, typeof CheckCircle2> = {
   APPROVED: CheckCircle2,
   "CONDITIONALLY APPROVED": AlertTriangle,
   REJECTED: XCircle,
+  INCONCLUSIVE: AlertTriangle,
+  "NOT ASSESSED": AlertTriangle,
 };
 
 const SEVERITY_STYLES: Record<string, { border: string; bg: string; badge: string }> = {
@@ -138,8 +171,15 @@ function todayLabel() {
 // than re-deriving it, since the API only returns the outcome, not the "why".
 function verdictReasoning(data: Stage8Response): string {
   const { verdict, high_count, medium_count } = data;
+  const replication = data.verdict_basis?.replication;
+  if (verdict === "NOT ASSESSED" || verdict === "INCONCLUSIVE") {
+    return replication?.reasons?.join(" ") || data.verdict_desc;
+  }
+  if (verdict === "REJECTED" && replication?.status === "FAIL") {
+    return replication.reasons.join(" ");
+  }
   if (verdict === "APPROVED") {
-    return `Approved because there are 0 unresolved HIGH findings and ${medium_count} MEDIUM finding(s) — both within the thresholds required for full approval (max 2 MEDIUM, 0 HIGH).`;
+    return `Approved because independent replication run ${replication?.run_id ?? "—"} was verified for this model and dataset and passed every mandatory check, and there are 0 unresolved HIGH findings and ${medium_count} MEDIUM finding(s) — both within the thresholds required for full approval (max 2 MEDIUM, 0 HIGH).`;
   }
   if (verdict === "CONDITIONALLY APPROVED") {
     const mediumNote = medium_count > 2
@@ -217,6 +257,7 @@ function Findings() {
     validationIntakeData,
     validationMddText,
     validationProfile,
+    validationStage4Result,
     validationStage5Result,
     validationStage7BiasResult,
     validationStage8Result,
@@ -226,7 +267,24 @@ function Findings() {
   const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
   const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
 
-  const [loading, setLoading] = React.useState(!validationStage8Result);
+  // The Model Replication run this verdict must rest on (Stage 3). Only its
+  // run_id is sent — the backend reloads and verifies the run itself, so no
+  // metric from the browser can establish the verdict.
+  const replicationEvidence = (validationStage4Result as any)?.evidence ?? null;
+  const replicationRunId: string | null = replicationEvidence?.run_id ?? null;
+  const benchmarkRunId: string | null = (validationStage5Result as any)?.evidence?.run_id ?? null;
+
+  // A saved verdict is only reused if it was issued by the evidence-based
+  // policy for this same replication run; anything else (older verdicts,
+  // another model's run) is recomputed rather than shown.
+  const verdictMatchesCurrentRun = (v: any) =>
+    Boolean(v?.verdict_basis?.replication) &&
+    (v.verdict_basis.replication.run_id ?? null) === replicationRunId &&
+    Number(v.verdict_basis.policy_version ?? 0) >= MIN_VERDICT_POLICY_VERSION &&
+    Boolean(v.verdict_basis.evidence_completeness);
+  const cachedVerdict = verdictMatchesCurrentRun(validationStage8Result) ? (validationStage8Result as Stage8Response) : null;
+
+  const [loading, setLoading] = React.useState(!cachedVerdict);
   const [error, setError] = React.useState<string | null>(null);
   // "network" = the request never reached the backend at all (connection
   // refused, CORS block, backend down/restarting) — the fetch() promise
@@ -234,19 +292,30 @@ function Findings() {
   // reads as a transient infrastructure issue rather than a broken page.
   // "server" = the backend responded but with an error (4xx/5xx/bad body).
   const [errorKind, setErrorKind] = React.useState<"network" | "server" | null>(null);
-  const [data, setData] = React.useState<Stage8Response | null>((validationStage8Result as Stage8Response | null) ?? null);
-  const skipInitialAutoRun = React.useRef(validationStage8Result !== null && validationStage8Result !== undefined);
+  const [data, setData] = React.useState<Stage8Response | null>(cachedVerdict);
+  const skipInitialAutoRun = React.useRef(cachedVerdict !== null);
   const [retryToken, setRetryToken] = React.useState(0);
 
   // Resume where the reviewer left off: pulls the last saved "findings"-stage
   // run from the backend's activity log. Only applied if nothing is already
-  // loaded AND the saved payload actually looks like this page's own
-  // Stage8Response shape (has a `findings` array) — otherwise left alone, so
-  // a run saved under the same stage name by a different findings endpoint
-  // never corrupts this page's state.
-  const { data: resumedFindings } = useResumeState<Record<string, any>>("validation_pipeline_log.csv", "findings");
+  // loaded AND the saved verdict was issued for this same replication run
+  // (see verdictMatchesCurrentRun) — the latest verdict system-wide may
+  // belong to another model, or predate the evidence-based policy.
+  //
+  // The backend lookup is scoped to this registered model AND this exact
+  // replication run, and skips legacy verdicts and verdicts issued before the
+  // model was last retrained, so a browser refresh restores only the verdict
+  // that belongs to the current evidence.
+  const findingsRegisteredModelId = (validationIntakeData?.registered_model_id as string | undefined) || null;
+  const { data: resumedFindings } = useResumeState<Record<string, any>>("validation_pipeline_log.csv", "findings", {
+    enabled: Boolean(replicationRunId && findingsRegisteredModelId),
+    params:
+      replicationRunId && findingsRegisteredModelId
+        ? { registered_model_id: findingsRegisteredModelId, replication_run_id: replicationRunId }
+        : undefined,
+  });
   React.useEffect(() => {
-    if (!data && resumedFindings && Array.isArray((resumedFindings as any).findings)) {
+    if (!data && resumedFindings && Array.isArray((resumedFindings as any).findings) && verdictMatchesCurrentRun(resumedFindings)) {
       setData(resumedFindings as Stage8Response);
       setValidationStage8Result(resumedFindings);
       skipInitialAutoRun.current = true;
@@ -267,25 +336,24 @@ function Findings() {
     setError(null);
     setErrorKind(null);
 
-    const repMetrics = (validationStage5Result as any)?.report?.metrics ?? {};
-    const benchmarkMetrics = (validationStage5Result as any)?.report?.benchmark?.metrics ?? {};
-    const biasRows = ((validationStage7BiasResult as any)?.rows ?? []) as Array<{ AUC: number | null }>;
-    const biasAucVals = biasRows.map((r) => r.AUC).filter((v): v is number => v !== null);
-    const biasAucGap = biasAucVals.length >= 2 ? Math.max(...biasAucVals) - Math.min(...biasAucVals) : null;
-
+    // Stress, bias, data-quality and independence evidence are resolved by the
+    // backend from its own records (verdict policy 5); browser-side results
+    // are not sent as evidence.
     const form = new FormData();
     form.append("intake_json", JSON.stringify(validationIntakeData ?? {}));
     form.append("mdd_text", validationMddText ?? "");
-    form.append(
-      "validation_profile_json",
-      JSON.stringify({
-        missing_by_column: validationProfile?.missing_by_column ?? {},
-        duplicate_rate: validationProfile?.duplicate_rate ?? 0,
-      }),
-    );
-    form.append("rep_metrics_json", JSON.stringify(repMetrics));
-    form.append("benchmark_metrics_json", JSON.stringify(benchmarkMetrics));
-    if (biasAucGap !== null) form.append("bias_auc_gap", String(biasAucGap));
+    // Evidence references only — the backend verifies them against its log.
+    if (replicationRunId) form.append("replication_run_id", replicationRunId);
+    // Primary model identity: the registered Model Inventory ID chosen at Intake.
+    if (validationIntakeData?.registered_model_id) form.append("registered_model_id", String(validationIntakeData.registered_model_id));
+    if (validationIntakeData?.model_name) form.append("business_model_name", String(validationIntakeData.model_name));
+    if (replicationEvidence?.validation_model_id) form.append("validation_model_id", String(replicationEvidence.validation_model_id));
+    if (benchmarkRunId) form.append("benchmark_run_id", benchmarkRunId);
+    form.append("dataset_name", datasetName);
+    // The current dataset itself, so the backend fingerprints it and checks it
+    // is the data the replication actually ran on.
+    if (file) form.append("file", file);
+    else if (typeof profile?.csv_text === "string" && profile.csv_text) form.append("csv_text", profile.csv_text);
 
     void formUpload<Stage8Response>("/validation/stage8/findings", form)
       .then((resp) => {
@@ -320,7 +388,7 @@ function Findings() {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [validationIntakeData, validationMddText, validationProfile, validationStage5Result, validationStage7BiasResult, retryToken]);
+  }, [validationIntakeData, validationMddText, validationProfile, validationStage4Result, validationStage5Result, validationStage7BiasResult, file, profile?.csv_text, retryToken]);
 
   const findings = data?.findings ?? [];
 
@@ -364,7 +432,9 @@ function Findings() {
     return orderedStages.map((stage) => ({ stage, items: byStage.get(stage)! }));
   }, [findings]);
 
-  const repMetricsForReport = (validationStage5Result as any)?.report?.metrics ?? {};
+  // Metrics of the server-verified replication run behind this verdict
+  // (empty when replication is not assessed / inconclusive).
+  const repMetricsForReport = React.useMemo(() => data?.verdict_basis?.replication?.metrics ?? {}, [data]);
   const metricRows = React.useMemo(() => metricThresholdRows(repMetricsForReport), [repMetricsForReport]);
 
   const executiveOverviewTiles = React.useMemo(() => {
@@ -387,13 +457,19 @@ function Findings() {
     const stated = data.stated_auc;
     const rep = data.replicated_auc;
     const gini = rep !== null && rep !== undefined ? (2 * rep - 1).toFixed(4) : "N/A";
-    const bmMetrics = (validationStage5Result as any)?.report?.benchmark?.metrics ?? {};
+    const benchmarkBasis = data.verdict_basis?.benchmark;
+    const bmMetrics = benchmarkBasis?.status === "ACCEPTED" ? benchmarkBasis.metrics ?? {} : {};
     const benchmarkLine =
       Object.keys(bmMetrics).length && rep !== null && rep !== undefined
         ? rep >= (bmMetrics.roc_auc ?? 0) - 0.02
           ? "Champion outperforms baseline"
           : "Champion underperforms baseline — see findings"
-        : "N/A";
+        : benchmarkBasis?.status === "REJECTED"
+          ? "Benchmark result not used (stale or different dataset)"
+          : "N/A";
+    const replicationLine = data.verdict_basis?.replication?.run_id
+      ? `Replication run: ${data.verdict_basis.replication.run_id} (${data.verdict_basis.replication.status})`
+      : "Replication run: none";
 
     return `Model: ${ij.model_name ?? "N/A"} (${ij.model_type ?? "N/A"})
 Validation Date: ${todayLabel()}
@@ -402,8 +478,9 @@ Verdict: ${data.verdict}
 
 Performance Summary:
 - Replicated AUC: ${rep !== null && rep !== undefined ? rep.toFixed(4) : "N/A"} (Stated: ${stated !== null && stated !== undefined ? stated.toFixed(4) : "N/A"})
-- Gini: ${gini} | Recall: ${(validationStage5Result as any)?.report?.metrics?.recall ?? "N/A"}
+- Gini: ${gini} | Recall: ${repMetricsForReport.recall ?? "N/A"}
 - Benchmark: ${benchmarkLine}
+- ${replicationLine}
 
 Key Findings: ${data.total_count} total (${data.high_count} HIGH, ${data.medium_count} MEDIUM)
 ${data.high_count === 0 ? "No HIGH findings raised." : `${data.high_count} HIGH finding(s) require remediation before deployment.`}
@@ -414,11 +491,15 @@ ${
     ? "Model approved for deployment subject to ongoing monitoring."
     : data.verdict === "CONDITIONALLY APPROVED"
       ? `Complete remediation of ${data.high_count} HIGH finding(s) by agreed deadlines.`
-      : "Model rejected. Full remediation and resubmission required."
+      : data.verdict === "NOT ASSESSED"
+        ? "Run Model Replication for this model and dataset; no verdict can be issued without it."
+        : data.verdict === "INCONCLUSIVE"
+          ? "Resolve the replication evidence issues listed in the findings and re-run before a verdict can be issued."
+          : "Model rejected. Full remediation and resubmission required."
 }
 Monitoring frequency: ${data.monitoring_frequency}
 Revalidation trigger: ${data.revalidation_trigger}`.trim();
-  }, [data, ij, validationStage5Result]);
+  }, [data, ij, repMetricsForReport]);
 
   const [execSummary, setExecSummary] = React.useState("");
   React.useEffect(() => {
@@ -426,6 +507,33 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
   }, [execSummaryDefault]);
 
   const [signOff, setSignOff] = React.useState({ validator: "", modelOwner: "", committee: "" });
+
+  // Independence (SS1/23 P4.1) counts only as an attestation recorded by the
+  // backend for this registered model — not the Intake checkbox.
+  const independenceItem = data?.verdict_basis?.evidence_completeness?.items?.independence;
+  const independenceMissing = Boolean(findingsRegisteredModelId && independenceItem && independenceItem.status === "NOT_ASSESSED");
+  const [attestedBy, setAttestedBy] = React.useState<string>(String(validationIntakeData?.lead_validator ?? ""));
+  const [attestConfirmed, setAttestConfirmed] = React.useState(false);
+  const [attesting, setAttesting] = React.useState(false);
+  const [attestError, setAttestError] = React.useState<string | null>(null);
+  const recordIndependence = async () => {
+    if (!findingsRegisteredModelId || !attestedBy.trim() || !attestConfirmed) return;
+    setAttesting(true);
+    setAttestError(null);
+    try {
+      const form = new FormData();
+      form.append("registered_model_id", findingsRegisteredModelId);
+      form.append("attested_by", attestedBy.trim());
+      form.append("independent", "true");
+      form.append("statement", "The validation team has no conflict of interest with the development of this model.");
+      await formUpload("/validation/independence/attest", form);
+      setRetryToken((t) => t + 1);   // recompute the verdict with the recorded attestation
+    } catch (err) {
+      setAttestError(err instanceof Error ? err.message : "Failed to record the attestation.");
+    } finally {
+      setAttesting(false);
+    }
+  };
 
   return (
     <div className="min-w-0 space-y-6 overflow-x-hidden">
@@ -453,6 +561,37 @@ Revalidation trigger: ${data.revalidation_trigger}`.trim();
           <span>No active dataset is available in shared state yet. Complete Stage 1 Intake and Stage 2 Data Validation first.</span>
         )}
       </div>
+
+      {independenceMissing ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="font-semibold">Independence attestation required (SS1/23 P4.1)</div>
+          <p className="mt-1 text-xs">
+            No independence attestation is recorded for {findingsRegisteredModelId}, so no approval can be issued. The Intake checkbox is
+            not evidence; the attestation is recorded with your name and the model&apos;s current training.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+            <input
+              value={attestedBy}
+              onChange={(e) => setAttestedBy(e.target.value)}
+              placeholder="Validator name"
+              className="rounded-md border border-amber-300 bg-white px-2 py-1"
+            />
+            <label className="inline-flex items-center gap-1.5">
+              <input type="checkbox" checked={attestConfirmed} onChange={(e) => setAttestConfirmed(e.target.checked)} />
+              I confirm the validation team is independent of this model&apos;s development.
+            </label>
+            <button
+              type="button"
+              onClick={recordIndependence}
+              disabled={attesting || !attestedBy.trim() || !attestConfirmed}
+              className="rounded-md bg-amber-600 px-3 py-1 font-semibold text-white disabled:opacity-50"
+            >
+              {attesting ? "Recording…" : "Record attestation"}
+            </button>
+          </div>
+          {attestError ? <p className="mt-1 text-xs text-rose-700">{attestError}</p> : null}
+        </div>
+      ) : null}
 
       {data && (
         <VCard icon={Gauge} title={<NumberedTitle n="00">Executive Overview</NumberedTitle>} sub="Validation outcome at a glance">

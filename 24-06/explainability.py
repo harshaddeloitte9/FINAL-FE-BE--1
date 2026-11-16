@@ -91,17 +91,40 @@ def resolve_feature_names(pipeline) -> List[str]:
 # Feature Importance
 # ─────────────────────────────────────────────
 
+def resolve_model_input_names(pipeline, n_features: int) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Exactly one real name per model input column, or (None, reason).
+    Names are never invented, padded or truncated: if the fitted
+    preprocessor's names do not match the model's input width one-to-one,
+    no names are returned and the reason says why."""
+    names = [str(n) for n in resolve_feature_names(pipeline)]
+    if not names:
+        return None, "Feature names could not be resolved from the fitted preprocessor."
+    if len(names) != n_features:
+        return None, (f"The fitted preprocessor yields {len(names)} feature names for {n_features} model inputs; "
+                      "names are not shown rather than padded or truncated.")
+    if len(set(names)) != len(names):
+        return None, "The fitted preprocessor yields duplicate feature names, so inputs cannot be identified uniquely."
+    return names, None
+
+
 def extract_feature_importance(pipeline) -> Optional[pd.DataFrame]:
     """
     Extract feature importance from a trained pipeline using real names.
     Supports: tree feature_importances_, linear coef_, and others.
+    Returns None when importances or exact feature names are unavailable
+    (see feature_importance_with_reason for why).
     """
+    return feature_importance_with_reason(pipeline)[0]
+
+
+def feature_importance_with_reason(pipeline) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """(importance table, None) or (None, reason it is unavailable)."""
     try:
         model = pipeline.named_steps.get("model")
         if model is None:
             model = pipeline[-1]
     except Exception:
-        return None
+        return None, "The pipeline has no model step."
 
     importances = None
 
@@ -114,26 +137,18 @@ def extract_feature_importance(pipeline) -> Optional[pd.DataFrame]:
         importances = np.abs(coef)
 
     if importances is None:
-        return None
+        return None, f"{type(model).__name__} exposes neither feature_importances_ nor coef_."
 
-    # Get real names
-    real_names = resolve_feature_names(pipeline)
-    n = len(importances)
-
-    if len(real_names) >= n:
-        names = real_names[:n]
-    elif len(real_names) > 0:
-        # Pad with indexed names based on last known name pattern
-        names = real_names + [f"engineered_feat_{i}" for i in range(n - len(real_names))]
-    else:
-        names = [f"feature_{i}" for i in range(n)]
+    names, reason = resolve_model_input_names(pipeline, len(importances))
+    if names is None:
+        return None, reason
 
     df = pd.DataFrame({"Feature": names, "Importance": importances})
     df = df.sort_values("Importance", ascending=False).reset_index(drop=True)
     total = df["Importance"].sum()
     if total > 0:
         df["Importance"] = (df["Importance"] / total).round(5)
-    return df
+    return df, None
 
 
 def plot_feature_importance_bar(importance_df: pd.DataFrame, top_n: int = 15) -> go.Figure:
@@ -190,31 +205,55 @@ def compute_shap_values(
 ) -> Optional[Tuple[Any, np.ndarray, pd.DataFrame, List[str]]]:
     """
     Compute SHAP values using REAL feature names extracted from the fitted pipeline.
-    Returns (explainer, shap_values, X_transformed_df, feature_names) or None.
+    Returns (explainer, shap_values, X_transformed_df, feature_names) or None
+    (see compute_shap_values_with_reason for why).
     """
+    return compute_shap_values_with_reason(pipeline, X_sample, max_samples=max_samples)[0]
+
+
+# Prediction parity between the SHAP input path (preprocessor, then model)
+# and the pipeline itself, on the same rows.
+SHAP_PARITY_TOLERANCE = 1e-12
+
+
+def compute_shap_values_with_reason(
+    pipeline,
+    X_sample: pd.DataFrame,
+    max_samples: int = 200,
+) -> Tuple[Optional[Tuple[Any, np.ndarray, pd.DataFrame, List[str]]], Optional[str]]:
+    """(result, None) or (None, reason SHAP is unavailable).
+
+    The SHAP input is exactly preprocessor.transform(rows); before anything
+    is explained, the model's probabilities on that input must equal the
+    pipeline's own predict_proba on the same rows. Names must match the
+    model inputs one-to-one (never padded or truncated). Rows explained are
+    the first len(X_df) rows of X_sample, in order."""
     if not SHAP_AVAILABLE:
-        return None
+        return None, "The shap library is not installed on the server."
 
     try:
         preprocessor = pipeline.named_steps.get("preprocessor")
         model = pipeline.named_steps.get("model")
 
         if preprocessor is None or model is None:
-            return None
+            return None, "The pipeline has no 'preprocessor' and 'model' steps to explain."
 
         X_sub = X_sample.head(max_samples)
         X_transformed = preprocessor.transform(X_sub)
-
-        # Get real names
-        real_names = get_feature_names_from_fitted_preprocessor(preprocessor)
+        if hasattr(X_transformed, "toarray"):
+            X_transformed = X_transformed.toarray()
         n_feats = X_transformed.shape[1]
 
-        if len(real_names) >= n_feats:
-            names = real_names[:n_feats]
-        elif len(real_names) > 0:
-            names = real_names + [f"engineered_feat_{i}" for i in range(n_feats - len(real_names))]
-        else:
-            names = [f"feature_{i}" for i in range(n_feats)]
+        names, reason = resolve_model_input_names(pipeline, n_feats)
+        if names is None:
+            return None, reason
+
+        if hasattr(model, "predict_proba"):
+            via_model = np.asarray(model.predict_proba(np.asarray(X_transformed)))[:, 1]
+            via_pipeline = np.asarray(pipeline.predict_proba(X_sub))[:, 1]
+            if via_model.shape != via_pipeline.shape or not np.allclose(via_model, via_pipeline, rtol=0.0, atol=SHAP_PARITY_TOLERANCE):
+                return None, ("The SHAP input (preprocessor then model) does not reproduce the pipeline's predictions "
+                              "on the same rows, so it is not explained.")
 
         X_df = pd.DataFrame(X_transformed, columns=names)
 
@@ -236,13 +275,13 @@ def compute_shap_values(
                 shap_vals = _normalize_shap_output(explainer.shap_values(X_explained, nsamples=100))
                 X_df = X_explained
             else:
-                return None
+                return None, f"{model_type} has no predict_proba, so KernelExplainer cannot be used."
 
-        return explainer, np.array(shap_vals), X_df, names
+        return (explainer, np.array(shap_vals), X_df, names), None
 
     except Exception as e:
         print(f"SHAP error: {e}")
-        return None
+        return None, f"SHAP computation failed: {type(e).__name__}: {e}"
 
 
 def plot_shap_summary_plotly(shap_values: np.ndarray, X_df: pd.DataFrame, top_n: int = 15) -> go.Figure:
@@ -310,6 +349,7 @@ def generate_prediction_reasoning(
     y_proba: np.ndarray,
     sample_idx: int = 0,
     threshold: float = 0.5,
+    threshold_source: Optional[str] = None,
 ) -> str:
     prob = y_proba[sample_idx, 1]
     decision = "🔴 HIGH RISK (Default Predicted)" if prob >= threshold else "🟢 LOW RISK (No Default Predicted)"
@@ -328,7 +368,8 @@ def generate_prediction_reasoning(
 
     lines = [
         f"**Prediction:** {decision}",
-        f"**Default Probability:** {prob:.1%}  (threshold = {threshold:.0%})",
+        f"**Default Probability:** {prob:.1%}  (threshold = {threshold:.4f}"
+        + (f"; {threshold_source}" if threshold_source else "") + ")",
         "",
         "**Top Drivers of This Prediction:**",
     ]

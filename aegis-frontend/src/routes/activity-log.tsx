@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { api } from "@/lib/api";
+import { isLegacyRecord, LEGACY_BADGE_TEXT, LEGACY_FALLBACK_REASON } from "@/lib/history-record";
 
 export const Route = createFileRoute("/activity-log")({
   head: () => ({ meta: [{ title: "Activity Log — Aegis Credit" }] }),
@@ -14,6 +15,9 @@ interface LogRow {
   stage: string;
   summary: unknown;
   artifact_path?: string;
+  // Labelled by the backend; legacy rows are shown, never rewritten (H4).
+  record_status?: "current" | "legacy";
+  record_status_reason?: string | null;
 }
 
 interface MergedRow extends LogRow {
@@ -127,7 +131,18 @@ function ActivityLog() {
                     {row.workspace}
                   </span>
                 </td>
-                <td className="px-4 py-2.5 font-medium">{row.stage}</td>
+                <td className="px-4 py-2.5 font-medium">
+                  {row.stage}
+                  {isLegacyRecord(row) ? (
+                    <span
+                      data-testid="legacy-badge"
+                      title={row.record_status_reason ?? LEGACY_FALLBACK_REASON}
+                      className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800"
+                    >
+                      {LEGACY_BADGE_TEXT}
+                    </span>
+                  ) : null}
+                </td>
                 <td className="max-w-md truncate px-4 py-2.5 text-muted-foreground">{summarize(row.summary)}</td>
               </tr>
             ))}
@@ -165,6 +180,11 @@ function ActivityLog() {
                 </h2>
                 <p className="text-xs text-muted-foreground">
                   {selected.timestamp} — run {selected.run_id}
+                  {isLegacyRecord(selected) ? (
+                    <span className="mt-1 block text-amber-800" data-testid="legacy-detail">
+                      {LEGACY_BADGE_TEXT} record: {selected.record_status_reason ?? LEGACY_FALLBACK_REASON}
+                    </span>
+                  ) : null}
                 </p>
               </div>
               <button

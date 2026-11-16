@@ -23,7 +23,10 @@ import { deriveCheckTotal } from "@/components/check-summary";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formUpload } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
-import { useResumeState } from "@/hooks/use-resume-state";
+import { useEvaluationKey, useEvaluationState } from "@/hooks/use-evaluation";
+import { EvidenceIdentity } from "@/components/evidence-identity";
+import type { EvaluationEvidence } from "@/lib/evaluation-evidence";
+import { describeSensitivityMethod } from "@/lib/check-provenance";
 import { StageHero, HeroChip, VCard, VEmptyState, StatusPill, KpiStrip } from "@/components/validation-ui";
 
 export const Route = createFileRoute("/validation/stress")({
@@ -107,7 +110,10 @@ function CheckCard({ check }: { check: { id: string; title: string; status: stri
 }
 
 function Stress() {
-  const { file, profile } = useDataset();
+  const { file, profile, validationIntakeData } = useDataset();
+  // Registered model chosen at Intake: recorded with each stress run and used
+  // to scope the resume, so another model's stress results never load here.
+  const registeredModelId = ((validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
   const datasetName = profile?.dataset_name ?? file?.name ?? "the active validation dataset";
   const datasetReady = Boolean(file || profile?.csv_text || profile?.dataset_name);
   const columns: string[] = useMemo(() => (profile?.columns ?? profile?.col_types?.all ?? []) as string[], [profile]);
@@ -117,29 +123,38 @@ function Stress() {
   const [algorithm, setAlgorithm] = useState<string>("");
   const [freq, setFreq] = useState<string>("quarterly");
 
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [report, setReport] = useState<any | null>(null);
+  // The dataset bytes this page sends — part of the result's identity.
+  const datasetBlob = useMemo<Blob | null>(
+    () => file ?? (typeof profile?.csv_text === "string" && profile.csv_text ? new Blob([profile.csv_text], { type: "text/csv" }) : null),
+    [file, profile?.csv_text],
+  );
+  // A stress result belongs to one evaluation identity (registered model,
+  // training run, dataset bytes, algorithm/target for refits) and is shown
+  // only while it is unchanged. Results from the backend history are not
+  // restored: they cannot be tied to the dataset currently loaded.
+  const stressKey = useEvaluationKey(datasetBlob, registeredModelId, `${algorithm}|${targetCol}`);
+  const stress = useEvaluationState<{ report: any; evidence: EvaluationEvidence | null; shockable_features?: string[] | null }>(stressKey, null);
+  const running = stress.state.status === "loading";
+  const report = stress.state.result?.report ?? null;
+  const stressEvidence = stress.state.result?.evidence ?? null;
+  const runError =
+    stress.state.error ?? (report && !report.available ? report.reason ?? "Stress suite did not return a usable result." : null);
 
   const [shockFeature, setShockFeature] = useState<string>("");
   const [shockDirection, setShockDirection] = useState<"increase" | "decrease">("increase");
   const [shockMagnitude, setShockMagnitude] = useState<number>(20);
-  const [shockRunning, setShockRunning] = useState(false);
-  const [shockError, setShockError] = useState<string | null>(null);
-  const [shockResult, setShockResult] = useState<any | null>(null);
-
-  // Resume where the reviewer left off: if this session has no stress-test
-  // report yet, pull the last saved /validation/stress/run from the backend.
-  const { data: resumedStress } = useResumeState<{ stage: string; report: any }>(
-    "validation_pipeline_log.csv",
-    "stress_testing",
-  );
-  useEffect(() => {
-    if (!report && resumedStress?.report) {
-      setReport(resumedStress.report);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedStress]);
+  // A registered model can only be shocked on its raw inputs (the backend
+  // lists them); an independent refit on the report's numeric features.
+  const shockFeatures: string[] = stress.state.result?.shockable_features ?? report?.numeric_features ?? [];
+  // A shock result belongs to one identity (the stress identity plus the
+  // shock settings). It is cleared when any of them changes, and a late
+  // response from an older request is ignored.
+  const shockKey = stressKey ? `${stressKey}|shock|${shockFeature}|${shockDirection}|${shockMagnitude}` : null;
+  const shock = useEvaluationState<{ result: any; evidence: EvaluationEvidence | null }>(shockKey, null);
+  const shockRunning = shock.state.status === "loading";
+  const shockError = shock.state.error;
+  const shockResult = shock.state.result?.result ?? null;
+  const shockEvidence = shock.state.result?.evidence ?? null;
 
   useEffect(() => {
     void api<{ models: string[] }>("/models/list")
@@ -159,10 +174,11 @@ function Stress() {
   }, [columns, targetCol]);
 
   useEffect(() => {
-    if (!shockFeature && report?.available && report.numeric_features?.length) {
-      setShockFeature(report.numeric_features[0]);
+    if (report?.available && shockFeatures.length && !shockFeatures.includes(shockFeature)) {
+      setShockFeature(shockFeatures[0]);
     }
-  }, [report, shockFeature]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report, shockFeatures.join("|"), shockFeature]);
 
   const buildForm = () => {
     const form = new FormData();
@@ -173,37 +189,35 @@ function Stress() {
     }
     form.append("target_col", targetCol);
     form.append("algorithm", algorithm);
+    if (registeredModelId) form.append("registered_model_id", registeredModelId);
     return form;
   };
 
   const runStressSuite = async () => {
-    if (!datasetReady || !targetCol || !algorithm) return;
-    setRunError(null);
-    setRunning(true);
-    setShockResult(null);
+    if (!datasetReady || !targetCol || !algorithm || !stressKey) return;
+    const token = stress.begin();                     // clears the previous report now
     try {
       const form = buildForm();
       form.append("freq", freq);
-      const resp = await formUpload<{ stage: string; report: any }>("/validation/stress/run", form);
-      setReport(resp.report ?? null);
-      if (!resp.report?.available) {
-        setRunError(resp.report?.reason ?? "Stress suite did not return a usable result.");
-      }
+      const resp = await formUpload<{ stage: string; report: any; evidence?: EvaluationEvidence }>("/validation/stress/run", form);
+      if (!stress.isCurrent(token)) return;           // superseded by a newer request or identity
+      stress.succeed(token, { report: resp.report ?? null, evidence: resp.evidence ?? null,
+                              shockable_features: (resp as { shockable_features?: string[] }).shockable_features ?? null });
     } catch (error: any) {
-      setReport(null);
-      setRunError(error?.message ?? "Failed to run stress & backtesting checks.");
-    } finally {
-      setRunning(false);
+      stress.fail(token, error?.message ?? "Failed to run stress & backtesting checks.");
     }
   };
 
-  const hasAutoRun = useRef(false);
+  // Auto-run once per evaluation identity (not once per page visit), so a
+  // changed dataset or model is evaluated rather than left blank.
+  const autoRunFor = useRef<string | null>(null);
   useEffect(() => {
-    if (hasAutoRun.current) return;
+    if (!stressKey || autoRunFor.current === stressKey) return;
     if (!datasetReady || !targetCol || !algorithm || running) return;
-    hasAutoRun.current = true;
+    autoRunFor.current = stressKey;
     void runStressSuite();
-  }, [datasetReady, targetCol, algorithm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetReady, targetCol, algorithm, stressKey]);
 
   // Backtesting only re-buckets already-computed predictions by calendar
   // period — it needs no retraining — so the backend now returns every
@@ -217,21 +231,20 @@ function Stress() {
 
 
   const applyShock = async () => {
-    if (!shockFeature || !targetCol || !algorithm) return;
-    setShockError(null);
-    setShockRunning(true);
+    // A registered model is shocked from its own scoring bundle; the
+    // algorithm is only needed for an independent refit.
+    if (!shockFeature || !targetCol || (!algorithm && !registeredModelId) || !shockKey) return;
+    const token = shock.begin();
     try {
       const form = buildForm();
       form.append("shock_feature", shockFeature);
       form.append("shock_direction", shockDirection);
       form.append("shock_magnitude_pct", String(shockMagnitude));
-      const resp = await formUpload<{ stage: string; result: any }>("/validation/stress/shock", form);
-      setShockResult(resp.result ?? null);
+      const resp = await formUpload<{ stage: string; result: any; evidence?: EvaluationEvidence }>("/validation/stress/shock", form);
+      if (!shock.isCurrent(token)) return;
+      shock.succeed(token, { result: resp.result ?? null, evidence: resp.evidence ?? null });
     } catch (error: any) {
-      setShockResult(null);
-      setShockError(error?.message ?? "Shock failed.");
-    } finally {
-      setShockRunning(false);
+      shock.fail(token, error?.body?.detail ?? error?.message ?? "Shock failed.");
     }
   };
 
@@ -240,6 +253,9 @@ function Stress() {
     return bins.map((b: any) => ({ bin: b.bin, "Train %": b.train_pct, "Test %": b.test_pct }));
   }, [report]);
 
+  // Series names come from what was actually compared (earlier vs later
+  // records when a date column exists; otherwise the train/test reference).
+  const psiLabels: { train_pct: string; test_pct: string } = report?.psi?.series_labels ?? { train_pct: "Train %", test_pct: "Test %" };
   const psiFigure = useMemo(() => {
     if (!psiChartData.length) return null;
     return {
@@ -248,17 +264,17 @@ function Stress() {
           type: "bar",
           x: psiChartData.map((row) => row.bin),
           y: psiChartData.map((row) => row["Train %"]),
-          name: "Train %",
+          name: psiLabels.train_pct,
           marker: { color: CHART_INDIGO, cornerradius: 3 },
-          hovertemplate: "<b>%{x}</b><br>Train: %{y:.2f}%<extra></extra>",
+          hovertemplate: `<b>%{x}</b><br>${psiLabels.train_pct}: %{y:.2f}%<extra></extra>`,
         },
         {
           type: "bar",
           x: psiChartData.map((row) => row.bin),
           y: psiChartData.map((row) => row["Test %"]),
-          name: "Test %",
+          name: psiLabels.test_pct,
           marker: { color: CHART_TEAL, cornerradius: 3 },
-          hovertemplate: "<b>%{x}</b><br>Test: %{y:.2f}%<extra></extra>",
+          hovertemplate: `<b>%{x}</b><br>${psiLabels.test_pct}: %{y:.2f}%<extra></extra>`,
         },
       ],
       layout: {
@@ -274,7 +290,7 @@ function Stress() {
         yaxis: { title: { text: "%" }, tickfont: { size: 11 }, automargin: true, gridcolor: CHART_GRID, zeroline: false, showline: false },
       },
     };
-  }, [psiChartData]);
+  }, [psiChartData, psiLabels.train_pct, psiLabels.test_pct]);
 
   const sensitivityChartData = useMemo(() => {
     const rows = report?.sensitivity?.rows ?? [];
@@ -307,7 +323,9 @@ function Stress() {
   }, [sensitivityChartData]);
 
   const macroChartData = useMemo(() => {
-    const scenarios = report?.macro_scenarios?.scenarios ?? [];
+    // Scenarios that could not be applied (no driver column) have no scenario
+    // PD and are not charted — they are listed below as not applicable.
+    const scenarios = (report?.macro_scenarios?.scenarios ?? []).filter((s: any) => typeof s.scn_pd === "number");
     return scenarios.map((s: any) => ({
       name: s.name,
       "Base PD": +(s.base_pd * 100).toFixed(2),
@@ -506,7 +524,7 @@ function Stress() {
           <button
             type="button"
             onClick={() => void runStressSuite()}
-            disabled={!datasetReady || !targetCol || !algorithm || running}
+            disabled={!datasetReady || !targetCol || !algorithm || running || !stressKey}
             className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[#2f67ff] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(47,103,255,0.18)] hover:bg-[#285ee6] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
@@ -518,6 +536,12 @@ function Stress() {
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{runError}</span>
+          </div>
+        ) : null}
+
+        {stress.state.result ? (
+          <div className="mt-3">
+            <EvidenceIdentity evidence={stressEvidence} />
           </div>
         ) : null}
       </VCard>
@@ -555,13 +579,17 @@ function Stress() {
       <div>
         <SectionHeading eyebrow="Sensitivity Analysis" />
         <div className="mt-3">
-          <VCard icon={TrendingUp} title="Sensitivity — AUC drop on feature removal" sub="From Stage 3 ablation. SS1/23 P4.3.">
+          <VCard
+            icon={TrendingUp}
+            title={describeSensitivityMethod(report?.sensitivity?.method).title}
+            sub={describeSensitivityMethod(report?.sensitivity?.method).sub}
+          >
             {sensitivityFigure ? (
               <div className="h-[260px] overflow-hidden rounded-xl border border-slate-100 bg-white p-1">
                 <PlotlyChart figure={sensitivityFigure} style={{ height: "100%" }} config={NO_TOOLBAR_CONFIG} />
               </div>
             ) : (
-              <VEmptyState icon={TrendingUp} title="No sensitivity results yet" description="Run the stress suite to see ablation results." />
+              <VEmptyState icon={TrendingUp} title="No sensitivity results yet" description="Run the stress suite to see sensitivity results." />
             )}
             {report?.sensitivity?.check ? <div className="mt-4"><CheckCard check={report.sensitivity.check} /></div> : null}
 
@@ -580,7 +608,7 @@ function Stress() {
                     value={shockFeature}
                     onChange={(e) => setShockFeature(e.target.value)}
                   >
-                    {(report?.numeric_features ?? []).map((f: string) => (
+                    {shockFeatures.map((f: string) => (
                       <option key={f} value={f}>{f}</option>
                     ))}
                   </select>
@@ -642,6 +670,10 @@ function Stress() {
                       </div>
                     </div>
                   </div>
+                  <div className="mt-3" data-testid="shock-evidence">
+                    <EvidenceIdentity evidence={shockEvidence} title="Shock evidence identity" />
+                    <p className="mt-1 text-[11px] text-slate-500">What-if only: this shock is not recorded and is not used in the validation verdict.</p>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -655,8 +687,8 @@ function Stress() {
         <div className="mt-3">
           <VCard
             icon={Gauge}
-            title="Score stability (PSI) — train vs test"
-            sub="SS11/13 §10.6. PSI < 0.10 stable, 0.10–0.25 minor shift, > 0.25 major shift."
+            title={`Score stability (PSI) — ${report?.psi?.comparison ?? "population shift"}`}
+            sub="SS11/13 §10.6. PSI < 0.10 stable, 0.10–0.25 minor shift, > 0.25 major shift. Needs a date column; without one it is not assessed."
           >
             {psiFigure ? (
               <div className="h-[260px] overflow-hidden rounded-xl border border-slate-100 bg-white p-1">
@@ -699,14 +731,24 @@ function Stress() {
                   <div key={s.id} className="rounded-xl border border-slate-200 bg-white p-4 text-xs shadow-sm">
                     <div className="font-semibold text-slate-900">{s.name}</div>
                     <div className="mt-1 text-slate-500">{s.desc}</div>
-                    <div className="mt-2 text-slate-500">
-                      Base <b className="text-slate-900">{s.base_pd.toFixed(4)}</b> → Scenario <b className="text-slate-900">{s.scn_pd.toFixed(4)}</b>{" "}
-                      <span className={s.pd_change_pct >= 0 ? "font-semibold text-amber-600" : "font-semibold text-emerald-600"}>
-                        ({s.pd_change_pct >= 0 ? "+" : ""}{s.pd_change_pct.toFixed(1)}%)
-                      </span>
-                    </div>
+                    {typeof s.scn_pd === "number" ? (
+                      <div className="mt-2 text-slate-500">
+                        Base <b className="text-slate-900">{s.base_pd.toFixed(4)}</b> → Scenario <b className="text-slate-900">{s.scn_pd.toFixed(4)}</b>{" "}
+                        <span className={s.pd_change_pct >= 0 ? "font-semibold text-amber-600" : "font-semibold text-emerald-600"}>
+                          ({s.pd_change_pct >= 0 ? "+" : ""}{s.pd_change_pct.toFixed(1)}%)
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="mt-2 font-semibold text-slate-500">Not applicable — not run</div>
+                    )}
+                    {typeof s.model_response_pd === "number" && s.overlay_multiplier !== 1 ? (
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Model response {s.model_response_pd.toFixed(4)}
+                        {s.status === "OVERLAY_ONLY" ? " (no driver shocked — the whole change is the assumed overlay)" : ""}, then ×{s.overlay_multiplier} assumed overlay
+                      </div>
+                    ) : null}
                     <div className="mt-1 text-[11px] text-slate-400">
-                      {s.applied?.length ? `Applied: ${s.applied.join("; ")}` : "No matching driver columns found"}
+                      {s.applied?.length ? `Applied: ${s.applied.join("; ")}` : s.reason ?? "No matching driver columns found"}
                     </div>
                   </div>
                 ))}

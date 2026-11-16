@@ -21,6 +21,12 @@ import PlotlyChart from "@/components/plotly-chart";
 import { formUpload, ApiError } from "@/lib/api";
 import { useDataset } from "@/lib/app-context";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
+import { replicationRestoreUsable, referenceVerificationText } from "@/lib/replication-scope";
+import { describeCurveProvenance, type CurveProvenance } from "@/lib/check-provenance";
+import { useModelIdentity } from "@/hooks/use-model-identity";
+import { canRunRegisteredReplication, identityExplanation, identityLabel, replicationModelId } from "@/lib/model-identity";
+import { EvidenceIdentity } from "@/components/evidence-identity";
 import { cn } from "@/lib/utils";
 import {
   StageHero,
@@ -187,6 +193,9 @@ export type ReplicationEvidence = {
   algorithm: string | null;
   dataset_name: string | null;
   dataset_sha256: string;
+  // SHA-256 of the dataset bytes as received (D1); absent on older runs.
+  dataset_file_sha256?: string | null;
+  registered_model_id?: string | null;
   dataset_rows: number;
   target_col: string;
   executed_at: string;
@@ -199,8 +208,9 @@ type ReplicationResponse = {
   report: {
     replication: { result: ReplicationResult; checks: ReplicationCheck[] };
     metrics: Record<string, any>;
-    roc_curve: { points: Array<Record<string, number>>; auc?: number | null };
-    pr_curve: { points: Array<Record<string, number>>; average_precision?: number | null };
+    // G2: whose predictions, which partition and rows the curve comes from.
+    roc_curve: { points: Array<Record<string, number>>; auc?: number | null; provenance?: CurveProvenance };
+    pr_curve: { points: Array<Record<string, number>>; average_precision?: number | null; provenance?: CurveProvenance };
     confusion_matrix: { labels: Array<number | string>; matrix: number[][] };
     score_distribution: { bins: Array<Record<string, any>> };
     calibration_chart: { points: Array<Record<string, any>> };
@@ -218,6 +228,18 @@ type ReplicationResponse = {
       values: Record<string, number>;
       sources: Record<string, string>;
       source_labels?: Record<string, string>;
+      // D2: who established each source — the server (extracted from the MDD
+      // uploaded with the run) or the browser (client label, unverified).
+      verification?: Record<string, "server_extracted" | "browser_reported">;
+      // D3: uploaded-MDD values that replaced different reviewer values.
+      replacements?: Array<{
+        metric: string;
+        previous_value: number;
+        previous_source: string;
+        previous_source_label?: string;
+        new_value: number;
+        new_source: string;
+      }>;
       warnings?: string[];
     };
     metric_provenance?: { schema_version: number; metrics: string; reference_metrics: string };
@@ -626,11 +648,23 @@ function ModelReplicationPanel({
   const ds = useDataset();
 
   const [localFile, setLocalFile] = React.useState<File | null>(null);
+  // D1 — SHA-256 of the exact dataset bytes this page sends (the same bytes
+  // `activeFile` below wraps). A saved or cached replication is only shown
+  // when it was recorded for this dataset AND the selected registered model.
+  const datasetKeyBlob = React.useMemo<Blob | null>(() => {
+    if (localFile) return localFile;
+    if (ds.file) return ds.file;
+    const csv = typeof ds.profile?.csv_text === "string" ? ds.profile.csv_text : "";
+    return csv.trim() ? new Blob([csv], { type: "text/csv" }) : null;
+  }, [localFile, ds.file, ds.profile?.csv_text]);
+  const datasetFileSha = useDatasetFileSha(datasetKeyBlob);
   const [mddFile, setMddFile] = React.useState<File | null>(null);
   const [targetCol, setTargetCol] = React.useState("");
   // `modelIdentity` is the business/model name; `algorithm` is the technical framework.
   const [modelIdentity, setModelIdentity] = React.useState("");
-  const [algorithm, setAlgorithm] = React.useState("XGBoost");
+  // Original Demo A is a LightGBM demo preset; stale default XGBoost values
+  // and older context must not override the audited Demo A selection.
+  const [algorithm, setAlgorithm] = React.useState("LightGBM");
   const [testSize, setTestSize] = React.useState(0.15);
   const [valSize, setValSize] = React.useState(0.15);
   const [reported, setReported] = React.useState<Record<string, string>>({});
@@ -647,17 +681,21 @@ function ModelReplicationPanel({
   const resumeRegisteredModelId: string | null =
     ((ds.validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
   const cachedStage4 = ds.validationStage4Result as Record<string, any> | null | undefined;
-  const cachedStage4Usable = Boolean(
-    cachedStage4?.replication &&
-      cachedStage4?.evidence?.run_id &&
-      (cachedStage4?.evidence?.registered_model_id ?? null) === resumeRegisteredModelId,
-  );
+  // Usable only for the same registered model AND the same dataset bytes
+  // (D1). The dataset hash is computed asynchronously, so the cache is
+  // applied by the effect below once it is known — never before.
+  const cachedStage4Usable =
+    Boolean(cachedStage4?.replication && cachedStage4?.evidence?.run_id) &&
+    replicationRestoreUsable(cachedStage4?.evidence ?? null, {
+      registeredModelId: resumeRegisteredModelId,
+      datasetFileSha,
+    });
   const [replication, setReplication] = React.useState<{ result: ReplicationResult; checks: ReplicationCheck[] } | null>(
-    cachedStage4Usable ? ((cachedStage4!.replication as { result: ReplicationResult; checks: ReplicationCheck[] }) ?? null) : null,
+    null, // applied by the identity effect below once the dataset fingerprint is known (D1)
   );
-  const [flags, setFlags] = React.useState<string[]>(cachedStage4Usable ? ((cachedStage4!.flags as string[] | null) ?? []) : []);
+  const [flags, setFlags] = React.useState<string[]>([]);
   const [performanceReport, setPerformanceReport] = React.useState<ReplicationResponse["report"] | null>(
-    cachedStage4Usable ? ((cachedStage4!.performanceReport as ReplicationResponse["report"] | null) ?? null) : null,
+    null,
   );
 
   // Explicit, traceable record of where the currently-displayed replication
@@ -671,8 +709,32 @@ function ModelReplicationPanel({
     | { kind: "fresh" }
     | { kind: "resumed"; runId: string; timestamp: string; businessModelName: string | null; datasetName: string | null };
   const [provenance, setProvenance] = React.useState<ReplicationProvenance>(
-    cachedStage4Usable ? { kind: "fresh" } : { kind: "none" },
+    { kind: "none" },
   );
+
+  // D1: the identity (registered model + dataset bytes) of the result on screen.
+  const [shownIdentity, setShownIdentity] = React.useState<string | null>(null);
+  const currentIdentity = datasetFileSha ? `${resumeRegisteredModelId ?? ""}|${datasetFileSha}` : null;
+  React.useEffect(() => {
+    if (!currentIdentity) return;
+    if (shownIdentity && shownIdentity !== currentIdentity) {
+      // Another dataset or registered model: the result on screen is stale.
+      setReplication(null);
+      setFlags([]);
+      setPerformanceReport(null);
+      setProvenance({ kind: "none" });
+      setShownIdentity(null);
+      return;
+    }
+    if (!shownIdentity && !replication && cachedStage4Usable) {
+      setReplication((cachedStage4!.replication as { result: ReplicationResult; checks: ReplicationCheck[] }) ?? null);
+      setFlags((cachedStage4!.flags as string[] | null) ?? []);
+      setPerformanceReport((cachedStage4!.performanceReport as ReplicationResponse["report"] | null) ?? null);
+      setProvenance({ kind: "fresh" });
+      setShownIdentity(currentIdentity);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIdentity, cachedStage4Usable]);
 
   // The model identity to scope a resumed result by, so a reviewer looking
   // at one model's Setup can never be shown another model's most recent
@@ -724,11 +786,15 @@ function ModelReplicationPanel({
   // Model Inventory ID instead: the backend then also skips runs made before
   // the model was last retrained, and legacy-format runs. (Dataset identity is
   // enforced by the reproduction itself — it must be the training dataset.)
-  const resumeParams: Record<string, string> | undefined = resumeRegisteredModelId
-    ? { registered_model_id: resumeRegisteredModelId }
-    : resumeModelName && resumeDatasetName
-      ? { business_model_name: resumeModelName, dataset_name: resumeDatasetName }
-      : undefined;
+  // D1: every restore is also scoped to the exact dataset bytes now loaded;
+  // until their fingerprint is known nothing is restored.
+  const resumeParams: Record<string, string> | undefined = !datasetFileSha
+    ? undefined
+    : resumeRegisteredModelId
+      ? { registered_model_id: resumeRegisteredModelId, dataset_file_sha256: datasetFileSha }
+      : resumeModelName && resumeDatasetName
+        ? { business_model_name: resumeModelName, dataset_name: resumeDatasetName, dataset_file_sha256: datasetFileSha }
+        : undefined;
   const { data: resumedReplication, meta: resumeMeta, excluded: replicationExcluded } = useResumeState<ReplicationResponse>(
     "validation_pipeline_log.csv",
     "replication",
@@ -743,6 +809,9 @@ function ModelReplicationPanel({
       if (resumeMeta.recordStatus !== "current") {
         return;
       }
+      if (!replicationRestoreUsable(summary, { registeredModelId: resumeRegisteredModelId, datasetFileSha })) {
+        return;
+      }
       if (resumeRegisteredModelId) {
         if (summary.registered_model_id !== resumeRegisteredModelId) return;
       } else {
@@ -753,6 +822,7 @@ function ModelReplicationPanel({
       setReplication(resumedReplication.report.replication);
       setFlags(resumedReplication.flags ?? []);
       setPerformanceReport(resumedReplication.report);
+      setShownIdentity(`${resumeRegisteredModelId ?? ""}|${datasetFileSha}`);
       setProvenance({
         kind: "resumed",
         runId: resumeMeta.runId,
@@ -778,13 +848,43 @@ function ModelReplicationPanel({
   const validationMddMetrics = ds.validationMddMetrics as Record<string, any> | null | undefined;
   const validationIntakeData = ds.validationIntakeData as Record<string, any> | null | undefined;
   const selectedModelName = ds.selectedModel?.name as string | undefined;
+  const demoMode = React.useMemo(
+    () => String(profile?.demo_mode ?? validationIntakeData?.demo_mode ?? "").trim().toLowerCase(),
+    [profile?.demo_mode, validationIntakeData?.demo_mode],
+  );
+  const hasReferenceMetrics = React.useMemo(() => {
+    const values = validationMddMetrics ?? {};
+    const hasNonEmptyMetric = Object.values(values).some(
+      (value) => value !== null && value !== undefined && String(value).trim() !== "",
+    );
+    return hasNonEmptyMetric || Boolean(mddFile && mddFile.name);
+  }, [validationMddMetrics, mddFile]);
+  const referenceMetricsProvenanceLabel = React.useMemo(() => {
+    if (demoMode === "clean" || demoMode === "flawed") return "Demo MDD reference metrics – illustrative";
+    if (demoMode === "taiwan" && !hasReferenceMetrics) return "No developer-reported reference metrics available";
+    if (mddFile) return "Uploaded MDD reference metrics";
+    return "Reference metrics";
+  }, [demoMode, hasReferenceMetrics, mddFile]);
+  const isDemoPrefill = demoMode === "clean" || demoMode === "flawed";
+  React.useEffect(() => {
+    const normalizedModelIdentity = (modelIdentity || selectedModelName || validationIntakeData?.model_name || "")
+      .trim()
+      .toLowerCase();
+    if (!normalizedModelIdentity) return;
+    if (normalizedModelIdentity.startsWith("demo a")) {
+      setAlgorithm("LightGBM");
+    } else if (normalizedModelIdentity.startsWith("demo b")) {
+      setAlgorithm("XGBoost");
+    }
+  }, [modelIdentity, selectedModelName, validationIntakeData?.model_name]);
   // Registered Model Inventory ID chosen at Intake. When present, the backend
   // reproduces that registered model from its recorded lineage and ignores
   // the algorithm / split / parameter fields below.
-  const registeredModelId: string | null =
-    typeof validationIntakeData?.registered_model_id === "string" && validationIntakeData.registered_model_id
-      ? validationIntakeData.registered_model_id
-      : null;
+  const registeredModelId: string | null = replicationModelId(validationIntakeData);
+  // Registration + lineage of that exact ID (read-only lookup). Registered
+  // replication may only run when the lineage contract and scoring bundle
+  // were verified.
+  const registeredIdentity = useModelIdentity(registeredModelId);
 
   const targetCandidates: string[] = React.useMemo(() => {
     const c = profile?.target_candidates ?? profile?.targetCandidates ?? profile?.candidate_targets ?? [];
@@ -885,12 +985,22 @@ function ModelReplicationPanel({
       .find(Boolean);
     if (contextIdentity) setModelIdentity(contextIdentity);
 
-    // Prefill algorithm if any context value matches a known algorithm option.
+    // Prefill algorithm if any context value matches a known algorithm option,
+    // but never override the audited Demo A/B demo presets.
     const contextAlg = [selectedModelName, trainingResult?.model_name, validationIntakeData?.model_name]
       .filter((value): value is string => Boolean(value))
       .map((value) => value.trim())
       .find((value) => MODEL_OPTIONS.includes(value));
-    if (contextAlg) setAlgorithm(contextAlg);
+    if (contextAlg) {
+      const normalizedIdentity = (contextIdentity ?? "").toLowerCase();
+      if (normalizedIdentity.startsWith("demo a")) {
+        setAlgorithm("LightGBM");
+      } else if (normalizedIdentity.startsWith("demo b")) {
+        setAlgorithm("XGBoost");
+      } else {
+        setAlgorithm(contextAlg);
+      }
+    }
 
     if (trainingConfig) {
       if (typeof trainingConfig.test_size === "number") setTestSize(trainingConfig.test_size);
@@ -920,10 +1030,16 @@ function ModelReplicationPanel({
   // with what happens when the button is actually pressed.
   const datasetReady = Boolean(activeFile);
   const configReady = Boolean(targetCol.trim() && modelIdentity.trim() && resolvedAlgorithmName);
-  const canRun = datasetReady && configReady;
+  const registeredReady = !registeredModelId || canRunRegisteredReplication(registeredIdentity);
+  const canRun = datasetReady && configReady && registeredReady;
 
   const runReplication = async () => {
     setError(null);
+
+    if (registeredModelId && !canRunRegisteredReplication(registeredIdentity)) {
+      setError(identityExplanation(registeredIdentity));
+      return;
+    }
 
     if (!activeFile) {
       setError("No active dataset is available in shared state. Complete Stage 1 Intake and Stage 2 Data Validation first, or upload a file below.");
@@ -996,6 +1112,7 @@ function ModelReplicationPanel({
       setFlags(res.flags ?? []);
       setPerformanceReport(res.report);
       setProvenance({ kind: "fresh" });
+      setShownIdentity(`${registeredModelId ?? ""}|${res.evidence?.dataset_file_sha256 ?? datasetFileSha ?? ""}`);
       ds.setValidationStage4Result({
         replication: res.report.replication,
         flags: res.flags ?? [],
@@ -1291,7 +1408,9 @@ function ModelReplicationPanel({
           : null;
       const rawReference = referenceUsed?.values?.[key];
       const developerValue = typeof rawReference === "number" && Number.isFinite(rawReference) ? rawReference : null;
-      const developerSource = developerValue !== null ? referenceUsed?.source_labels?.[key] ?? referenceUsed?.sources?.[key] ?? null : null;
+      const developerSource = developerValue !== null
+        ? `${referenceUsed?.source_labels?.[key] ?? referenceUsed?.sources?.[key] ?? "source not recorded"} · ${referenceVerificationText(referenceUsed?.verification?.[key])}`
+        : null;
       // Registered reproduction compares against the ORIGINAL model's computed
       // performance (exactly what R4.x used); developer-reported values stay a
       // separately labelled reference. Unregistered refits compare against the
@@ -1512,19 +1631,50 @@ function ModelReplicationPanel({
       <VCard
         icon={Settings2}
         title="Model Replication"
-        sub="Independently re-train the submitted model on the validation dataset and run checks R4.1–R4.8 against developer-reported metrics."
+        sub="Assess model replication or perform an independent refit using the supplied validation dataset."
       >
-        {registeredModelId ? (
+        {registeredModelId && registeredIdentity.kind === "ready" ? (
           <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/60 px-4 py-3 text-xs text-blue-900">
-            <span className="font-semibold">Registered model reproduction: {registeredModelId}.</span> The registered model&apos;s recorded
+            <span className="font-semibold">Registered model reproduction: {registeredModelId} · replication-ready.</span> The registered model&apos;s recorded
             algorithm, hyperparameters, preprocessing, features, split and seed are used, and its stored artifact is re-scored.
             The algorithm, split-size and parameter fields below are ignored. The dataset must be the model&apos;s original training data.
+            <span className="mt-1 block text-blue-800/80">
+              Lineage contract v{registeredIdentity.readiness.contract?.contract_version} (training run {registeredIdentity.readiness.contract?.training_run_id ?? "—"}) · scoring bundle SHA-256 verified.
+            </span>
+          </div>
+        ) : registeredModelId ? (
+          <div
+            className={cn(
+              "mb-4 rounded-lg border px-4 py-3 text-xs",
+              registeredIdentity.kind === "invalid" ? "border-rose-200 bg-rose-50 text-rose-800"
+              : registeredIdentity.kind === "incomplete" ? "border-amber-200 bg-amber-50 text-amber-800"
+              : "border-slate-200 bg-slate-50 text-slate-600",
+            )}
+          >
+            <span className="font-semibold">
+              {identityLabel(registeredIdentity).text}: {registeredModelId}.
+            </span>{" "}
+            {identityExplanation(registeredIdentity)}
+            {registeredIdentity.kind !== "loading" ? (
+              <span className="mt-1 block">
+                To continue, retrain the model so its lineage is recorded, or clear the registered model at Stage 1 Intake to run an unregistered independent refit (which cannot support a final verdict).
+              </span>
+            ) : null}
           </div>
         ) : (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-            <span className="font-semibold">No registered model selected at Intake.</span> This will be an independent refit from the
-            settings below — not a reproduction of a registered model, and it cannot support a final verdict.
+          <div className="mb-4 flex items-center gap-2">
+            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-600">
+              Independent demo refit
+            </span>
           </div>
+        )}
+        {!registeredModelId && (
+          <details className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+            <summary className="cursor-pointer list-none font-semibold text-slate-700">Evidence limitations</summary>
+            <p className="mt-2 leading-5 text-slate-600">
+              This is an independent refit from the supplied validation dataset. It is not a reproduction of a registered model and it does not establish a registered-model lineage or approval status. The run can be used for comparison and validation review, but it cannot support a final approval verdict.
+            </p>
+          </details>
         )}
         {/* Dataset & Model */}
         <div className="text-[11px] font-bold uppercase tracking-wider text-blue-700">Dataset &amp; Model</div>
@@ -1639,10 +1789,27 @@ function ModelReplicationPanel({
         <div className="mt-6 text-[11px] font-bold uppercase tracking-wider text-blue-700">Developer Reference Metrics</div>
         <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              For checks R4.2 / R4.3 / R4.4 / R4.8 — auto-filled from this dataset's training run where available.
-              Edit any value, or leave blank to skip that check. Values extracted from an uploaded MDD override these on run.
-            </p>
+            <div className="flex flex-col gap-2">
+              <span
+                className={cn(
+                  "inline-flex w-fit items-center rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em]",
+                  isDemoPrefill
+                    ? "border-amber-200 bg-amber-50 text-amber-800"
+                    : demoMode === "taiwan"
+                      ? "border-slate-200 bg-slate-100 text-slate-600"
+                      : "border-blue-200 bg-blue-50 text-blue-800",
+                )}
+              >
+                {referenceMetricsProvenanceLabel}
+              </span>
+              <p className="text-xs text-slate-600">
+                {isDemoPrefill
+                  ? "These values are demo-prefilled for illustration only and are not a developer-submitted model record."
+                  : demoMode === "taiwan" && !hasReferenceMetrics
+                    ? "There are no developer-reported reference metrics for this Taiwan dataset. Manual entry remains available."
+                    : "For checks R4.2 / R4.3 / R4.4 / R4.8 — auto-filled from this dataset's training run where available. Edit any value, or leave blank to skip that check. Values extracted from an uploaded MDD override these on run."}
+              </p>
+            </div>
             <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-xs text-primary underline underline-offset-2">
               <FileUp className="h-3.5 w-3.5" />
               {mddFile ? mddFile.name : "Upload MDD (PDF/DOCX/TXT)"}
@@ -1655,20 +1822,29 @@ function ModelReplicationPanel({
             </label>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {REPORTED_METRIC_FIELDS.map(({ key, label }) => (
-              <div key={key}>
-                <label className="text-[11px] text-muted-foreground">{label}</label>
-                <input
-                  value={reported[key] ?? ""}
-                  onChange={(e) => {
-                    setReported((prev) => ({ ...prev, [key]: e.target.value }));
-                    setReportedSources((prev) => ({ ...prev, [key]: "manual_entry" }));
-                  }}
-                  placeholder="—"
-                  className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm"
-                />
-              </div>
-            ))}
+            {REPORTED_METRIC_FIELDS.map(({ key, label }) => {
+              const value = reported[key] ?? "";
+              const hasValue = value !== null && value !== undefined && String(value).trim() !== "";
+              return (
+                <div key={key}>
+                  <label className="text-[11px] text-slate-600">{label}</label>
+                  <input
+                    value={value}
+                    onChange={(e) => {
+                      setReported((prev) => ({ ...prev, [key]: e.target.value }));
+                      setReportedSources((prev) => ({ ...prev, [key]: "manual_entry" }));
+                    }}
+                    placeholder="—"
+                    className={cn(
+                      "mt-1 w-full rounded-md border px-2 py-1.5 text-sm shadow-sm transition-colors",
+                      hasValue
+                        ? "border-slate-300 bg-slate-100 text-slate-900 ring-1 ring-slate-200"
+                        : "border-slate-200 bg-white text-slate-500",
+                    )}
+                  />
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -1762,6 +1938,13 @@ function ModelReplicationPanel({
               : "Unregistered independent refit"
           }
         >
+          {replication.evidence ? (
+            <EvidenceIdentity
+              title={isRegisteredRun ? "Registered model evidence" : "Independent refit evidence"}
+              evidence={replication.evidence}
+              limitations={methodology.limitations ?? []}
+            />
+          ) : null}
           {isRegisteredRun ? (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1812,16 +1995,6 @@ function ModelReplicationPanel({
           ) : (
             <p className="text-xs text-amber-800">{methodology.detail}</p>
           )}
-          {methodology.limitations?.length ? (
-            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-              <div className="font-semibold">Limitations</div>
-              <ul className="mt-1 list-disc pl-4">
-                {methodology.limitations.map((l) => (
-                  <li key={l}>{l}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
           {methodology.ignored_inputs?.length ? (
             <p className="mt-2 text-[11px] text-slate-400">Ignored inputs (taken from the registered model instead): {methodology.ignored_inputs.join(", ")}</p>
           ) : null}
@@ -1855,12 +2028,33 @@ function ModelReplicationPanel({
                       This run was saved before reference sources were recorded, so the developer-reported values it was
                       compared against are not available. Check statuses below still reflect that run; re-run to see the values.
                     </div>
-                  ) : referenceUsed?.warnings?.length ? (
-                    <div className="mx-6 mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      {referenceUsed.warnings.join(" ")}
-                    </div>
-                  ) : null}
+                  ) : (
+                    <>
+                      {referenceUsed?.replacements?.length ? (
+                        <div className="mx-6 mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="reference-replacements">
+                          <div className="flex items-start gap-2 font-semibold">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            The MDD uploaded with this run replaced reviewer-supplied reference values:
+                          </div>
+                          <ul className="mt-1 list-disc pl-8">
+                            {referenceUsed.replacements.map((r) => (
+                              <li key={r.metric}>
+                                <span className="font-mono">{r.metric}</span>: {formatValue(r.previous_value)} ({r.previous_source_label ?? r.previous_source}) → {formatValue(r.new_value)} (MDD uploaded with this run)
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {(referenceUsed?.warnings ?? []).filter((w) => !(referenceUsed?.replacements?.length && w.startsWith("The MDD uploaded with this run replaced"))).length ? (
+                        <div className="mx-6 mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          {(referenceUsed?.warnings ?? [])
+                            .filter((w) => !(referenceUsed?.replacements?.length && w.startsWith("The MDD uploaded with this run replaced")))
+                            .join(" ")}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
@@ -2067,13 +2261,13 @@ function ModelReplicationPanel({
                 </div>
 
                 <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                  <VCard className="min-w-0" title="ROC curve" sub={`AUC ${formatValue(performanceReport?.roc_curve?.auc, 3)}`}>
+                  <VCard className="min-w-0" title="ROC curve" sub={`AUC ${formatValue(performanceReport?.roc_curve?.auc, 3)} · ${describeCurveProvenance(performanceReport?.roc_curve?.provenance)}`}>
                     <div className="h-[300px] min-w-0 overflow-hidden rounded-xl border border-slate-100 bg-white p-1">
                       <PlotlyChart figure={rocFigure} style={{ height: "100%" }} config={{ displayModeBar: false, scrollZoom: false }} />
                     </div>
                   </VCard>
 
-                  <VCard className="min-w-0" title="Precision–Recall" sub={`Average precision ${formatValue(performanceReport?.pr_curve?.average_precision, 3)}`}>
+                  <VCard className="min-w-0" title="Precision–Recall" sub={`Average precision ${formatValue(performanceReport?.pr_curve?.average_precision, 3)} · ${describeCurveProvenance(performanceReport?.pr_curve?.provenance)}`}>
                     <div className="h-[300px] min-w-0 overflow-hidden rounded-xl border border-slate-100 bg-white p-1">
                       <PlotlyChart figure={prFigure} style={{ height: "100%" }} config={{ displayModeBar: false, scrollZoom: false }} />
                     </div>

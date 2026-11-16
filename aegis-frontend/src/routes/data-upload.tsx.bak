@@ -1,0 +1,159 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import {
+  ArrowRight, CheckCircle2, Database, Download, FileSpreadsheet, Globe, Info, Landmark, Link2, Loader, RefreshCw, ShieldCheck, Table2, TrendingUp, Upload,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { formUpload } from "@/lib/api";
+import { useDataset } from "@/lib/app-context";
+import { Button } from "@/components/ui/button";
+
+export const Route = createFileRoute("/data-upload")({
+  head: () => ({ meta: [{ title: "Data Upload — Aegis Credit" }] }),
+  component: DataUpload,
+});
+
+type TableInfo = {
+  table: string;
+  row_count: number;
+  columns: { name: string; dtype: string; unique_ratio_sample: number; sample_values: string[] }[];
+};
+
+type JoinCandidate = {
+  left_table: string;
+  left_column: string;
+  right_table: string;
+  right_column: string;
+  confidence: number;
+  cardinality: string;
+  reasons: string[];
+};
+
+type PrimaryKeyInfo = {
+  table: string;
+  column: string;
+  confidence: number;
+  reasons: string[];
+};
+
+type ConfirmedJoin = { right_table: string; left_key: string; right_key: string };
+
+type MacroDateCandidate = {
+  column: string;
+  is_preferred: boolean;
+};
+
+async function readCsvHeader(file: File): Promise<string[]> {
+  const text = await file.slice(0, 8192).text();
+  const firstLine = text.split(/\r?\n/)[0] ?? "";
+  return firstLine.split(",").map((c) => c.trim().replace(/^"|"$/g, "")).filter(Boolean);
+}
+
+function bestCandidate(candidates: JoinCandidate[], tableA: string, tableB: string): JoinCandidate | null {
+  const found = candidates.find(
+    (c) => (c.left_table === tableA && c.right_table === tableB) || (c.left_table === tableB && c.right_table === tableA),
+  );
+  if (!found) return null;
+  // Normalize so left = tableA, right = tableB regardless of which order discovery found it in.
+  return found.left_table === tableA
+    ? found
+    : {
+        left_table: tableA, left_column: found.right_column, right_table: tableB, right_column: found.left_column,
+        confidence: found.confidence, cardinality: found.cardinality, reasons: found.reasons,
+      };
+}
+
+const SESSION_STORAGE_DATA_UPLOAD_KEY = "aegis_data_upload_active";
+
+function DataUpload() {
+
+  const { setUploadResult, profile } = useDataset();
+  const navigate = useNavigate();
+
+  const customerInputRef = useRef<HTMLInputElement>(null);
+  const dbInputRef = useRef<HTMLInputElement>(null);
+
+  const [customerFile, setCustomerFile] = useState<File | null>(null);
+  const [customerColumns, setCustomerColumns] = useState<string[]>([]);
+  const [hasExplicitDataset, setHasExplicitDataset] = useState(false);
+
+  const [dbFile, setDbFile] = useState<File | null>(null);
+  const [dbTables, setDbTables] = useState<TableInfo[] | null>(null);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(null);
+
+  const [loanTable, setLoanTable] = useState<string>("");
+  const [collateralTable, setCollateralTable] = useState<string>("");
+
+  const setExplicitDatasetActive = (active: boolean) => {
+    setHasExplicitDataset(active);
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem(SESSION_STORAGE_DATA_UPLOAD_KEY, active ? "1" : "0");
+      } catch {
+        // Ignore sessionStorage failures.
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let active = false;
+    try {
+      const persisted = window.sessionStorage.getItem(SESSION_STORAGE_DATA_UPLOAD_KEY);
+      active = persisted === "1";
+    } catch {
+      active = false;
+    }
+    setHasExplicitDataset(active);
+  }, []);
+
+  useEffect(() => {
+    if (!profile || hasExplicitDataset) return;
+    setUploadResult(null, null);
+    setExplicitDatasetActive(false);
+  }, [profile, hasExplicitDataset, setUploadResult]);
+
+  // ── Macroeconomic data (FRED) ───────────────────────────────────────────────
+  const [macroCandidates, setMacroCandidates] = useState<MacroDateCandidate[]>([]);
+  const [macroCandidatesLoading, setMacroCandidatesLoading] = useState(false);
+  const [selectedMacroDateCol, setSelectedMacroDateCol] = useState<string>("");
+  const [macroColumns, setMacroColumns] = useState<string[]>([]);
+  const [macroDateColUsed, setMacroDateColUsed] = useState<string | null>(null);
+  const [macroLoading, setMacroLoading] = useState(false);
+  const [macroError, setMacroError] = useState<string | null>(null);
+  // The macro fetch replaces customerFile with an augmented version — keep the
+  // pristine original around so "re-fetch with a different date column" never
+  // stacks a second set of macro_* columns onto an already-augmented file.
+  const originalCustomerFileRef = useRef<File | null>(null);
+
+  const [candidates, setCandidates] = useState<JoinCandidate[]>([]);
+  const [primaryKeys, setPrimaryKeys] = useState<PrimaryKeyInfo[]>([]);
+  const [relLoading, setRelLoading] = useState(false);
+  const [relError, setRelError] = useState<string | null>(null);
+
+  const [customerLoanJoin, setCustomerLoanJoin] = useState<{ left: string; right: string } | null>(null);
+  const [loanCollateralJoin, setLoanCollateralJoin] = useState<{ left: string; right: string } | null>(null);
+
+  const [integrating, setIntegrating] = useState(false);
+  const [integrateError, setIntegrateError] = useState<string | null>(null);
+  const [report, setReport] = useState<any | null>(null);
+
+  const loanColumns = useMemo(() => dbTables?.find((t) => t.table === loanTable)?.columns.map((c) => c.name) ?? [], [dbTables, loanTable]);
+  const collateralColumns = useMemo(() => dbTables?.find((t) => t.table === collateralTable)?.columns.map((c) => c.name) ?? [], [dbTables, collateralTable]);
+
+  const onCustomerFileChosen = async (f: File | null) => {
+    if (!f) return;
+    setCustomerFile(f);
+    setReport(null);
+    originalCustomerFileRef.current = f;
+    setMacroColumns([]);
+    setMacroDateColUsed(null);
+    setMacroError(null);
+    setHasExplicitDataset(true);
+    try {
+      setCustomerColumns(await readCsvHeader(f));
+    } catch {
+      setCustomerColumns([]);
+    }
+    if (dbTables) void discoverRelationships(f, dbFile, loanTable, collateralTable);
+  };

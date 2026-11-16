@@ -1,0 +1,3348 @@
+﻿diff --git a/24-06/main.py b/24-06/main.py
+index d181ee4d..12047e54 100644
+--- a/24-06/main.py
++++ b/24-06/main.py
+@@ -23,6 +23,27 @@ from typing import Any, Callable, Dict, Optional, List, Tuple, Union
+ BACKEND_DIR = Path(__file__).resolve().parent
+ SOURCE_OF_TRUTH_DIR = BACKEND_DIR
+ 
++
++def set_test_storage_root(root: Path):
++    """Point the backend and intake-draft storage at the pytest temp root."""
++    global BACKEND_DIR, INTAKE_DRAFTS_DIR
++    root = Path(root)
++    BACKEND_DIR = root
++    INTAKE_DRAFTS_DIR = root / "intake_drafts"
++    INTAKE_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
++    os.environ["AEGIS_TEST_STORAGE_ROOT"] = str(root)
++
++
++def _assert_write_allowed(path: Optional[Path | str] = None):
++    """Reject writes to the real backend tree while pytest is active."""
++    if os.environ.get("AEGIS_TEST_STORAGE_ROOT") is None:
++        return
++    target = Path(path) if path is not None else INTAKE_DRAFTS_DIR
++    resolved = target.resolve(strict=False)
++    real_root = Path(__file__).resolve().parent
++    if resolved == real_root / "app_data" or (real_root / "app_data") in resolved.parents:
++        raise RuntimeError(f"pytest attempted to write to the real app_data directory: {resolved}")
++
+ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+@@ -102,7 +123,14 @@ from model_selector import (
+     recommend_model, compute_dataset_characteristics, characteristics_from_summary,
+     get_model_instance, get_hyperparameter_grid, CLASSIFICATION_MODELS,
+ )
+-from train_new import split_data, compute_split_stats, train_model
++from train_new import (
++    SPLIT_STRATEGIES,
++    SPLIT_STRATEGY_STRATIFIED,
++    SPLIT_STRATEGY_TEMPORAL,
++    compute_split_stats,
++    split_data,
++    train_model,
++)
+ import evaluate_new as eval_engine
+ import fred_client
+ import data_integration as di
+@@ -111,6 +139,7 @@ import business_rules
+ import model_lineage
+ 
+ compute_binary_metrics = eval_engine.compute_binary_metrics
++select_operating_threshold = eval_engine.select_operating_threshold
+ compute_regression_metrics = eval_engine.compute_regression_metrics
+ compute_heteroscedasticity_check = eval_engine.compute_heteroscedasticity_check
+ compute_roc_curve = eval_engine.compute_roc_curve
+@@ -128,14 +157,15 @@ plot_threshold_analysis = eval_engine.plot_threshold_analysis
+ plot_score_distribution = eval_engine.plot_score_distribution
+ plot_lift_chart = eval_engine.plot_lift_chart
+ from explainability import (
+-    extract_feature_importance, compute_shap_values, generate_prediction_reasoning,
++    extract_feature_importance, generate_prediction_reasoning,
++    compute_shap_values_with_reason, feature_importance_with_reason,
+     generate_model_summary,
+ )
+ from val_replication_core import (
+     extract_metrics_from_mdd, parse_mdd_file, run_replication, evaluate_replication_checks,
+-    run_bias_check, detect_protected_columns, _gini, _ks,
++    run_bias_check, detect_protected_columns, _gini, _ks, PROTECTED_KEYWORDS, bias_from_predictions,
+ )
+-from validation_stress_core import run_stress_suite, run_manual_shock
++from validation_stress_core import apply_manual_shock_through, run_stress_suite, run_manual_shock
+ 
+ from validation_agent2 import ValidationAgent2
+ _validation_agent2_path = BACKEND_DIR / "validation_agent2.py"
+@@ -182,6 +212,15 @@ REFERENCE_SOURCE_LABELS = {
+     "client_supplied": "Supplied by client (source not stated)",
+ }
+ _CLIENT_REFERENCE_SOURCES = {"intake_mdd", "demo_intake", "development_training_run", "manual_entry"}
++# Who established a reference value's source (D2). Only values the server
++# itself extracted from a document uploaded with the run are server-verified;
++# every source label sent by the browser is recorded as browser-reported.
++REFERENCE_VERIFIED_SERVER = "server_extracted"
++REFERENCE_BROWSER_REPORTED = "browser_reported"
++REFERENCE_VERIFICATION_LABELS = {
++    REFERENCE_VERIFIED_SERVER: "verified: extracted by the server from the document uploaded with this run",
++    REFERENCE_BROWSER_REPORTED: "browser-reported: source label supplied by the client, not verified by the server",
++}
+ 
+ 
+ def build_reference_metrics(
+@@ -193,10 +232,20 @@ def build_reference_metrics(
+     """Merge client-supplied and MDD-extracted reference metrics, keeping a
+     per-key source. MDD values win per key (the MDD is the developer's
+     authoritative document). Unparseable input is reported in `warnings`
+-    instead of being silently dropped."""
++    instead of being silently dropped.
++
++    D2: `verification[key]` says who established the source ΓÇö the server
++    (values it extracted from the MDD uploaded with this run) or the browser
++    (any client-supplied label, which is recorded but never presented as
++    verified).
++    D3: when an uploaded MDD value replaces a DIFFERENT client value, the
++    replacement is listed in `replacements` (metric, previous value and
++    source, new value) and stated in `warnings`; nothing is replaced
++    silently."""
+     values: Dict[str, float] = {}
+     sources: Dict[str, str] = {}
+     warnings: List[str] = []
++    replacements: List[Dict[str, Any]] = []
+ 
+     client_sources: Dict[str, Any] = {}
+     if reported_sources_json:
+@@ -238,15 +287,36 @@ def build_reference_metrics(
+             warnings.append("reported_json was not an object and was ignored.")
+ 
+     for key, raw in (mdd_metrics or {}).items():
+-        _add(str(key), raw, "mdd_upload")
++        key = str(key)
++        previous = (values.get(key), sources.get(key)) if key in values else None
++        _add(key, raw, "mdd_upload")
++        if previous is not None and sources.get(key) == "mdd_upload" and previous[1] != "mdd_upload" \
++                and abs(values[key] - previous[0]) > 1e-12:
++            replacements.append({
++                "metric": key,
++                "previous_value": previous[0],
++                "previous_source": previous[1],
++                "previous_source_label": REFERENCE_SOURCE_LABELS.get(previous[1], previous[1]),
++                "new_value": values[key],
++                "new_source": "mdd_upload",
++            })
++    if replacements:
++        warnings.append("The MDD uploaded with this run replaced reviewer-supplied reference values: " + "; ".join(
++            f"{r['metric']} {r['previous_value']:g} ({r['previous_source_label']}) ΓåÆ {r['new_value']:g}"
++            for r in replacements) + ".")
+ 
+     if mdd_error:
+         warnings.append(f"MDD could not be read; no metrics were taken from it: {mdd_error}")
+ 
++    verification = {k: (REFERENCE_VERIFIED_SERVER if v == "mdd_upload" else REFERENCE_BROWSER_REPORTED)
++                    for k, v in sources.items()}
+     return {
+         "values": values,
+         "sources": sources,
+         "source_labels": {k: REFERENCE_SOURCE_LABELS.get(v, v) for k, v in sources.items()},
++        "verification": verification,
++        "verification_labels": {k: REFERENCE_VERIFICATION_LABELS[v] for k, v in verification.items()},
++        "replacements": replacements,
+         "warnings": warnings,
+     }
+ 
+@@ -261,6 +331,34 @@ def dataset_fingerprint(df: pd.DataFrame) -> str:
+     return digest.hexdigest()
+ 
+ 
++def source_fingerprint(file: Optional[UploadFile] = None, csv_text: Optional[str] = None) -> Optional[str]:
++    """SHA-256 of the dataset exactly as received (original file bytes, or
++    the UTF-8 csv_text), as opposed to dataset_fingerprint, which identifies
++    the parsed table. Two different files can parse to the same table (line
++    endings, quoting); this records which file was actually supplied."""
++    if csv_text:
++        return hashlib.sha256(csv_text.encode("utf-8")).hexdigest()
++    if file is not None:
++        try:
++            file.file.seek(0)
++            digest = hashlib.sha256(file.file.read()).hexdigest()
++            file.file.seek(0)
++            return digest
++        except Exception:
++            return None
++    return None
++
++
++def dataset_identity(df: pd.DataFrame, file: Optional[UploadFile] = None, csv_text: Optional[str] = None) -> Dict[str, Any]:
++    """Both dataset identities, recorded with every development-stage run."""
++    return {
++        "dataset_sha256": dataset_fingerprint(df),
++        "dataset_file_sha256": source_fingerprint(file, csv_text),
++        "dataset_source": "csv_text" if csv_text else ("file" if file is not None else "synthetic"),
++        "dataset_shape": [int(df.shape[0]), int(df.shape[1])],
++    }
++
++
+ def registered_run_identity(registered_model_id: Optional[str], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+     """Identity recorded with every validation-stage run so history lookups
+     can match it to the registered model, its CURRENT training, and the exact
+@@ -282,12 +380,148 @@ def registered_run_identity(registered_model_id: Optional[str], df: Optional[pd.
+     }
+ 
+ 
++def _registered_evaluation_or_http(df: pd.DataFrame, registered_model_id: str,
++                                   expected_training_run_id: Optional[str] = None,
++                                   compute_sensitivity: bool = False) -> Dict[str, Any]:
++    """The registered model scored from its verified bundle on its recorded
++    split (model_lineage.registered_evaluation), or an HTTP error. Never
++    falls back to a refit."""
++    try:
++        return model_lineage.registered_evaluation(
++            df, registered_model_id, dataset_sha256=dataset_fingerprint(df),
++            expected_training_run_id=(expected_training_run_id or "").strip() or None,
++            compute_sensitivity=compute_sensitivity,
++        )
++    except model_lineage.ArtifactVerificationError as exc:
++        raise HTTPException(status_code=exc.http_status,
++                            detail=f"Registered model cannot be evaluated ({exc.status}): {' '.join(exc.reasons)}")
++
++
++def registered_shockable_features(ctx: Dict[str, Any]) -> List[str]:
++    """Raw input features of a registered model that a manual shock may
++    change: numeric columns the model was trained on (recorded
++    raw_feature_columns) that its preprocessing did not drop. Derived
++    (feature-engineered) columns are excluded: they move when their source
++    feature is shocked through the scoring chain."""
++    contract = ctx.get("contract") or {}
++    X_raw = ctx.get("X_test_raw")
++    if X_raw is None:
++        return []
++    dropped = set((contract.get("preprocessing") or {}).get("drop_cols") or [])
++    return [c for c in (contract.get("features") or {}).get("raw_feature_columns") or []
++            if c not in dropped and c in X_raw.columns and pd.api.types.is_numeric_dtype(X_raw[c])]
++
++
++def independent_refit_identity(df: pd.DataFrame, algorithm: str) -> Dict[str, Any]:
++    """Evidence identity of a run that fitted a NEW model from an algorithm
++    name. It is never attributed to a registered model, so it cannot satisfy
++    registered-model evidence requirements."""
++    return {
++        "evaluation_mode": model_lineage.EVALUATION_MODE_INDEPENDENT_REFIT,
++        "registered_model_id": None,
++        "training_run_id": None,
++        "dataset_sha256": dataset_fingerprint(df),
++        "refit_algorithm": algorithm,
++    }
++
++
++def attest_inventory_registration(intake: Optional[Dict[str, Any]], registered_model_id: Optional[str] = None) -> Dict[str, Any]:
++    """Server-side registration status: registered only if the exact
++    registered model ID (explicit argument, else intake's
++    registered_model_id) is in the Development Inventory. The client's
++    model_inventory_registered boolean is never used; names are never
++    matched. Read-only ΓÇö loads the inventory and writes nothing."""
++    intake = intake if isinstance(intake, dict) else {}
++    claimed = intake.get("model_inventory_registered")
++    model_id = str(registered_model_id or intake.get("registered_model_id") or "").strip() or None
++    entry = None
++    if model_id:
++        entry = next((m for m in persistence.load_model_inventory().get("development", [])
++                      if isinstance(m, dict) and str(m.get("model_id") or "").strip() == model_id), None)
++    verified = entry is not None
++    if not model_id:
++        detail = "No registered model ID was supplied, so registration in the Model Inventory is not confirmed."
++    elif not verified:
++        detail = (f"Registered model ID '{model_id}' was not found in the Development Inventory (unknown, deleted or "
++                  "unavailable), so registration is not confirmed.")
++    else:
++        detail = f"Registered model {model_id} ({entry.get('model_name') or 'unnamed'}) is in the Development Inventory."
++    return {
++        "source": "development_inventory",
++        "registered_model_id": model_id,
++        "verified": verified,
++        "model_name": entry.get("model_name") if verified else None,
++        "detail": detail,
++        "client_claim": claimed if isinstance(claimed, bool) else None,
++        "client_claim_ignored": isinstance(claimed, bool) and claimed != verified,
++    }
++
++
++def with_attested_registration(intake: Optional[Dict[str, Any]], registered_model_id: Optional[str] = None) -> Dict[str, Any]:
++    """Copy of intake whose registration fields are the server's own: any
++    client-supplied model_inventory_registered or registration_attestation
++    is replaced."""
++    out = dict(intake) if isinstance(intake, dict) else {}
++    attestation = attest_inventory_registration(out, registered_model_id)
++    out["registered_model_id"] = attestation["registered_model_id"]
++    out["model_inventory_registered"] = attestation["verified"]
++    out["registration_attestation"] = attestation
++    return out
++
++
++def _demo_dataset_fingerprints() -> Dict[str, str]:
++    """Exact fingerprints of the shipped demo portfolios. Server-only.
++    Browser flags or dataset names are never consulted."""
++    out: Dict[str, str] = {}
++    for mode in ("clean", "flawed"):
++        demo_file = SOURCE_OF_TRUTH_DIR / "demo_data" / f"{mode}_portfolio.csv"
++        if demo_file.exists():
++            try:
++                out[mode] = dataset_fingerprint(pd.read_csv(demo_file))
++            except Exception:
++                continue
++    return out
++
++
++def _server_demo_dataset_flag(dataset_sha256: Optional[str] = None, df: Optional[pd.DataFrame] = None) -> bool:
++    """True only when the exact shipped demo dataset fingerprint matches."""
++    if dataset_sha256:
++        return _is_demo_dataset_fingerprint(dataset_sha256)
++    if df is not None:
++        return _is_demo_dataset_fingerprint(dataset_fingerprint(df))
++    return False
++
++
++def with_attested_independence(intake: Optional[Dict[str, Any]], registered_model_id: Optional[str] = None) -> Dict[str, Any]:
++    """Server-side independence status only: browser flags are removed and the
++    logged attestation is used if present, otherwise the field is forced false."""
++    out = dict(intake) if isinstance(intake, dict) else {}
++    attestation = out.get("independence_attestation") if isinstance(out.get("independence_attestation"), dict) else {}
++    independence = bool(attestation.get("independent") is True)
++    out["independence_confirmed"] = False
++    out["independence_attestation"] = {
++        **attestation,
++        "source": "server_recorded",
++        "verified": bool(attestation),
++        "independent": independence,
++        "detail": attestation.get("detail") if attestation else "No recorded independence attestation found for this model and current training.",
++        "identity_status": "unauthenticated/self-declared",
++    }
++    return out
++
++
+ def build_metric_provenance(reference: Dict[str, Any]) -> Dict[str, Any]:
+     return {
+         "schema_version": METRIC_PROVENANCE_SCHEMA_VERSION,
+         "metrics": "computed_from_model_predictions",
+         "reference_metrics": "developer_reported" if reference.get("values") else "none_supplied",
+         "reference_overrides_computed": False,
++        # D2: which reference values the server verified (extracted from the
++        # uploaded MDD) and which carry browser-reported source labels only.
++        "reference_source_verification": {
++            "server_verified": sorted(k for k, v in (reference.get("verification") or {}).items() if v == REFERENCE_VERIFIED_SERVER),
++            "browser_reported": sorted(k for k, v in (reference.get("verification") or {}).items() if v == REFERENCE_BROWSER_REPORTED),
++        },
+     }
+ 
+ 
+@@ -354,7 +588,10 @@ def run_validation_agent2(val_df: Optional[pd.DataFrame], intake_json: dict, mdd
+     # If no dataframe was provided (or it's empty), pass None so the
+     # ValidationAgent2 checks that expect `None` will short-circuit safely.
+     df_arg = val_df if (val_df is not None and getattr(val_df, "empty", False) is False) else None
+-    return agent.run_all_checks(df_arg, intake_json or {}, mdd_text or "")
++    # Registration and independence are both attested by the server; any
++    # browser-supplied boolean flags are stripped before the checks run.
++    processed = with_attested_registration(with_attested_independence(intake_json or {}))
++    return agent.run_all_checks(df_arg, processed, mdd_text or "")
+ 
+ 
+ def _detect_temporal_date_columns(df: pd.DataFrame) -> List[str]:
+@@ -420,69 +657,74 @@ def _build_temporal_analysis(df: pd.DataFrame, y_true: np.ndarray, y_proba: np.n
+     }
+ 
+ 
++def _demo_dataset_summary(mode: str = "clean") -> Dict[str, Any]:
++    demo_mode = "flawed" if str(mode).lower() == "flawed" else "clean"
++    demo_file = SOURCE_OF_TRUTH_DIR / "demo_data" / f"{demo_mode}_portfolio.csv"
++    if not demo_file.exists():
++        return {"mode": demo_mode, "rows": 0, "default_rate": 0.0, "default_col": "default", "dataset_sha256": None}
++    df = pd.read_csv(demo_file)
++    default_col = next((c for c in df.columns if "default" in str(c).lower()), "default")
++    default_rate = float(df[default_col].mean()) if default_col in df.columns else 0.0
++    return {
++        "mode": demo_mode,
++        "rows": int(df.shape[0]),
++        "default_rate": default_rate,
++        "default_col": default_col,
++        "dataset_sha256": dataset_fingerprint(df),
++    }
++
++
++def _is_demo_dataset_fingerprint(dataset_sha256: Optional[str]) -> bool:
++    if not dataset_sha256:
++        return False
++    return dataset_sha256 in {
++        _demo_dataset_summary("clean").get("dataset_sha256"),
++        _demo_dataset_summary("flawed").get("dataset_sha256"),
++    }
++
++
+ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
+     demo_mode = "flawed" if mode.lower() == "flawed" else "clean"
++    demo_stats = _demo_dataset_summary(demo_mode)
++    demo_created_at = pd.Timestamp.now().isoformat()
+     if demo_mode == "flawed":
+         model_data = {
+-            "model_name": "PD_Model_Internal_v1",
+-            "model_owner": "Unknown",
+-            "owning_team": "Risk",
+-            "lead_validator": "Reeyaz Miglani",
++            "model_name": "Demo B ΓÇö demonstration dataset",
++            "model_owner": "Not assigned ΓÇö demo",
++            "owning_team": "Demo profile",
++            "lead_validator": "Not assigned ΓÇö demo",
+             "model_type": "PD (Probability of Default)",
+-            "model_version": "v1.0",
+-            "model_tier": "Tier 1 ΓÇö High Risk",
+-            "model_purpose": "Credit risk model.",
+-            "target_col": "default",
+-            "algorithm": "XGBoost",
+-            "default_definition": "Internal default indicator",
+-            "calibration_method": "Not specified",
++            "model_version": "demo",
++            "model_tier": "Tier 2 ΓÇö Medium Risk",
++            "model_purpose": "Demonstration dataset only ΓÇö not a registered development model.",
++            "target_col": demo_stats["default_col"],
++            "algorithm": "Demo workflow (illustrative)",
++            "default_definition": "Demo default flag",
++            "calibration_method": "Not applicable for demonstration data",
+             "macro_variables_mentioned": False,
+             "model_inventory_registered": False,
+             "independence_confirmed": False,
+         }
+-        reported_metrics = {
+-            "roc_auc": 0.78,
+-            "gini": 0.56,
+-            "ks": 0.48,
+-            "cv_mean_auc": 0.73,
+-            "accuracy": 0.79,
+-            "precision": 0.61,
+-            "recall": 0.72,
+-            "f1": 0.65,
+-        }
+         mdd_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "flawed_mdd.txt"
+         hyperparams_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "flawed_params.json"
+         demo_label = "Demo B"
+     else:
+         model_data = {
+-            "model_name": "PD_XGBoost_RetailCredit_v2",
+-            "model_owner": "Sarah Chen",
+-            "owning_team": "Retail Credit Risk",
+-            "lead_validator": "Reeyaz Miglani",
++            "model_name": "Demo A ΓÇö demonstration dataset",
++            "model_owner": "Not assigned ΓÇö demo",
++            "owning_team": "Demo profile",
++            "lead_validator": "Not assigned ΓÇö demo",
+             "model_type": "PD (Probability of Default)",
+-            "model_version": "v2.1.0",
++            "model_version": "demo",
+             "model_tier": "Tier 2 ΓÇö Medium Risk",
+-            "model_purpose": (
+-                "This model estimates the probability of default for unsecured retail credit customers. "
+-                "Used for IFRS 9 ECL staging, credit decisioning, and risk appetite reporting. "
+-                "Scope: personal loan portfolio only. Out of scope: mortgages, business lending."
+-            ),
+-            "algorithm": "XGBoost",
+-            "default_definition": "90 days past due (IFRS 9 / CRR Art.178)",
+-            "calibration_method": "Platt scaling (TTC)",
+-            "macro_variables_mentioned": True,
+-            "model_inventory_registered": True,
+-            "independence_confirmed": True,
+-        }
+-        reported_metrics = {
+-            "roc_auc": 0.82,
+-            "gini": 0.64,
+-            "ks": 0.58,
+-            "cv_mean_auc": 0.80,
+-            "accuracy": 0.85,
+-            "precision": 0.72,
+-            "recall": 0.71,
+-            "f1": 0.72,
++            "model_purpose": "Demonstration dataset only ΓÇö not a registered development model.",
++            "target_col": demo_stats["default_col"],
++            "algorithm": "Demo workflow (illustrative)",
++            "default_definition": "Demo default flag",
++            "calibration_method": "Not applicable for demonstration data",
++            "macro_variables_mentioned": False,
++            "model_inventory_registered": False,
++            "independence_confirmed": False,
+         }
+         mdd_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "clean_mdd.txt"
+         hyperparams_file = SOURCE_OF_TRUTH_DIR / "demo_data" / "clean_params.json"
+@@ -510,69 +752,93 @@ def _build_validation_intake_snapshot(mode: str = "clean") -> Dict[str, Any]:
+     except Exception:
+         hyperparams = {}
+ 
++    reported_metrics = {
++        "roc_auc": None,
++        "gini": None,
++        "ks": None,
++        "cv_mean_auc": None,
++        "accuracy": None,
++        "precision": None,
++        "recall": None,
++        "f1": None,
++        "brier_score": None,
++    }
++    try:
++        extracted = extract_metrics_from_mdd(mdd_text)
++    except Exception:
++        extracted = {}
++    for key, value in extracted.items():
++        if key in reported_metrics:
++            reported_metrics[key] = value
++
+     mdd_document_path = f"demo_data/{demo_mode}_mdd.txt"
++    # Demo submissions are demonstration data. They are not development models
++    # in the Model Inventory, so: no registered model ID, not registered, and
++    # the inventory attestation is left for the reviewer (never pre-ticked).
++    # Reads demo files only; never creates or changes inventory entries.
++    base_rate_pct = demo_stats["default_rate"] * 100.0
+     return {
+         "demo_mode": demo_mode,
+         "demo_label": demo_label,
+-        "val_intake_data": {**model_data, "mdd_text": mdd_text, "mdd_document_path": mdd_document_path},
++        "demo_created_at": demo_created_at,
++        "is_demo": True,
++        "val_intake_data": {**model_data, "mdd_text": mdd_text, "mdd_document_path": mdd_document_path,
++                            "registered_model_id": None, "demo_mode": demo_mode, "is_demo_data": True,
++                            "demo_created_at": demo_created_at},
+         "val_mdd_text": mdd_text,
+         "val_mdd_reported_metrics": reported_metrics,
+         "val_hyperparams": hyperparams,
+-        "chk_inventory": True,
+-        "chk_tier": True,
+-        "chk_artifacts": True,
+-        "chk_prev_findings": True,
+-        "chk_reg_scope": True,
+-        "chk_independence": True,
+-        "chk_plan_approved": True,
+-        "chk_attestation": True,
++        "chk_inventory": False,
++        "chk_tier": False,
++        "chk_artifacts": False,
++        "chk_prev_findings": False,
++        "chk_reg_scope": False,
++        "chk_independence": False,
++        "chk_plan_approved": False,
++        "chk_attestation": False,
+         "display": {
+             "title": "Stage 1 ΓÇö Intake & Governance",
+             "description": "Capture model metadata, upload all required artifacts, and complete the governance attestation checklist before proceeding to automated validation stages.",
+             "modelMetadata": {
+                 "title": "Model metadata",
+-                "description": "Key registration details supplied by the development team.",
+-                "registeredLabel": "Registered",
++                "description": f"{demo_label} demo profile ΓÇö illustrative only; this is not verified Model Inventory data.",
++                "registeredLabel": "Not registered",
+                 "items": [
+-                    ["Model ID", "CR-PD-XGB-027"],
+-                    ["Model name", "Retail PD ΓÇö XGBoost Champion"],
+-                    ["Owner", "A. Khurana ┬╖ Risk Validation"],
+-                    ["Developer", "Credit Risk Modelling, EMEA"],
+-                    ["Version", "v1.7.6"],
+-                    ["Risk tier", "Tier 2 ΓÇö Material"],
+-                    ["Last validated", "12 Apr 2026"],
+-                    ["Next review", "12 Jul 2026"],
++                    ["Model name", model_data["model_name"]],
++                    ["Owner", "Demo profile"],
++                    ["Developer", "Demo profile"],
++                    ["Validation date", "Not applicable ΓÇö demo"],
++                    ["Registered model ID", "Not registered"],
++                    ["Demo created", demo_created_at],
++                    ["Version", model_data["model_version"]],
++                    ["Risk tier", model_data["model_tier"]],
++                    ["Algorithm", model_data["algorithm"]],
++                    ["Sample rows", f"{demo_stats['rows']:,}"],
++                    ["Target rate", f"{base_rate_pct:.2f}%"],
+                 ],
+             },
+             "targetDefinition": {
+                 "title": "Target definition",
+-                "expression": "default_12m Γêê {0, 1}",
+-                "detail": "positive class = 90+ DPD within 12m",
++                "expression": f"{demo_stats['default_col']} Γêê {{0, 1}}",
++                "detail": "Demonstration target flag from the shipped demo CSV.",
+                 "baseRateLabel": "Base rate",
+-                "baseRate": "4.7%",
++                "baseRate": f"{base_rate_pct:.2f}%",
+                 "sampleSizeLabel": "Sample size",
+-                "sampleSize": "219,486",
++                "sampleSize": f"{demo_stats['rows']:,}",
+             },
+             "riskTier": {
+                 "title": "Risk tier",
+                 "value": tier_value,
+                 "description": tier_description,
+             },
+-            "artifacts": [
+-                {"fileName": "retail_pd_validation.csv", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 ┬╖ 09:13", "required": True},
+-                {"fileName": "retail_pd_mdd.pdf", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 ┬╖ 09:15", "required": True},
+-                {"fileName": "training_pipeline.zip", "status": "Uploaded", "timestamp": "Uploaded 21 Jun 2026 ┬╖ 09:17", "required": True},
+-                {"fileName": "data_profile.xlsx", "status": "Optional", "timestamp": "Pending review", "required": False},
+-                {"fileName": "assumptions_limitations.pdf", "status": "Optional", "timestamp": "Pending review", "required": False},
+-                {"fileName": "performance_report.xlsx", "status": "Optional", "timestamp": "Pending review", "required": False},
+-            ],
+-            "artifactSummary": "3 required ┬╖ 3 optional",
++            "artifacts": [],
++            "artifactSummary": "0 required ┬╖ 0 optional",
+             "artifactTitle": "Artifact inventory",
+-            "artifactDescription": "Uploaded evidence to support subsequent validation stages.",
++            "artifactDescription": "No uploaded artifacts for this demo submission.",
+             "governance": {
+                 "title": "Governance attestation",
+                 "description": "Confirm the model and validation plan are ready to proceed.",
+-                "status": "Pending review",
++                "status": "Not started",
+                 "checklist": [
+                     "Model is registered in the model inventory",
+                     "Risk tier assignment has been documented",
+@@ -620,10 +886,12 @@ class IntakeDraftRequest(BaseModel):
+ @app.post("/validation/intake/draft")
+ async def save_intake_draft(payload: IntakeDraftRequest) -> Dict[str, Any]:
+     slug = _intake_draft_slug(payload.model_name)
++    path = INTAKE_DRAFTS_DIR / f"{slug}.json"
++    _assert_write_allowed(path)
+     INTAKE_DRAFTS_DIR.mkdir(exist_ok=True)
+     saved_at = pd.Timestamp.now().isoformat()
+     record = {"model_name": payload.model_name, "data": payload.data, "saved_at": saved_at}
+-    (INTAKE_DRAFTS_DIR / f"{slug}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
++    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+ 
+     result = {"saved": True, "model_name": payload.model_name, "saved_at": saved_at}
+ 
+@@ -720,6 +988,8 @@ async def history_latest(
+     dataset_sha256: Optional[str] = None,
+     replication_run_id: Optional[str] = None,
+     include_legacy: Optional[bool] = None,
++    dataset_file_sha256: Optional[str] = None,
++    training_run_id: Optional[str] = None,
+ ) -> Dict[str, Any]:
+     """Newest VALID run of a stage for the given identity.
+ 
+@@ -734,6 +1004,22 @@ async def history_latest(
+     is_validation_log = log_file == persistence.VALIDATION_PIPELINE_LOG
+     if include_legacy is None:
+         include_legacy = not is_validation_log
++    validator = _registered_lineage_validator() if is_validation_log else None
++    if is_validation_log and stage == "findings":
++        # A saved verdict issued under an older verdict policy (e.g. before
++        # evidence completeness) is never restored as the current verdict.
++        lineage_check = validator
++
++        def validator(row: Dict[str, Any]) -> Optional[str]:  # type: ignore[no-redef]
++            summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
++            try:
++                version = int(summary.get("verdict_policy_version") or 0)
++            except (TypeError, ValueError):
++                version = 0
++            if version != VERDICT_POLICY_VERSION:
++                return (f"Verdict issued under verdict policy {version or 'unrecorded'}; the current policy is "
++                        f"{VERDICT_POLICY_VERSION}, so it must be recomputed.")
++            return lineage_check(row)
+     return persistence.find_latest_run(
+         log_file,
+         stage,
+@@ -743,9 +1029,13 @@ async def history_latest(
+             "registered_model_id": registered_model_id,
+             "dataset_sha256": dataset_sha256,
+             "replication_run_id": replication_run_id,
++            # Development pages scope their resume to the exact file bytes
++            # being worked on and, where relevant, the model's training run (E7).
++            "dataset_file_sha256": dataset_file_sha256,
++            "training_run_id": training_run_id,
+         },
+         include_legacy=include_legacy,
+-        validator=_registered_lineage_validator() if is_validation_log else None,
++        validator=validator,
+     )
+ 
+ 
+@@ -796,7 +1086,61 @@ class InventoryValidationRequest(BaseModel):
+ 
+ @app.get("/model-inventory")
+ async def get_model_inventory() -> Dict[str, Any]:
+-    return persistence.ensure_model_inventory_seed()
++    # Read-only: loading a page must never modify the inventory. Missing model
++    # reports are generated by the registration / write endpoints instead.
++    return persistence.load_model_inventory()
++
++
++@app.get("/model-inventory/development/{model_id}/lineage")
++async def get_development_model_lineage(model_id: str) -> Dict[str, Any]:
++    """Read-only: whether a registered development model can be reproduced
++    (lineage contract + scoring bundle). Writes nothing. Unknown ID ΓåÆ 404."""
++    wanted = (model_id or "").strip()
++    entry = next((m for m in persistence.load_model_inventory().get("development", [])
++                  if isinstance(m, dict) and str(m.get("model_id") or "").strip() == wanted), None)
++    if entry is None:
++        raise HTTPException(status_code=404, detail=f"Registered model '{wanted}' was not found in the Development Inventory.")
++    return model_lineage.lineage_readiness(entry)
++
++
++@app.get("/model-inventory/legacy-readiness")
++async def get_legacy_readiness() -> Dict[str, Any]:
++    """Read-only: what lineage evidence exists for every registered
++    development model, and what each needs (E10). Writes nothing."""
++    return model_lineage.legacy_readiness_report(persistence.load_model_inventory())
++
++
++@app.get("/lineage/dataset/{sha256}")
++async def get_dataset_lineage(sha256: str) -> Dict[str, Any]:
++    """Read-only provenance of a dataset fingerprint (E11): every development
++    run that recorded it, as the parsed-table fingerprint (dataset_sha256) or
++    the original-file fingerprint (dataset_file_sha256), and the registered
++    models trained on it."""
++    wanted = (sha256 or "").strip().lower()
++    if not re.fullmatch(r"[0-9a-f]{64}", wanted):
++        raise HTTPException(status_code=400, detail="sha256 must be a 64-character hexadecimal fingerprint.")
++    runs = []
++    for row in persistence.read_log(persistence.DEV_PIPELINE_LOG):
++        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
++        matched = [f for f in ("dataset_sha256", "dataset_file_sha256") if str(summary.get(f) or "").lower() == wanted]
++        if matched:
++            runs.append({"run_id": row.get("run_id"), "timestamp": row.get("timestamp"), "stage": row.get("stage"),
++                         "matched_as": matched, "dataset_sha256": summary.get("dataset_sha256"),
++                         "dataset_file_sha256": summary.get("dataset_file_sha256"),
++                         "registered_model_id": summary.get("registered_model_id"),
++                         "artifact_sha256": summary.get("artifact_sha256")})
++    models = []
++    for m in persistence.load_model_inventory().get("development", []):
++        ds = ((m.get("lineage_contract") or {}).get("dataset") or {}) if isinstance(m, dict) else {}
++        if wanted in (str(ds.get("sha256") or "").lower(), str(ds.get("file_sha256") or "").lower()):
++            models.append({"model_id": m.get("model_id"), "training_run_id": (m.get("lineage_contract") or {}).get("training_run_id"),
++                           "dataset_name": ds.get("name")})
++    # The same parsed table reached from different files (or vice versa) is
++    # reported, not hidden: it means the file changed but the table did not.
++    tables = sorted({r["dataset_sha256"] for r in runs if r.get("dataset_sha256")})
++    files = sorted({r["dataset_file_sha256"] for r in runs if r.get("dataset_file_sha256")})
++    return {"sha256": wanted, "runs": sorted(runs, key=lambda r: r.get("timestamp") or ""), "models": models,
++            "distinct_table_fingerprints": tables, "distinct_file_fingerprints": files}
+ 
+ 
+ @app.get("/model-inventory/documentation")
+@@ -897,7 +1241,7 @@ async def export_model_inventory() -> StreamingResponse:
+     if Workbook is None:
+         raise HTTPException(status_code=500, detail="openpyxl is not available for Excel export")
+ 
+-    store = persistence.ensure_model_inventory_seed()
++    store = persistence.load_model_inventory()  # read-only, like GET /model-inventory
+     output = io.BytesIO()
+     wb = Workbook()
+     ws_models = wb.active
+@@ -984,12 +1328,40 @@ async def export_model_inventory() -> StreamingResponse:
+     )
+ 
+ 
++def _preview_split(X: pd.DataFrame, y: pd.Series, task_type: str, test_size: float, val_size: float, random_seed: int):
++    """Split used by the data-preparation previews (feature decision log,
++    feature engineering, model recommendation). Uses the SAME split settings
++    as the training configuration the caller passes (defaults match
++    /models/train), never fixed values, and returns the split configuration
++    actually applied (sizes, seed, rows, training-row fingerprint) so the
++    preview can be reproduced and matched to a training run (E12)."""
++    if not (0.0 < float(test_size) < 1.0 and 0.0 < float(val_size) < 1.0 and float(test_size) + float(val_size) < 1.0):
++        raise HTTPException(status_code=400, detail="test_size and val_size must be in (0, 1) and sum to less than 1.")
++    report: Dict[str, Any] = {}
++    splits = split_data(X, y, test_size=test_size, val_size=val_size, task_type=task_type,
++                        random_state=random_seed, report=report)
++    X_train, X_val, X_test = splits[0], splits[1], splits[2]
++    split_config = {
++        "strategy": SPLIT_STRATEGY_STRATIFIED,
++        "test_size": test_size, "val_size": val_size, "random_seed": random_seed,
++        "train_rows": int(len(X_train)), "val_rows": int(len(X_val)), "test_rows": int(len(X_test)),
++        "train_index_sha256": model_lineage.index_fingerprint(X_train.index),
++        "achieved": report.get("achieved"), "degraded": bool(report.get("degraded")),
++        "fallbacks": report.get("fallbacks") or [],
++        "class_counts": report.get("class_counts"),
++    }
++    return splits, split_config
++
++
+ @app.post("/data/feature-decision-log")
+ async def feature_decision_log(
+     file: Optional[UploadFile] = File(None),
+     csv_text: Optional[str] = Form(None),
+     target_col: str = Form(...),
+     synthetic_samples: Optional[int] = Form(None),
++    test_size: float = Form(0.15),
++    val_size: float = Form(0.15),
++    random_seed: int = Form(42),
+ ) -> Dict[str, Any]:
+     """Return the Feature Decision Log CSV (exact format as the original Streamlit app).
+     This reconstructs the training-split plan and fe_summary then returns a CSV payload.
+@@ -1000,10 +1372,8 @@ async def feature_decision_log(
+         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+     task_type = detect_task_type(df[target_col])
+     X, y, _ = finalize_xy(df, col_types, target_col)
+-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+-        X, y, test_size=0.15, val_size=0.15,
+-        task_type=task_type, random_state=42,
+-    )
++    (X_train, X_val, X_test, y_train, y_val, y_test), split_config = _preview_split(
++        X, y, task_type, test_size, val_size, random_seed)
+     plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+     X_engineered, fe_summary = apply_feature_engineering(X_train, plan)
+ 
+@@ -1054,7 +1424,8 @@ async def feature_decision_log(
+ 
+     # Create CSV bytes
+     csv_bytes = pd.DataFrame(_log_rows).to_csv(index=False).encode("utf-8")
+-    return {"file_name": "feature_decision_log.csv", "content_base64": base64.b64encode(csv_bytes).decode("utf-8")}
++    return {"file_name": "feature_decision_log.csv", "content_base64": base64.b64encode(csv_bytes).decode("utf-8"),
++            "split_config": split_config}
+ 
+ 
+ class ComplianceRequest(BaseModel):
+@@ -1221,28 +1592,29 @@ def _to_base64(obj: Any) -> str:
+     return base64.b64encode(buffer.read()).decode("utf-8")
+ 
+ 
+-def _from_base64(encoded: str) -> Any:
+-    try:
+-        raw = base64.b64decode(encoded.encode("utf-8"))
+-        return joblib.load(io.BytesIO(raw))
+-    except Exception as exc:
+-        raise HTTPException(status_code=400, detail=f"Failed to load artifact: {exc}")
++# Browser-uploaded model artifacts (pickles) are NEVER deserialized: unpickling
++# runs code. Endpoints that score a model resolve it from an exact registered
++# model ID to the server's own scoring bundle, verified against the lineage
++# contract (model_lineage.load_registered_scoring_bundle). The old
++# _from_base64 / _load_model_artifact upload loaders were removed for this.
++UPLOADED_ARTIFACT_REJECTED = (
++    "Uploaded model artifacts are not accepted (deserializing them could execute code). "
++    "Supply registered_model_id: the server loads that registered model's verified scoring bundle."
++)
+ 
+ 
+-async def _load_model_artifact(model_artifact: UploadFile) -> Any:
+-    """
+-    Read a base64-encoded, pickled model pipeline sent as a multipart FILE
+-    part (not a plain Form field). A serialized sklearn Pipeline (encoder +
+-    estimator) easily exceeds the non-file form-field size cap that
+-    Starlette/python-multipart enforce to keep memory-only fields small ΓÇö
+-    file parts stream to a spooled temp file instead and aren't subject to
+-    that cap, which is why this must be File(...) rather than Form(...).
+-    """
++def _resolve_registered_pipeline(registered_model_id: Optional[str], uploaded_artifact_sent: bool) -> Dict[str, Any]:
++    """Verified scoring bundle for an exact registered model ID, or an HTTP
++    error. An uploaded artifact is never read ΓÇö its presence only changes the
++    error message when no ID is given."""
++    if not (registered_model_id or "").strip():
++        raise HTTPException(status_code=400, detail=UPLOADED_ARTIFACT_REJECTED if uploaded_artifact_sent
++                            else "registered_model_id is required: the model is loaded from its verified registered scoring bundle.")
+     try:
+-        raw_b64 = (await model_artifact.read()).decode("utf-8")
+-    except Exception as exc:
+-        raise HTTPException(status_code=400, detail=f"Failed to read model artifact upload: {exc}")
+-    return _from_base64(raw_b64)
++        return model_lineage.load_registered_scoring_bundle(registered_model_id)
++    except model_lineage.ArtifactVerificationError as exc:
++        raise HTTPException(status_code=exc.http_status,
++                            detail=f"Registered model cannot be loaded ({exc.status}): {' '.join(exc.reasons)}")
+ 
+ 
+ def _infer_target_column(df: pd.DataFrame, requested_target: Optional[str] = None) -> Optional[str]:
+@@ -1588,6 +1960,8 @@ async def upload_data(
+         profile["csv_text"] = df.to_csv(index=False)
+         profile["source_type"] = "demo"
+         profile["demo_mode"] = demo_mode
++        profile["demo_dataset"] = True
++        profile["dataset_identity"] = {**dataset_identity(df, None, profile["csv_text"]), "demo_dataset": True}
+         try:
+             persistence.log_event(
+                 persistence.DEV_PIPELINE_LOG,
+@@ -1596,6 +1970,8 @@ async def upload_data(
+                     "filename": dataset_name,
+                     "row_count": int(df.shape[0]),
+                     "column_count": int(df.shape[1]),
++                    "demo_dataset": True,
++                    **profile["dataset_identity"],
+                 },
+                 full_payload=profile,
+             )
+@@ -1612,6 +1988,9 @@ async def upload_data(
+         profile["synthetic_samples"] = int(synthetic_samples)
+     else:
+         profile["source_type"] = "file"
++    # Original-file identity (bytes as received) and parsed-table identity,
++    # recorded separately so a later mutation of either is detectable (E11).
++    profile["dataset_identity"] = dataset_identity(df, file, csv_text if not synthetic_samples else None)
+     try:
+         persistence.log_event(
+             persistence.DEV_PIPELINE_LOG,
+@@ -1620,6 +1999,7 @@ async def upload_data(
+                 "filename": dataset_name,
+                 "row_count": int(df.shape[0]),
+                 "column_count": int(df.shape[1]),
++                **profile["dataset_identity"],
+             },
+             full_payload=profile,
+         )
+@@ -1991,6 +2371,24 @@ async def integration_run(
+         profile["csv_text"] = integrated.to_csv(index=False)
+         profile["source_type"] = "integrated"
+         profile["integration_report"] = integrator.report.as_dict()
++        # Provenance (E11): the integrated table's identity, plus the identity
++        # of each supplied source file exactly as received. Sources are never
++        # rewritten; the integrated dataset is a new, separately identified table.
++        profile["dataset_identity"] = dataset_identity(integrated, None, profile["csv_text"])
++        profile["source_identities"] = {
++            "customer": source_fingerprint(customer_file, customer_csv_text),
++            "database": source_fingerprint(db_file) if db_file is not None else None,
++        }
++        try:
++            persistence.log_event(
++                persistence.DEV_PIPELINE_LOG,
++                stage="data_upload",
++                payload={"filename": dataset_name, "row_count": int(integrated.shape[0]),
++                         "column_count": int(integrated.shape[1]), **profile["dataset_identity"],
++                         "source_identities": profile["source_identities"]},
++            )
++        except Exception as e:
++            print(f"[persistence] failed to log integration: {e}")
+         return profile
+     finally:
+         if tmp_path:
+@@ -2418,6 +2816,7 @@ async def preprocess_data(
+     }
+ 
+     result = {
++        "dataset_identity": dataset_identity(df, file, csv_text),
+         "col_types": col_types,
+         "target_col": target_col,
+         "feature_names": feature_names,
+@@ -2466,6 +2865,8 @@ async def preprocess_data(
+                 "steps_applied": sorted(set(applied_steps)),
+                 "dropped_columns": _drop_cols_present,
+                 "resulting_x_shape": list(X_train.shape),
++                **result.get("dataset_identity", {}),
++                "split_config": {"test_size": test_size, "val_size": val_size, "random_seed": random_seed},
+             },
+             full_payload=result,
+         )
+@@ -2556,6 +2957,9 @@ async def feature_engineering(
+     transform_choices: Optional[str] = Form(None),
+     confirmed_remove_cols: Optional[str] = Form(None),
+     woe_pending_drop: Optional[str] = Form(None),
++    test_size: float = Form(0.15),
++    val_size: float = Form(0.15),
++    random_seed: int = Form(42),
+ ) -> Dict[str, Any]:
+     try:
+         transform_choices_dict = json.loads(transform_choices) if transform_choices else {}
+@@ -2576,10 +2980,8 @@ async def feature_engineering(
+         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+     task_type = detect_task_type(df[target_col])
+     X, y, _ = finalize_xy(df, col_types, target_col)
+-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+-        X, y, test_size=0.15, val_size=0.15,
+-        task_type=task_type, random_state=42,
+-    )
++    (X_train, X_val, X_test, y_train, y_val, y_test), split_config = _preview_split(
++        X, y, task_type, test_size, val_size, random_seed)
+     plan = analyze_for_feature_engineering(
+         X_train, y_train, col_types, task_type, model_family, transform_choices_dict,
+     )
+@@ -2657,6 +3059,8 @@ async def feature_engineering(
+         "interaction_scores": plan.get("interaction_scores", {}),
+         "feature_scores": plan.get("feature_scores", {}),
+         "transform_recommendations": plan.get("transform_recommendations", {}),
++        "split_config": split_config,
++        "dataset_identity": dataset_identity(df, file, csv_text),
+     }
+ 
+     try:
+@@ -2668,6 +3072,8 @@ async def feature_engineering(
+                 "features_added": plan.get("applied_steps", []),
+                 "features_removed": dropped_features,
+                 "final_feature_count": len(engineered_feature_names),
++                **result["dataset_identity"],
++                "split_config": {k: split_config[k] for k in ("test_size", "val_size", "random_seed", "train_index_sha256")},
+             },
+             full_payload=result,
+         )
+@@ -2807,8 +3213,12 @@ async def recommend_models_endpoint(
+     task_type: Optional[str] = Form(None),
+     synthetic_samples: Optional[int] = Form(None),
+     explainability_priority: float = Form(0.5),
++    test_size: float = Form(0.15),
++    val_size: float = Form(0.15),
++    random_seed: int = Form(42),
+ ) -> Dict[str, Any]:
+     fe_summary = None
++    split_config = None
+     if file is not None or csv_text or synthetic_samples:
+         df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+         if target_col is None or target_col not in df.columns:
+@@ -2821,9 +3231,8 @@ async def recommend_models_endpoint(
+ 
+         # Split the data exactly like the original Streamlit flow so recommendations
+         # are based on the TRAIN set after FE (parity requirement).
+-        X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+-            X, y, test_size=0.15, val_size=0.15, task_type=task_type, random_state=42
+-        )
++        (X_train, X_val, X_test, y_train, y_val, y_test), split_config = _preview_split(
++            X, y, task_type, test_size, val_size, random_seed)
+ 
+         # Learn FE plan on TRAIN and apply to TRAIN to get the actual feature set
+         try:
+@@ -2869,6 +3278,7 @@ async def recommend_models_endpoint(
+         },
+         "task_type": task_type,
+         "feature_engineering_summary": fe_summary,
++        "split_config": split_config,
+     }
+ 
+         
+@@ -2905,10 +3315,28 @@ async def train_model_endpoint(
+     transform_choices: Optional[str] = Form(None),
+     strategy_override: Optional[str] = Form(None),
+     preprocessing_contract: Optional[str] = Form(None),
++    split_strategy: str = Form(SPLIT_STRATEGY_STRATIFIED),
++    temporal_date_col: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+     if target_col not in df.columns:
+         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
++    split_strategy = (split_strategy or SPLIT_STRATEGY_STRATIFIED).strip()
++    if split_strategy not in SPLIT_STRATEGIES:
++        raise HTTPException(status_code=400, detail=f"split_strategy must be one of {list(SPLIT_STRATEGIES)}.")
++    temporal_date_col = (temporal_date_col or "").strip() or None
++    if split_strategy == SPLIT_STRATEGY_TEMPORAL:
++        if not temporal_date_col:
++            raise HTTPException(status_code=400, detail="A temporal split needs temporal_date_col (an explicit date column).")
++        if temporal_date_col not in df.columns:
++            raise HTTPException(status_code=400, detail=f"Date column '{temporal_date_col}' not found.")
++        if temporal_date_col == target_col:
++            raise HTTPException(status_code=400, detail="The date column cannot be the target column.")
++    elif temporal_date_col:
++        raise HTTPException(status_code=400, detail="temporal_date_col is only used with split_strategy='temporal'.")
++    if threshold is not None and not (0.0 < float(threshold) < 1.0):
++        raise HTTPException(status_code=400, detail="threshold must be between 0 and 1 (exclusive).")
++    data_identity = dataset_identity(df, file, csv_text)
+ 
+     contract_payload = _parse_json_field(preprocessing_contract, {}) if preprocessing_contract else {}
+     if not isinstance(contract_payload, dict):
+@@ -2948,28 +3376,36 @@ async def train_model_endpoint(
+     # The training path itself lives in model_lineage.fit_training_pipeline
+     # (moved verbatim) so registered-model reproduction re-runs exactly the
+     # same code. Everything below consumes the same variables as before.
+-    fit = model_lineage.fit_training_pipeline(
+-        df,
+-        target_col=target_col,
+-        model_name=model_name,
+-        estimator_name=estimator_name,
+-        test_size=test_size,
+-        val_size=val_size,
+-        random_seed=random_seed,
+-        use_cv=use_cv,
+-        cv_folds=cv_folds,
+-        use_hyperopt=use_hyperopt,
+-        scale_pos_weight=scale_pos_weight,
+-        manual_params_dict=manual_params_dict,
+-        use_feature_engineering=use_feature_engineering,
+-        use_oot=use_oot,
+-        date_col=date_col,
+-        contract_payload=contract_payload,
+-        combined_treatment_overrides=combined_treatment_overrides,
+-        combined_drop_cols=combined_drop_cols,
+-        combined_transform_choices=combined_transform_choices,
+-        combined_strategy_override=combined_strategy_override,
+-    )
++    try:
++        fit = model_lineage.fit_training_pipeline(
++            df,
++            target_col=target_col,
++            model_name=model_name,
++            estimator_name=estimator_name,
++            test_size=test_size,
++            val_size=val_size,
++            random_seed=random_seed,
++            use_cv=use_cv,
++            cv_folds=cv_folds,
++            use_hyperopt=use_hyperopt,
++            scale_pos_weight=scale_pos_weight,
++            manual_params_dict=manual_params_dict,
++            use_feature_engineering=use_feature_engineering,
++            use_oot=use_oot,
++            date_col=date_col,
++            contract_payload=contract_payload,
++            combined_treatment_overrides=combined_treatment_overrides,
++            combined_drop_cols=combined_drop_cols,
++            combined_transform_choices=combined_transform_choices,
++            combined_strategy_override=combined_strategy_override,
++            split_strategy=split_strategy,
++            temporal_date_col=temporal_date_col,
++        )
++    except ValueError as exc:
++        # Temporal split preconditions (unparseable dates, too few rows).
++        if split_strategy == SPLIT_STRATEGY_TEMPORAL and ("emporal" in str(exc) or "date" in str(exc)):
++            raise HTTPException(status_code=400, detail=str(exc))
++        raise
+     col_types = fit["col_types"]
+     task_type = fit["task_type"]
+     X_train, X_val, X_test = fit["X_train"], fit["X_val"], fit["X_test"]
+@@ -2996,10 +3432,28 @@ async def train_model_endpoint(
+         except Exception:
+             y_proba = None
+ 
++    # Operating threshold: the user's value, or chosen on the VALIDATION
++    # partition; the test rows are only scored with it (E3).
++    threshold_provenance = None
++    if task_type == "binary":
++        proba_val = None
++        if hasattr(pipeline, "predict_proba"):
++            try:
++                proba_val = pipeline.predict_proba(X_val)
++            except Exception:
++                proba_val = None
++        threshold_provenance = select_operating_threshold(y_val.values, proba_val, manual=threshold)
++    operating_threshold_value = threshold_provenance["value"] if threshold_provenance else threshold
++
+     metrics, evaluation_data = _build_evaluation_data(
+-        y_test.values, y_pred, y_proba, task_type, threshold=threshold,
++        y_test.values, y_pred, y_proba, task_type, threshold=operating_threshold_value,
+         dates=dates_test, date_columns=[origination_date_col] if origination_date_col else [],
+     )
++    metrics["evaluation_partition"] = "test"
++    evaluation_data["evaluation_partition"] = "test"
++    if threshold_provenance:
++        metrics["threshold_provenance"] = threshold_provenance
++        evaluation_data["threshold_provenance"] = threshold_provenance
+ 
+     # Additional dataset / preprocessing metadata computed by the pipeline
+     numeric_count = len(col_types.get("numeric", [])) if isinstance(col_types, dict) else None
+@@ -3053,7 +3507,14 @@ async def train_model_endpoint(
+             "manual_params": manual_params_dict or {},
+             "use_oot": use_oot,
+             "date_col": origination_date_col,
++            "split_strategy": split_strategy,
++            "temporal_date_col": temporal_date_col,
++            "threshold": operating_threshold_value,
++            "threshold_mode": "manual" if threshold is not None else "auto_validation",
+         },
++        "split_report": fit["split_report"],
++        "threshold_provenance": threshold_provenance,
++        "dataset_identity": data_identity,
+         "training_info": {
+             **training_info,
+             "preprocessing_contract_used": training_contract,
+@@ -3090,11 +3551,18 @@ async def train_model_endpoint(
+             stage="training",
+             payload={
+                 "model_name": model_name,
++                "business_model_name": business_model_name,
+                 "hyperparameters": manual_params_dict or {},
+                 "metrics": metrics,
++                **data_identity,
++                "split_strategy": split_strategy,
++                "split_degraded": bool((fit["split_report"] or {}).get("degraded")),
++                "operating_threshold": operating_threshold_value,
++                "threshold_method": (threshold_provenance or {}).get("method"),
+             },
+             full_payload=result,
+         )
++        result["training_run_id"] = run_id
+         # Immediate -- ensure registration is attempted right after artifact creation.
+         try:
+             early_store = persistence.load_model_inventory()
+@@ -3135,12 +3603,9 @@ async def train_model_endpoint(
+                 persistence.save_model_inventory(early_store)
+             except Exception:
+                 pass
+-            try:
+-                if isinstance(early_reg, dict) and early_reg.get("model_id"):
+-                    result["model_id"] = early_reg.get("model_id")
+-                    persistence.save_artifact(persistence.DEV_PIPELINE_LOG, "training", run_id, result)
+-            except Exception:
+-                pass
++            if isinstance(early_reg, dict) and early_reg.get("model_id"):
++                # Returned to the caller only; the training artifact is immutable.
++                result["model_id"] = early_reg.get("model_id")
+         except Exception as _e:
+             try:
+                 import traceback
+@@ -3308,10 +3773,12 @@ async def train_model_endpoint(
+                     dataset_sha256=dataset_fingerprint(df),
+                     dataset_shape=[int(df.shape[0]), int(df.shape[1])],
+                     training_config=result.get("training_config", {}),
+-                    threshold=threshold,
++                    threshold=operating_threshold_value,
++                    threshold_provenance=threshold_provenance,
+                     development_metrics=metrics,
+                     artifact=lineage_artifact,
+                 )
++                created_entry["lineage_contract"]["dataset"]["file_sha256"] = data_identity["dataset_file_sha256"]
+                 created_entry.pop("lineage_contract_error", None)
+                 lineage_status = {
+                     "captured": True,
+@@ -3361,20 +3828,34 @@ async def train_model_endpoint(
+             print(f"[registration] save_model_inventory FAILED: {e}")
+             raise
+ 
+-        # Update the training artifact to include the assigned model_id and
+-        # documentation path so artifacts reflect registered models.
++        # Registration is recorded as its OWN event linking the model ID to
++        # the training run. The training artifact is never rewritten, so the
++        # SHA-256 recorded when it was created stays verifiable (E9).
+         try:
+-            if isinstance(reg_result, dict) and run_id:
++            if isinstance(reg_result, dict) and run_id and reg_result.get("model_id"):
+                 assigned_id = reg_result.get("model_id")
+-                if assigned_id:
+-                    result["model_id"] = assigned_id
+-                    if created_entry and created_entry.get("documentation_path"):
+-                        result["documentation_path"] = created_entry.get("documentation_path")
+-                    # overwrite artifact with updated payload
+-                    new_artifact_rel = persistence.save_artifact(persistence.DEV_PIPELINE_LOG, "training", run_id, result)
+-                    print(f"[registration] updated training artifact for run {run_id}: {new_artifact_rel}")
++                result["model_id"] = assigned_id
++                if created_entry and created_entry.get("documentation_path"):
++                    result["documentation_path"] = created_entry.get("documentation_path")
++                training_row = persistence.get_run(persistence.DEV_PIPELINE_LOG, run_id) or {}
++                registration_record = {
++                    "registered_model_id": assigned_id,
++                    "training_run_id": run_id,
++                    "business_model_name": business_model_name,
++                    "training_artifact_sha256": (training_row.get("summary") or {}).get("artifact_sha256"),
++                    "lineage_captured": bool(lineage_status.get("captured")),
++                    "bundle_sha256": lineage_status.get("artifact_sha256"),
++                    "documentation_path": result.get("documentation_path"),
++                    **data_identity,
++                }
++                result["registration_run_id"] = persistence.log_event(
++                    persistence.DEV_PIPELINE_LOG,
++                    stage="registration",
++                    payload=registration_record,
++                    full_payload=registration_record,
++                )
+         except Exception as _e:
+-            print(f"[registration] failed to update training artifact with model_id: {_e}")
++            print(f"[registration] failed to log registration event: {_e}")
+     except Exception as e:
+         import traceback
+         print(f"[persistence] failed to update inventory from development: {e}")
+@@ -3446,6 +3927,7 @@ async def compare_models_endpoint(
+     if use_feature_engineering:
+         plan = analyze_for_feature_engineering(X_train, y_train, col_types, task_type)
+         X_train, fe_summary = apply_feature_engineering(X_train, plan)
++        X_val, _ = apply_feature_engineering(X_val, plan)
+         X_test, _ = apply_feature_engineering(X_test, plan)
+ 
+     results = []
+@@ -3474,7 +3956,16 @@ async def compare_models_endpoint(
+                     y_proba = None
+ 
+             if task_type == "binary":
+-                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=None)
++                # Each candidate's threshold is chosen on the validation rows,
++                # then applied unchanged to the test rows (E3).
++                proba_val = None
++                try:
++                    proba_val = pipeline.predict_proba(X_val) if y_proba is not None else None
++                except Exception:
++                    proba_val = None
++                provenance = select_operating_threshold(y_val.values, proba_val)
++                metrics = compute_binary_metrics(y_test.values, y_pred, y_proba, threshold=provenance["value"])
++                metrics["threshold_provenance"] = provenance
+             else:
+                 metrics = compute_regression_metrics(y_test.values, y_pred)
+ 
+@@ -3490,25 +3981,130 @@ async def compare_models_endpoint(
+         "task_type": task_type,
+         "comparison": results,
+         "feature_engineering_summary": fe_summary,
++        "split_config": {"test_size": test_size, "val_size": val_size, "random_seed": random_seed,
++                         "strategy": SPLIT_STRATEGY_STRATIFIED},
++        "evaluation_partition": "test",
++    }
++
++
++EVAL_PARTITION_TEST = "test"
++EVAL_PARTITION_VALIDATION = "validation"
++EVAL_PARTITION_INDEPENDENT = "independent"
++EVAL_PARTITIONS = (EVAL_PARTITION_TEST, EVAL_PARTITION_VALIDATION, EVAL_PARTITION_INDEPENDENT)
++
++
++def _evaluation_rows(resolved: Dict[str, Any], df: pd.DataFrame, target_col: str, partition: Optional[str],
++                     independent_reason: Optional[str], *, file=None, csv_text=None) -> Dict[str, Any]:
++    """The rows a registered model may be evaluated on, scored through its
++    verified bundle, and the identity of that evaluation. Never the training
++    rows: in-sample requests fail with 409."""
++    partition = (partition or EVAL_PARTITION_TEST).strip().lower()
++    if partition not in EVAL_PARTITIONS:
++        raise HTTPException(status_code=400, detail=f"evaluation_partition must be one of {list(EVAL_PARTITIONS)}.")
++    contract = resolved["contract"]
++    model_id = resolved["model_id"]
++    identity = dataset_identity(df, file, csv_text)
++    training_sha = (contract.get("dataset") or {}).get("sha256")
++    if contract.get("target_col") and contract["target_col"] != target_col:
++        raise HTTPException(status_code=409, detail=(
++            f"target_mismatch: {model_id} was trained on target '{contract['target_col']}', not '{target_col}'."))
++    reason = (independent_reason or "").strip() or None
++    if partition == EVAL_PARTITION_INDEPENDENT:
++        if not reason:
++            raise HTTPException(status_code=400, detail=(
++                "independent_dataset_reason is required: document why this dataset is independent of the training data."))
++        if not training_sha:
++            raise HTTPException(status_code=409, detail=(
++                f"independence_unverifiable: {model_id}'s training dataset fingerprint is not recorded, so this "
++                "dataset cannot be shown to differ from the training data."))
++        if identity["dataset_sha256"] == training_sha:
++            raise HTTPException(status_code=409, detail=(
++                f"in_sample: the supplied dataset is {model_id}'s training dataset. Evaluate its recorded "
++                "'test' or 'validation' partition instead."))
++        index = df.index
++        raw = df.drop(columns=[target_col], errors="ignore")
++    else:
++        if not training_sha or identity["dataset_sha256"] != training_sha:
++            raise HTTPException(status_code=409, detail=(
++                f"dataset_mismatch: the '{partition}' partition exists only in {model_id}'s training dataset "
++                f"({(contract.get('dataset') or {}).get('name')}). For another dataset use "
++                "evaluation_partition='independent' with a documented reason."))
++        try:
++            (Xtr, Xv, Xte, _ytr, _yv, _yte), _rep = model_lineage.contract_split(df, contract)
++        except Exception as exc:
++            raise HTTPException(status_code=409, detail=f"split_unavailable: the recorded split could not be re-derived ({exc}).")
++        if model_lineage.index_fingerprint(Xte.index) != (contract.get("split") or {}).get("test_index_sha256"):
++            raise HTTPException(status_code=409, detail="split_mismatch: the recorded test rows could not be reproduced.")
++        raw = Xte if partition == EVAL_PARTITION_TEST else Xv
++        index = raw.index
++    try:
++        X = model_lineage._transform_for_bundle(resolved["bundle"], raw)
++    except KeyError as exc:
++        raise HTTPException(status_code=409, detail=f"feature_mismatch: the dataset lacks the model's input columns ({exc}).")
++    scope = {
++        "partition": partition,
++        "in_sample": False,
++        "registered_model_id": model_id,
++        "training_run_id": contract.get("training_run_id"),
++        "bundle_sha256": (contract.get("artifact") or {}).get("sha256"),
++        "dataset_sha256": identity["dataset_sha256"],
++        "dataset_file_sha256": identity["dataset_file_sha256"],
++        "training_dataset_sha256": training_sha,
++        "rows": int(len(index)),
++        "row_index_sha256": model_lineage.index_fingerprint(index),
++        "independent_dataset_reason": reason if partition == EVAL_PARTITION_INDEPENDENT else None,
++        "limitations": ([
++            "Row-level overlap with the training data cannot be checked (training rows are not stored); "
++            "independence rests on the documented reason and a different dataset fingerprint."]
++            if partition == EVAL_PARTITION_INDEPENDENT else []),
+     }
++    return {"index": index, "X": X, "scope": scope}
+ 
+ 
+ @app.post("/models/evaluate")
+ async def evaluate_model(
+-    model_artifact: UploadFile = File(...),
++    # Kept in the signature for compatibility only ΓÇö never read or deserialized.
++    model_artifact: Optional[UploadFile] = File(None),
+     file: Optional[UploadFile] = File(None),
+     csv_text: Optional[str] = Form(None),
+     target_col: str = Form(...),
+     threshold: Optional[float] = Form(None),
+     synthetic_samples: Optional[int] = Form(None),
+     date_col: Optional[str] = Form(None),
++    registered_model_id: Optional[str] = Form(None),
++    evaluation_partition: str = Form(EVAL_PARTITION_TEST),
++    independent_dataset_reason: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
++    """Score the registered model identified by `registered_model_id`, loaded
++    from its verified scoring bundle. Uploaded model artifacts are rejected.
++
++    Out-of-sample only (E8): `evaluation_partition` is
++      - "test" (default) / "validation": the registered model's own recorded
++        partition, re-derived from its lineage contract; the supplied data
++        must be its training dataset;
++      - "independent": a different dataset, with a documented reason. The
++        training dataset itself is refused (in-sample).
++    The operating threshold is the registered one unless `threshold` is given
++    (recorded as a manual override)."""
++    resolved = _resolve_registered_pipeline(registered_model_id, model_artifact is not None)
++    pipeline = resolved["bundle"]["pipeline"]
+     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+     if target_col not in df.columns:
+         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+-    pipeline = await _load_model_artifact(model_artifact)
+-    y_true = df[target_col].values
+-    X_eval = df.drop(columns=[target_col], errors='ignore')
++    scope_rows = _evaluation_rows(resolved, df, target_col, evaluation_partition, independent_dataset_reason,
++                                  file=file, csv_text=csv_text)
++    eval_index = scope_rows["index"]
++    y_true = df.loc[eval_index, target_col].values
++    X_eval = scope_rows["X"]
++    if threshold is not None:
++        if not (0.0 < float(threshold) < 1.0):
++            raise HTTPException(status_code=400, detail="threshold must be between 0 and 1 (exclusive).")
++        threshold_info = {"value": float(threshold), "status": "MANUAL_OVERRIDE",
++                          "provenance": select_operating_threshold(None, None, manual=float(threshold)),
++                          "detail": "Reviewer-specified threshold; not the registered model's operating threshold."}
++    else:
++        threshold_info = model_lineage.operating_threshold(resolved["contract"])
++    threshold = threshold_info["value"]
+     y_pred = pipeline.predict(X_eval)
+     y_proba = None
+     if hasattr(pipeline, "predict_proba"):
+@@ -3526,25 +4122,45 @@ async def evaluate_model(
+         datetime_candidates = col_types.get("datetime", [])
+         if datetime_candidates:
+             origination_date_col = datetime_candidates[0]
+-    dates_eval = df[origination_date_col] if origination_date_col else None
++    dates_eval = df.loc[eval_index, origination_date_col] if origination_date_col else None
+ 
+     metrics, evaluation_data = _build_evaluation_data(
+         y_true, y_pred, y_proba, task_type, threshold=threshold,
+         dates=dates_eval, date_columns=[origination_date_col] if origination_date_col else [],
+     )
++    evaluation_scope = {
++        **scope_rows["scope"],
++        "operating_threshold": threshold,
++        "threshold_status": threshold_info["status"],
++        "threshold_detail": threshold_info["detail"],
++        "threshold_provenance": threshold_info.get("provenance"),
++    }
++    metrics["evaluation_partition"] = evaluation_scope["partition"]
++    evaluation_data["evaluation_scope"] = evaluation_scope
+ 
+     # Same response shape as /models/train so callers can treat both
+     # endpoints' evaluation payload identically.
+     result = {
+         "evaluation_metrics": metrics,
+         "evaluation_data": evaluation_data,
++        "evaluation_scope": evaluation_scope,
+     }
+ 
+     try:
+         persistence.log_event(
+             persistence.DEV_PIPELINE_LOG,
+             stage="evaluation",
+-            payload={"evaluation_metrics": metrics},
++            payload={
++                "evaluation_metrics": metrics,
++                "registered_model_id": evaluation_scope["registered_model_id"],
++                "training_run_id": evaluation_scope["training_run_id"],
++                "evaluation_partition": evaluation_scope["partition"],
++                "dataset_sha256": evaluation_scope["dataset_sha256"],
++                "dataset_file_sha256": evaluation_scope["dataset_file_sha256"],
++                "row_index_sha256": evaluation_scope["row_index_sha256"],
++                "operating_threshold": threshold,
++                "threshold_status": threshold_info["status"],
++            },
+             full_payload=result,
+         )
+     except Exception as e:
+@@ -3555,7 +4171,8 @@ async def evaluate_model(
+ 
+ @app.post("/models/explain")
+ async def explain_model(
+-    model_artifact: UploadFile = File(...),
++    # Kept in the signature for compatibility only ΓÇö never read or deserialized.
++    model_artifact: Optional[UploadFile] = File(None),
+     file: Optional[UploadFile] = File(None),
+     csv_text: Optional[str] = Form(None),
+     target_col: Optional[str] = Form(None),
+@@ -3583,82 +4200,142 @@ async def explain_model(
+     # existing callers working; the frontend passes False for the initial
+     # Feature-Importance-only load.
+     compute_shap: bool = Form(True),
++    # The model to explain: an exact registered model ID. The server loads its
++    # verified scoring bundle; uploaded artifacts are rejected.
++    registered_model_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
++    resolved = _resolve_registered_pipeline(registered_model_id, model_artifact is not None)
++    pipeline = resolved["bundle"]["pipeline"]
++    contract = resolved["contract"]
+     df = await _read_dataframe(file=file, csv_text=csv_text, synthetic_samples=synthetic_samples)
+     if target_col is not None and target_col not in df.columns:
+         raise HTTPException(status_code=400, detail=f"Target column '{target_col}' not found")
+-    pipeline = await _load_model_artifact(model_artifact)
+ 
+-    if target_col is not None:
+-        col_types = detect_column_types(df)
+-        resolved_task_type = task_type or detect_task_type(df[target_col])
+-        X, y, _ = finalize_xy(df, col_types, target_col)
+-        X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+-            X, y, test_size=test_size, val_size=val_size,
+-            task_type=resolved_task_type, random_state=random_seed,
+-        )
+-        if use_feature_engineering:
+-            plan = analyze_for_feature_engineering(X_train, y_train, col_types, resolved_task_type)
+-            X_test, _ = apply_feature_engineering(X_test, plan)
+-        X_explain = X_test
++    # E6 ΓÇö explain exactly the registered model (its verified bundle) on
++    # exactly identified rows, through exactly the registered scoring chain:
++    #   training dataset ΓåÆ its recorded test rows (same rows as the registered
++    #                      test evaluation; a split that does not reproduce is
++    #                      refused, never replaced by other rows);
++    #   other dataset    ΓåÆ the supplied rows, reduced to the raw feature
++    #                      columns recorded at training, in recorded order.
++    #                      Missing columns are refused; nothing is imputed or
++    #                      reconstructed to stand in for them.
++    # Then the bundle's dropped columns ΓåÆ imputer ΓåÆ feature engineering ΓåÆ
++    # model-input column order, and the pipeline (encoding/scaling ΓåÆ model).
++    identity = dataset_identity(df, file, csv_text)
++    training_sha = (contract.get("dataset") or {}).get("sha256")
++    split = contract.get("split") or {}
++    if training_sha and identity["dataset_sha256"] == training_sha and split.get("test_index_sha256"):
++        try:
++            (_xtr, _xv, raw, _ytr, _yv, _yte), _rep = model_lineage.contract_split(df, contract)
++        except Exception as exc:
++            raise HTTPException(status_code=409, detail=f"split_unavailable: the recorded split could not be re-derived ({exc}).")
++        if model_lineage.index_fingerprint(raw.index) != split["test_index_sha256"]:
++            raise HTTPException(status_code=409, detail="split_mismatch: the recorded test rows could not be reproduced.")
++        explain_rows = "registered_test_partition"
+     else:
+-        X_explain = df
+-
+-    importance_df = extract_feature_importance(pipeline)
+-    importance = []
+-    if importance_df is not None:
+-        importance = importance_df.to_dict(orient="records")
+-
+-    shap_info: Dict[str, Any] = {"shap_available": False}
+-    shap_result = compute_shap_values(pipeline, X_explain, max_samples=max_shap_samples) if compute_shap else None
++        raw_columns = list((contract.get("features") or {}).get("raw_feature_columns") or [])
++        if not raw_columns:
++            raise HTTPException(status_code=409, detail=(
++                "explain_inputs_unverifiable: the lineage contract does not record the model's raw feature columns, "
++                "so the supplied rows cannot be matched to the registered model's inputs."))
++        missing = [c for c in raw_columns if c not in df.columns]
++        if missing:
++            raise HTTPException(status_code=409, detail=(
++                f"feature_mismatch: the dataset lacks the registered model's raw input columns {missing}."))
++        raw = df[raw_columns]
++        explain_rows = "supplied_dataset"
++    try:
++        X_explain = model_lineage._transform_for_bundle(resolved["bundle"], raw)
++    except KeyError as exc:
++        raise HTTPException(status_code=409, detail=f"feature_mismatch: the dataset lacks the model's input columns ({exc}).")
++
++    # The probabilities every per-row output uses: the registered pipeline on
++    # exactly these rows. Their hash is recorded so parity can be checked.
++    proba_2d = np.asarray(pipeline.predict_proba(X_explain))
++    proba = np.ascontiguousarray(proba_2d[:, 1], dtype=np.float64)
++    op = model_lineage.operating_threshold(contract)
++    threshold_source = (
++        f"{(op.get('provenance') or {}).get('method')} on {(op.get('provenance') or {}).get('source_partition')}"
++        if op["status"] == "PASS" else
++        "nominal 0.5, not the model's recorded threshold" if op["status"] == "FAIL" else
++        "recorded without its selection method")
++
++    importance_df, importance_reason = feature_importance_with_reason(pipeline)
++    importance = importance_df.to_dict(orient="records") if importance_df is not None else []
++
++    shap_info: Dict[str, Any] = {"shap_available": False, "shap_unavailable_reason": None if compute_shap else "Not requested."}
++    shap_result = None
++    if compute_shap:
++        shap_result, shap_reason = compute_shap_values_with_reason(pipeline, X_explain, max_samples=max_shap_samples)
++        shap_info["shap_unavailable_reason"] = shap_reason
+     if shap_result is not None:
+         explainer, shap_values, X_df, names = shap_result
++        # SHAP explains the first len(X_df) rows of X_explain, in order.
++        explained_index = list(X_explain.index[:len(X_df)])
++        if not (0 <= sample_idx < len(X_df)):
++            raise HTTPException(status_code=400, detail=f"sample_idx must be between 0 and {len(X_df) - 1} (rows explained).")
+         mean_abs = list(
+             pd.DataFrame({"Feature": X_df.columns, "MeanAbsSHAP": np.abs(shap_values).mean(axis=0)})
+             .sort_values("MeanAbsSHAP", ascending=False)
+             .head(20)
+             .to_dict(orient="records")
+         )
+-        reasoning = None
+-        sample_shap: List[Dict[str, Any]] = []
+-        sample_features: Dict[str, Any] = {}
+-        if 0 <= sample_idx < len(X_df):
+-            try:
+-                model_proba = pipeline.predict_proba(X_explain) if hasattr(pipeline, "predict_proba") else np.zeros((len(X_df), 2))
+-            except Exception:
+-                model_proba = np.zeros((len(X_df), 2))
+-            reasoning = generate_prediction_reasoning(shap_values, X_df, model_proba, sample_idx, threshold=0.5)
+-            shap_row = shap_values[sample_idx]
+-            feat_row = X_df.iloc[sample_idx]
+-            # Top 12 by |SHAP| magnitude, then re-sorted ascending by signed
+-            # value ΓÇö the explainability chart renders this list top-to-bottom
+-            # as-is (no further sort/slice on the frontend), so ordering here
+-            # is what determines the bar chart's reading order.
+-            sample_shap = sorted(
+-                sorted(
+-                    (
+-                        {
+-                            "Feature": feat,
+-                            "SHAP": _json_safe_scalar(shap_row[i]),
+-                            "Value": _json_safe_scalar(feat_row.iloc[i]),
+-                        }
+-                        for i, feat in enumerate(X_df.columns)
+-                    ),
+-                    key=lambda r: abs(r["SHAP"]) if r["SHAP"] is not None else 0.0,
+-                    reverse=True,
+-                )[:12],
+-                key=lambda r: r["SHAP"] if r["SHAP"] is not None else 0.0,
+-            )
+-            sample_features = {feat: _json_safe_scalar(feat_row.iloc[i]) for i, feat in enumerate(X_df.columns)}
++        reasoning = generate_prediction_reasoning(shap_values, X_df, proba_2d[:len(X_df)], sample_idx,
++                                                  threshold=op["value"], threshold_source=threshold_source)
++        shap_row = shap_values[sample_idx]
++        feat_row = X_df.iloc[sample_idx]
++        # Top 12 by |SHAP| magnitude, then re-sorted ascending by signed
++        # value ΓÇö the explainability chart renders this list top-to-bottom
++        # as-is (no further sort/slice on the frontend), so ordering here
++        # is what determines the bar chart's reading order.
++        sample_shap = sorted(
++            sorted(
++                (
++                    {
++                        "Feature": feat,
++                        "SHAP": _json_safe_scalar(shap_row[i]),
++                        "Value": _json_safe_scalar(feat_row.iloc[i]),
++                    }
++                    for i, feat in enumerate(X_df.columns)
++                ),
++                key=lambda r: abs(r["SHAP"]) if r["SHAP"] is not None else 0.0,
++                reverse=True,
++            )[:12],
++            key=lambda r: r["SHAP"] if r["SHAP"] is not None else 0.0,
++        )
+         shap_info = {
+             "shap_available": True,
++            "shap_unavailable_reason": None,
+             "shap_mean_abs": mean_abs,
+             "sample_idx": sample_idx,
++            "sample_row_index": _json_safe_scalar(explained_index[sample_idx]),
++            "sample_predicted_pd": float(proba[sample_idx]),
++            "explained_rows": int(len(X_df)),
++            "explained_row_index": [_json_safe_scalar(i) for i in explained_index],
+             "sample_reasoning": reasoning,
+             "sample_shap": sample_shap,
+-            "sample_features": sample_features,
++            "sample_features": {feat: _json_safe_scalar(feat_row.iloc[i]) for i, feat in enumerate(X_df.columns)},
+         }
+ 
++    explain_scope = {
++        "registered_model_id": resolved["model_id"],
++        "training_run_id": contract.get("training_run_id"),
++        "bundle_sha256": (contract.get("artifact") or {}).get("sha256"),
++        "rows": explain_rows,
++        "row_count": int(len(X_explain)),
++        "row_index_sha256": model_lineage.index_fingerprint(X_explain.index),
++        "predictions_sha256": hashlib.sha256(proba.tobytes()).hexdigest(),
++        "model_input_columns": [str(c) for c in X_explain.columns],
++        "dataset_sha256": identity["dataset_sha256"],
++        "dataset_file_sha256": identity["dataset_file_sha256"],
++        "operating_threshold": op["value"],
++        "threshold_status": op["status"],
++        "threshold_source": threshold_source,
++        "feature_importance_unavailable_reason": importance_reason,
++        "shap_unavailable_reason": shap_info.get("shap_unavailable_reason"),
++    }
++
+     summary_text = None
+     if metrics:
+         try:
+@@ -3671,6 +4348,7 @@ async def explain_model(
+         "feature_importance": importance,
+         "shap": shap_info,
+         "summary": summary_text,
++        "explain_scope": explain_scope,
+     }
+ 
+     try:
+@@ -3680,6 +4358,13 @@ async def explain_model(
+             payload={
+                 "method": "shap" if shap_info.get("shap_available") else "feature_importance",
+                 "compute_shap": compute_shap,
++                "registered_model_id": explain_scope["registered_model_id"],
++                "training_run_id": explain_scope["training_run_id"],
++                "dataset_sha256": explain_scope["dataset_sha256"],
++                "dataset_file_sha256": explain_scope["dataset_file_sha256"],
++                "explain_rows": explain_rows,
++                "row_index_sha256": explain_scope["row_index_sha256"],
++                "predictions_sha256": explain_scope["predictions_sha256"],
+             },
+             full_payload=result,
+         )
+@@ -3695,6 +4380,7 @@ def _run_benchmark_comparison(
+     target_col: str,
+     y_true: Optional[np.ndarray],
+     y_proba: Optional[np.ndarray],
++    df: Optional[pd.DataFrame] = None,
+ ) -> Dict[str, Any]:
+     """Fits the selected challenger model and compares it against the
+     already-fitted champion.
+@@ -3751,7 +4437,17 @@ def _run_benchmark_comparison(
+             }
+         bm_proba_2d = pipeline.predict_proba(X_test)
+         bm_pred = pipeline.predict(X_test)
+-        bm_metrics = compute_binary_metrics(np.asarray(y_true).astype(int), bm_pred, bm_proba_2d, threshold=None)
++        # The challenger's threshold is chosen on the champion's validation
++        # rows (never on the shared test rows it is compared on) (E3).
++        X_val, y_val = replication_result.get("X_val"), replication_result.get("y_val")
++        bm_proba_val = None
++        if X_val is not None and y_val is not None:
++            try:
++                bm_proba_val = pipeline.predict_proba(X_val)
++            except Exception:
++                bm_proba_val = None
++        bm_threshold = select_operating_threshold(None if y_val is None else np.asarray(y_val).astype(int), bm_proba_val)
++        bm_metrics = compute_binary_metrics(np.asarray(y_true).astype(int), bm_pred, bm_proba_2d, threshold=bm_threshold["value"])
+         # compute_binary_metrics() never returns "gini" ΓÇö it's not one of the
+         # keys it computes. The champion side (val_replication_core._fit_core)
+         # adds it separately via _gini()/_ks() after calling the same
+@@ -3787,19 +4483,21 @@ def _run_benchmark_comparison(
+     return {
+         "model_name": challenger_model_name,
+         "status": "OK",
+-        "roc_curve": {"points": bm_roc_curve, "auc": bm_auc},
+-        "pr_curve": {"points": bm_pr_curve, "average_precision": bm_metrics.get("pr_auc")},
+-        "evaluation": {"test_rows": int(len(y_true_int)), "same_test_rows_as_champion": True},
++        "roc_curve": {"points": bm_roc_curve, "auc": bm_auc,
++                      "provenance": curve_provenance(CURVE_SOURCE_CHALLENGER_REFIT, replication_result.get("y_test"), df)},
++        "pr_curve": {"points": bm_pr_curve, "average_precision": bm_metrics.get("pr_auc"),
++                     "provenance": curve_provenance(CURVE_SOURCE_CHALLENGER_REFIT, replication_result.get("y_test"), df)},
++        "evaluation": {"test_rows": int(len(y_true_int)), "same_test_rows_as_champion": True,
++                       "threshold_provenance": bm_threshold,
++                       "champion_threshold_provenance": (replication_result.get("metrics") or {}).get("threshold_provenance")
++                       or (replication_result.get("operating_threshold") or {}).get("provenance")},
+         "metrics": {
+             "roc_auc": bm_auc,
+             "gini": bm_gini,
+             "recall": bm_recall,
+             # Exposed so a low recall is explainable rather than a black box:
+-            # compute_binary_metrics() auto-selects the F1-maximizing
+-            # threshold (see evaluate_new.select_best_threshold) rather than
+-            # a naive 0.5 cutoff, so "recall is low" usually means that
+-            # threshold landed high to protect precision on this dataset's
+-            # class balance ΓÇö these fields show exactly where and why.
++            # the threshold is the F1-maximising one on the validation rows
++            # (see evaluation.threshold_provenance), applied to the test rows.
+             "precision": bm_metrics.get("precision"),
+             "f1": bm_metrics.get("f1"),
+             "accuracy": bm_metrics.get("accuracy"),
+@@ -3825,11 +4523,32 @@ def _run_benchmark_comparison(
+     }
+ 
+ 
++CURVE_SOURCE_REGISTERED_BUNDLE = "registered_bundle"
++CURVE_SOURCE_INDEPENDENT_RETRAIN = "independent_retrain"
++CURVE_SOURCE_UNREGISTERED_REFIT = "unregistered_refit"
++CURVE_SOURCE_CHALLENGER_REFIT = "challenger_refit"
++
++
++def curve_provenance(source: Optional[str], y_true: Any, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
++    """Where a ROC / PR curve's points come from (G2): whose predictions, on
++    which partition, how many rows, and the identity of the dataset and of
++    the exact test rows scored. Nothing is inferred: unknown parts are None."""
++    index = getattr(y_true, "index", None)
++    return {
++        "prediction_source": source,
++        "evaluation_partition": "test",
++        "rows": int(len(y_true)) if y_true is not None else None,
++        "dataset_sha256": dataset_fingerprint(df) if df is not None else None,
++        "test_index_sha256": model_lineage.index_fingerprint(index) if index is not None else None,
++    }
++
++
+ def _build_performance_report(
+     df: Optional[pd.DataFrame],
+     replication_result: Dict[str, Any],
+     intake_payload: Dict[str, Any],
+     mdd_text: str,
++    prediction_source: Optional[str] = None,
+ ) -> Dict[str, Any]:
+     """Full performance report (metrics, ROC/PR curves, confusion matrix,
+     calibration, score distribution, train/test AUC gap, metric checks,
+@@ -3882,10 +4601,18 @@ def _build_performance_report(
+         "detail": "No predicted probabilities for the test rows ΓÇö curves, confusion matrix and threshold metrics were not produced.",
+     }
+     if y_true_arr is not None and y_proba_arr is not None:
+-        threshold_selection = eval_engine.select_best_threshold(y_true_arr, y_proba_arr, metric="f1")
++        # The threshold the metrics were computed at (validation-selected,
++        # user-specified or the registered operating threshold). It is never
++        # re-optimised here on the test rows (E3); if none is known the
++        # nominal 0.5 is used and labelled as such.
+         metrics_threshold = metrics.get("threshold_used")
++        provenance = (replication_result.get("metrics") or {}).get("threshold_provenance")
+         if isinstance(metrics_threshold, (int, float)) and np.isfinite(float(metrics_threshold)):
+-            threshold_selection = {**threshold_selection, "threshold": float(metrics_threshold), "source": "metrics_threshold_used"}
++            threshold_selection = {"threshold": float(metrics_threshold), "source": "metrics_threshold_used",
++                                   "provenance": provenance}
++        else:
++            threshold_selection = {"threshold": 0.5, "source": "nominal_no_recorded_threshold", "provenance": None,
++                                   "degraded": True}
+         resolved_threshold = threshold_selection["threshold"]
+         y_pred = (y_proba_arr >= resolved_threshold).astype(int)
+         cm_matrix = confusion_matrix(y_true_arr, y_pred, labels=[0, 1]).tolist()
+@@ -3986,10 +4713,11 @@ def _build_performance_report(
+             "value": metrics["ks"],
+         })
+ 
++    provenance = curve_provenance(prediction_source, y_true, df)
+     return {
+         "metrics": metrics,
+-        "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc")},
+-        "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc")},
++        "roc_curve": {"points": roc_curve, "auc": metrics.get("roc_auc"), "provenance": provenance},
++        "pr_curve": {"points": pr_curve, "average_precision": metrics.get("pr_auc"), "provenance": provenance},
+         "confusion_matrix": cm,
+         "threshold_selection": threshold_selection,
+         "score_distribution": {"bins": score_distribution},
+@@ -4059,11 +4787,18 @@ async def validation_performance(
+     intake_json: Optional[str] = Form(None),
+     reported_sources_json: Optional[str] = Form(None),
+     registered_model_id: Optional[str] = Form(None),
++    expected_training_run_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     """Stage 4 ΓÇö Benchmarking only.
+ 
+-    `registered_model_id` (optional) is recorded with the run so the final
+-    verdict can check a benchmark belongs to the same registered model.
++    With `registered_model_id`: the CHAMPION is the registered model ΓÇö its
++    verified scoring bundle on its recorded test rows (training dataset
++    only; `model_name` is ignored for the champion). The challenger is a new
++    fit of `challenger_model_name` on the same recorded training rows
++    (minus the columns the registered preprocessing dropped), scored on the
++    SAME test rows; both are identified separately in the evidence.
++    Unresolvable models fail closed. Without it: champion and challenger
++    are both independent refits, recorded as such.
+ 
+     The full performance report (ROC/PR curves, confusion matrix,
+     calibration, score distribution, metric checks, compliance findings)
+@@ -4123,19 +4858,38 @@ async def validation_performance(
+ 
+     reference = build_reference_metrics(reported_json, reported_sources_json, mdd_extracted, mdd_error)
+ 
+-    replication_result = run_replication(
+-        df=df,
+-        target_col=target_col,
+-        model_name=model_name,
+-        test_size=test_size,
+-        val_size=val_size,
+-        random_seed=random_seed,
+-        cv_folds=cv_folds,
+-        reported={},
+-        seeds=seed_list,
+-        compute_split_integrity=False,  # Benchmarking does not report R4.7
+-        compute_seed_stability=False,   # ...nor R4.5 / R4.6
+-    )
++    if (registered_model_id or "").strip():
++        ctx = _registered_evaluation_or_http(df, registered_model_id, expected_training_run_id)
++        identity = ctx["identity"]
++        target_col = ctx["contract"]["target_col"]
++        # Challenger inputs: the registered split's raw training / test rows,
++        # without the columns the registered preprocessing dropped.
++        drop = [c for c in ((ctx["contract"].get("preprocessing") or {}).get("drop_cols") or [])]
++        Xtr_c = ctx["X_train_raw"].drop(columns=[c for c in drop if c in ctx["X_train_raw"].columns])
++        Xte_c = ctx["X_test_raw"].drop(columns=[c for c in drop if c in ctx["X_test_raw"].columns])
++        Xv_c = ctx["X_val_raw"].drop(columns=[c for c in drop if c in ctx["X_val_raw"].columns])
++        replication_result = {
++            **ctx,
++            "X_train": Xtr_c, "X_test": Xte_c, "X_val": Xv_c,
++            "prep_report": build_preprocessing_report(Xtr_c.assign(**{target_col: ctx["y_train"]}), ctx["col_types"], target_col),
++        }
++    else:
++        identity = independent_refit_identity(df, model_name)
++        replication_result = run_replication(
++            df=df,
++            target_col=target_col,
++            model_name=model_name,
++            test_size=test_size,
++            val_size=val_size,
++            random_seed=random_seed,
++            cv_folds=cv_folds,
++            reported={},
++            seeds=seed_list,
++            compute_split_integrity=False,  # Benchmarking does not report R4.7
++            compute_seed_stability=False,   # ...nor R4.5 / R4.6
++        )
++        if replication_result.get("X_test") is not None:
++            identity["test_index_sha256"] = model_lineage.index_fingerprint(replication_result["X_test"].index)
+ 
+     # Champion metrics stay exactly as computed from the fitted model's
+     # predictions. Reference (developer-reported) values are kept apart in
+@@ -4158,6 +4912,7 @@ async def validation_performance(
+         target_col=target_col,
+         y_true=y_true_arr,
+         y_proba=y_proba_arr,
++        df=df,
+     )
+ 
+     performance_report = _build_performance_report(
+@@ -4165,24 +4920,38 @@ async def validation_performance(
+         replication_result=replication_result,
+         intake_payload=intake_payload,
+         mdd_text=mdd_text,
++        # Champion: the registered model's verified bundle, or a refit.
++        prediction_source=CURVE_SOURCE_REGISTERED_BUNDLE if (registered_model_id or "").strip() else CURVE_SOURCE_UNREGISTERED_REFIT,
+     )
++    # Champion and challenger are identified separately; both were scored on
++    # the test rows identified by test_index_sha256.
++    if isinstance(benchmark_payload, dict):
++        benchmark_payload.setdefault("evaluation", {})
++        benchmark_payload["evaluation"].update({
++            "test_index_sha256": identity.get("test_index_sha256"),
++            "champion_evaluation_mode": identity["evaluation_mode"],
++            "challenger_evaluation_mode": model_lineage.EVALUATION_MODE_INDEPENDENT_REFIT,
++        })
+     performance_report["benchmark"] = benchmark_payload
+     performance_report["reference_metrics"] = reference
+     performance_report["metric_provenance"] = build_metric_provenance(reference)
+ 
+     run_id = str(uuid.uuid4())
+     dataset_name_for_log = getattr(file, "filename", None) or intake_payload.get("dataset_name") or None
+-    run_identity = registered_run_identity(registered_model_id, df)
+-    dataset_sha256 = run_identity["dataset_sha256"]
++    dataset_sha256 = identity["dataset_sha256"]
++    champion = {k: identity.get(k) for k in ("evaluation_mode", "registered_model_id", "training_run_id",
++                                              "bundle_sha256", "refit_algorithm")}
++    challenger = {"evaluation_mode": model_lineage.EVALUATION_MODE_INDEPENDENT_REFIT, "algorithm": challenger_model_name}
+     result = {
+         "stage": "performance",
+         "evidence": {
+             "run_id": run_id,
+             "persisted": True,
+-            "registered_model_id": run_identity["registered_model_id"],
+-            "training_run_id": run_identity["training_run_id"],
++            **identity,
+             "algorithm": model_name,
+             "challenger_model_name": challenger_model_name,
++            "champion": champion,
++            "challenger": challenger,
+             "dataset_name": dataset_name_for_log,
+             "dataset_sha256": dataset_sha256,
+             "executed_at": pd.Timestamp.now().isoformat(),
+@@ -4197,9 +4966,9 @@ async def validation_performance(
+             run_id=run_id,
+             payload={
+                 "dataset_name": dataset_name_for_log,
+-                "dataset_sha256": dataset_sha256,
+-                "registered_model_id": run_identity["registered_model_id"],
+-                "training_run_id": run_identity["training_run_id"],
++                **identity,
++                "champion": champion,
++                "challenger": challenger,
+                 "model_name": model_name,
+                 "metrics": metrics,
+                 "reference_metrics": reference["values"],
+@@ -4492,176 +5261,236 @@ async def validation_replication(
+     # Content fingerprint of the exact data this run used ΓÇö part of the
+     # evidence Stage 7 (final verdict) verifies before trusting this run.
+     dataset_sha256 = dataset_fingerprint(df)
++    demo_dataset = _server_demo_dataset_flag(dataset_sha256=dataset_sha256)
++    # Fingerprint of the bytes as received (D1): what the browser can compute
++    # itself, so a resumed run is only shown for the dataset now loaded.
++    dataset_file_sha256 = source_fingerprint(file, csv_text)
+     validation_model_id: Optional[str] = None
++    validation_run_id: Optional[str] = None
++    # Identity of this execution, assigned before it starts so the
++    # "Validation Run Started" history event, the outcome event and the
++    # replication log row all carry the same run_id.
++    run_id = str(uuid.uuid4())
++    execution_mode = (model_lineage.REPLICATION_MODE_REGISTERED if registered_entry is not None
++                      else model_lineage.REPLICATION_MODE_UNREGISTERED)
+ 
+-    # Ensure the Model Inventory is updated from real validation uploads/intake.
+-    try:
+-        store = persistence.load_model_inventory()
+-        inventory_model_name = business_model_name or estimator_name
+-        dataset_payload = {
+-            "file_name": dataset_name_for_log or "uploaded_dataset",
+-            "storage_reference": dataset_name_for_log or "",
+-            "source_type": "file",
+-            "purpose": "Validation dataset",
+-            "record_count": int(df.shape[0]) if df is not None else None,
+-            "column_count": int(df.shape[1]) if df is not None else None,
+-            "target_variable": intake_payload.get("target_col") or intake_payload.get("target") or target_col,
+-            "uploaded_by": intake_payload.get("model_owner") or "user",
+-            "uploaded_at": pd.Timestamp.now().isoformat(),
+-        }
+-        registration = persistence.register_validation_run(
+-            store=store,
+-            business_model_name=inventory_model_name,
+-            estimator_name=estimator_name,
+-            intake_payload={
+-                # Links the validation engagement to the registered
+-                # development model (related_model_id) when reproducing one.
+-                "model_id": registered_model_id,
+-                "model_type": intake_payload.get("model_type") or "PD (Probability of Default)",
+-                "model_purpose": intake_payload.get("model_purpose") or intake_payload.get("business_purpose"),
+-                "model_owner": intake_payload.get("model_owner") or intake_payload.get("owner") or "Unknown",
+-                "owning_team": intake_payload.get("owning_team") or intake_payload.get("business_unit") or "Risk",
+-                "model_version": intake_payload.get("model_version") or "1.0",
+-                "regulatory_framework": intake_payload.get("regulatory_framework") or "Internal",
+-                "mdd_document_path": intake_payload.get("mdd_document_path")
+-                    or intake_payload.get("documentation_path")
+-                    or intake_payload.get("document_path")
+-                    or ("demo_data/flawed_mdd.txt" if str(intake_payload.get("demo_mode") or "").lower() == "flawed" else "demo_data/clean_mdd.txt" if str(intake_payload.get("demo_mode") or "").lower() == "clean" else None),
+-            },
+-            dataset_payload=dataset_payload,
+-            target_col=target_col,
+-            user=intake_payload.get("model_owner") or "user",
+-        )
+-        persistence.save_model_inventory(store)
+-        validation_model_id = (registration or {}).get("model_id")
+-    except Exception as e:
+-        print(f"[persistence] failed to update inventory from replication: {e}")
++    # Server-verified demo datasets never create a validation inventory
++    # record. This preserves the approved demo-only history path while
++    # keeping real independent-refit and registered-model workflows intact.
++    if not demo_dataset:
++        try:
++            store = persistence.load_model_inventory()
++            inventory_model_name = business_model_name or estimator_name
++            dataset_payload = {
++                "file_name": dataset_name_for_log or "uploaded_dataset",
++                "storage_reference": dataset_name_for_log or "",
++                "source_type": "file",
++                "purpose": "Validation dataset",
++                "record_count": int(df.shape[0]) if df is not None else None,
++                "column_count": int(df.shape[1]) if df is not None else None,
++                "target_variable": intake_payload.get("target_col") or intake_payload.get("target") or target_col,
++                "uploaded_by": intake_payload.get("model_owner") or "user",
++                "uploaded_at": pd.Timestamp.now().isoformat(),
++            }
++            registration = persistence.register_validation_run(
++                store=store,
++                business_model_name=inventory_model_name,
++                estimator_name=estimator_name,
++                intake_payload={
++                    # Links the validation engagement to the registered
++                    # development model (related_model_id) when reproducing one.
++                    "model_id": registered_model_id,
++                    "model_type": intake_payload.get("model_type") or "PD (Probability of Default)",
++                    "model_purpose": intake_payload.get("model_purpose") or intake_payload.get("business_purpose"),
++                    "model_owner": intake_payload.get("model_owner") or intake_payload.get("owner") or "Unknown",
++                    "owning_team": intake_payload.get("owning_team") or intake_payload.get("business_unit") or "Risk",
++                    "model_version": intake_payload.get("model_version") or "1.0",
++                    "regulatory_framework": intake_payload.get("regulatory_framework") or "Internal",
++                    "mdd_document_path": intake_payload.get("mdd_document_path")
++                        or intake_payload.get("documentation_path")
++                        or intake_payload.get("document_path")
++                        or ("demo_data/flawed_mdd.txt" if str(intake_payload.get("demo_mode") or "").lower() == "flawed" else "demo_data/clean_mdd.txt" if str(intake_payload.get("demo_mode") or "").lower() == "clean" else None),
++                },
++                dataset_payload=dataset_payload,
++                target_col=target_col,
++                user=intake_payload.get("model_owner") or "user",
++                run_id=run_id,
++            )
++            persistence.save_model_inventory(store)
++            validation_model_id = (registration or {}).get("model_id")
++            validation_run_id = (registration or {}).get("validation_run_id")
++        except Exception as e:
++            print(f"[persistence] failed to update inventory from replication: {e}")
+ 
+-    if registered_entry is not None:
+-        # Registered-model reproduction: configuration from the lineage
+-        # contract; R4.x compare against the ORIGINAL model's performance
+-        # (the re-scored artifact, or the metrics recorded at training if the
+-        # artifact is unavailable ΓÇö the methodology says which).
+-        result = model_lineage.run_registered_replication(
+-            df, registered_entry, dataset_sha256=dataset_sha256, seeds=seed_list,
+-        )
+-        comparator = result.get("original_metrics") or {}
+-        checks = []
++    def _record_outcome(succeeded: bool, detail: Optional[str]) -> None:
++        # Outcome event for the run started above; never fails the request.
++        if not validation_model_id or not validation_run_id:
++            return
+         try:
+-            checks = evaluate_replication_checks(result, comparator, seed_list, comparator_label="Original model")
+-        except Exception:
++            outcome_store = persistence.load_model_inventory()
++            persistence.record_validation_run_outcome(
++                outcome_store, validation_model_id, validation_run_id, succeeded,
++                execution_mode=execution_mode, run_id=run_id, registered_model_id=registered_model_id,
++                detail=detail, user=intake_payload.get("model_owner") or "user",
++            )
++            persistence.save_model_inventory(outcome_store)
++        except Exception as outcome_exc:
++            print(f"[persistence] failed to record validation run outcome: {outcome_exc}")
++
++    checks_error: Optional[str] = None  # set if the R4.x checks could not be evaluated
++    try:
++        if registered_entry is not None:
++            # Registered-model reproduction: configuration from the lineage
++            # contract; R4.x compare against the ORIGINAL model's performance
++            # (the re-scored artifact, or the metrics recorded at training if the
++            # artifact is unavailable ΓÇö the methodology says which).
++            result = model_lineage.run_registered_replication(
++                df, registered_entry, dataset_sha256=dataset_sha256, seeds=seed_list,
++            )
++            comparator = result.get("original_metrics") or {}
+             checks = []
+-        # R4.7 comes from result["split_integrity"] (built by
+-        # model_lineage.registered_split_integrity), like every other mode.
+-    else:
+-        result = run_replication(
+-            df=df,
+-            target_col=target_col,
+-            model_name=estimator_name,
+-            test_size=test_size,
+-            val_size=val_size,
+-            random_seed=random_seed,
+-            cv_folds=cv_folds,
+-            reported=reported,
+-            seeds=seed_list,
+-            model_params=model_params,
+-        )
+-        result["methodology"] = {
+-            "mode": model_lineage.REPLICATION_MODE_UNREGISTERED,
+-            "registered_model_id": None,
+-            "detail": "Independent refit from the configuration supplied in this request (algorithm, split sizes, "
+-                      "optional parameters). It is NOT a reproduction of a registered model: no registered "
+-                      "artifact, recorded hyperparameters, preprocessing or dataset lineage were used.",
+-            "limitations": ["Not linked to a registered model ΓÇö cannot serve as replication evidence for a final verdict."],
+-        }
+-        checks = []
+-        try:
+-            checks = evaluate_replication_checks(result, reported, seed_list)
+-        except Exception:
++            try:
++                checks = evaluate_replication_checks(result, comparator, seed_list, comparator_label="Original model")
++            except Exception as checks_exc:
++                checks = []
++                checks_error = f"{type(checks_exc).__name__}: {checks_exc}"
++            # R4.7 comes from result["split_integrity"] (built by
++            # model_lineage.registered_split_integrity), like every other mode.
++        else:
++            result = run_replication(
++                df=df,
++                target_col=target_col,
++                model_name=estimator_name,
++                test_size=test_size,
++                val_size=val_size,
++                random_seed=random_seed,
++                cv_folds=cv_folds,
++                reported=reported,
++                seeds=seed_list,
++                model_params=model_params,
++                dataset_sha256=dataset_sha256,
++            )
++            result["methodology"] = {
++                "mode": model_lineage.REPLICATION_MODE_UNREGISTERED,
++                "registered_model_id": None,
++                "detail": "Independent refit from the configuration supplied in this request (algorithm, split sizes, "
++                          "optional parameters). It is NOT a reproduction of a registered model: no registered "
++                          "artifact, recorded hyperparameters, preprocessing or dataset lineage were used.",
++                "limitations": ["Not linked to a registered model ΓÇö cannot serve as replication evidence for a final verdict."],
++            }
+             checks = []
+-    result.setdefault("methodology", {})["ignored_inputs"] = ignored_inputs
+-
+-    # Build flags similar to Agent2: list of failing check ids
+-    flags = [c["id"] for c in checks if c.get("status") in ("FAIL",)]
+-
+-    safe_result = dict(result)
+-    for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
+-        safe_result.pop(key, None)
+-    safe_result = _serialize_stage5_payload(safe_result)
+-    # Explicit provenance ΓÇö never silent about whether this run actually
+-    # used the developer's real configuration or fell back to registry
+-    # defaults. Derived above purely from what was actually received.
+-    safe_result["replication_config_source"] = replication_config_source
+-
+-    performance_report = _build_performance_report(df, result, intake_payload, mdd_text)
+-
+-    # Identity of this exact execution. Stage 7 (final verdict) reloads the
+-    # run from the log by run_id and checks every field below, so a verdict
+-    # can only rest on a replication that really ran, for this model, on
+-    # this data.
+-    run_id = str(uuid.uuid4())
+-    methodology = result.get("methodology") or {}
+-    evidence = {
+-        "run_id": run_id,
+-        "persisted": True,
+-        "replication_mode": methodology.get("mode"),
+-        "registered_model_id": registered_model_id,
+-        "training_run_id": methodology.get("training_run_id"),
+-        "execution_status": "COMPLETED" if result.get("success") else "FAILED",
+-        "validation_model_id": validation_model_id,
+-        "business_model_name": business_model_name,
+-        "algorithm": estimator_name,
+-        "dataset_name": dataset_name_for_log,
+-        "dataset_sha256": dataset_sha256,
+-        "dataset_rows": int(df.shape[0]),
+-        "target_col": target_col,
+-        "executed_at": pd.Timestamp.now().isoformat(),
+-    }
+-
+-    response_payload = {
+-        "stage": "replication",
+-        "flags": flags,
+-        "evidence": evidence,
+-        "report": {
+-            "replication": {"result": safe_result, "checks": checks},
+-            **performance_report,
+-            "reference_metrics": reference,
+-            "metric_provenance": build_metric_provenance(reference),
+-        },
+-    }
++            try:
++                checks = evaluate_replication_checks(result, reported, seed_list)
++            except Exception as checks_exc:
++                checks = []
++                checks_error = f"{type(checks_exc).__name__}: {checks_exc}"
++        result.setdefault("methodology", {})["ignored_inputs"] = ignored_inputs
++
++        # Build flags similar to Agent2: list of failing check ids
++        flags = [c["id"] for c in checks if c.get("status") in ("FAIL",)]
++
++        safe_result = dict(result)
++        for key in ["pipeline", "X_train", "X_test", "y_train", "y_test", "y_proba", "y_pred"]:
++            safe_result.pop(key, None)
++        safe_result = _serialize_stage5_payload(safe_result)
++        # Explicit provenance ΓÇö never silent about whether this run actually
++        # used the developer's real configuration or fell back to registry
++        # defaults. Derived above purely from what was actually received.
++        safe_result["replication_config_source"] = replication_config_source
++
++        # A registered reproduction's report shows the independent retrain's
++        # predictions (the reproduction); otherwise the unregistered refit's.
++        performance_report = _build_performance_report(
++            df, result, intake_payload, mdd_text,
++            prediction_source=CURVE_SOURCE_INDEPENDENT_RETRAIN if registered_entry is not None else CURVE_SOURCE_UNREGISTERED_REFIT)
++
++        # Identity of this exact execution. Stage 7 (final verdict) reloads the
++        # run from the log by run_id and checks every field below, so a verdict
++        # can only rest on a replication that really ran, for this model, on
++        # this data. (run_id was assigned before execution started.)
++        methodology = result.get("methodology") or {}
++        evidence = {
++            "run_id": run_id,
++            "validation_run_id": validation_run_id,
++            "persisted": True,
++            "replication_mode": methodology.get("mode"),
++            "registered_model_id": registered_model_id,
++            "training_run_id": methodology.get("training_run_id"),
++            "execution_status": "COMPLETED" if result.get("success") else "FAILED",
++            "validation_model_id": validation_model_id,
++            "business_model_name": business_model_name,
++            "algorithm": estimator_name,
++            "dataset_name": dataset_name_for_log,
++            "dataset_sha256": dataset_sha256,
++            "dataset_file_sha256": dataset_file_sha256,
++            "dataset_rows": int(df.shape[0]),
++            "target_col": target_col,
++            "demo_dataset": demo_dataset,
++            "executed_at": pd.Timestamp.now().isoformat(),
++        }
+ 
+-    try:
+-        persistence.log_event(
+-            persistence.VALIDATION_PIPELINE_LOG,
+-            stage="replication",
+-            payload={
+-                "business_model_name": business_model_name,
+-                "algorithm": estimator_name,
+-                "model_name": estimator_name,
+-                "dataset_name": dataset_name_for_log,
+-                "dataset_sha256": dataset_sha256,
+-                "validation_model_id": validation_model_id,
+-                "registered_model_id": registered_model_id,
+-                "training_run_id": methodology.get("training_run_id"),
+-                "replication_mode": methodology.get("mode"),
+-                "execution_status": "COMPLETED" if result.get("success") else "FAILED",
+-                "exact_artifact_reproduction": (methodology.get("exact_artifact_reproduction") or {}).get("status"),
+-                "independent_training_reproduction": (methodology.get("independent_training_reproduction") or {}).get("status"),
+-                "replication_config_source": replication_config_source,
+-                "metrics": performance_report.get("metrics"),
+-                "reference_metrics": reference["values"],
+-                "reference_sources": reference["sources"],
+-                "metric_provenance_version": METRIC_PROVENANCE_SCHEMA_VERSION,
+-                "flags": flags,
++        response_payload = {
++            "stage": "replication",
++            "flags": flags,
++            "evidence": evidence,
++            "report": {
++                "replication": {"result": safe_result, "checks": checks},
++                **performance_report,
++                "reference_metrics": reference,
++                "metric_provenance": build_metric_provenance(reference),
+             },
+-            full_payload=response_payload,
+-            run_id=run_id,
+-        )
+-    except Exception as e:
+-        print(f"[persistence] failed to log replication: {e}")
+-        # Not saved, so it cannot serve as verifiable evidence later.
+-        response_payload["evidence"] = {**evidence, "run_id": None, "persisted": False}
++        }
++
++        try:
++            persistence.log_event(
++                persistence.VALIDATION_PIPELINE_LOG,
++                stage="replication",
++                payload={
++                    "business_model_name": business_model_name,
++                    "algorithm": estimator_name,
++                    "model_name": estimator_name,
++                    "dataset_name": dataset_name_for_log,
++                    "dataset_sha256": dataset_sha256,
++                    "dataset_file_sha256": dataset_file_sha256,
++                    "validation_model_id": validation_model_id,
++                    "validation_run_id": validation_run_id,
++                    "registered_model_id": registered_model_id,
++                    "training_run_id": methodology.get("training_run_id"),
++                    "replication_mode": methodology.get("mode"),
++                    "execution_status": "COMPLETED" if result.get("success") else "FAILED",
++                    "demo_dataset": demo_dataset,
++                    "exact_artifact_reproduction": (methodology.get("exact_artifact_reproduction") or {}).get("status"),
++                    "independent_training_reproduction": (methodology.get("independent_training_reproduction") or {}).get("status"),
++                    "replication_config_source": replication_config_source,
++                    "metrics": performance_report.get("metrics"),
++                    "reference_metrics": reference["values"],
++                    "reference_sources": reference["sources"],
++                    "metric_provenance_version": METRIC_PROVENANCE_SCHEMA_VERSION,
++                    "flags": flags,
++                },
++                full_payload=response_payload,
++                run_id=run_id,
++            )
++        except Exception as e:
++            print(f"[persistence] failed to log replication: {e}")
++            # Not saved, so it cannot serve as verifiable evidence later.
++            response_payload["evidence"] = {**evidence, "run_id": None, "persisted": False}
+ 
++    except Exception as exec_exc:
++        # Execution did not finish: record Failed (never Completed) and re-raise.
++        _record_outcome(False, f"Execution error: {type(exec_exc).__name__}: {exec_exc}")
++        raise
++
++    # Exactly one outcome per execution. Completed only for a successful run
++    # whose checks were evaluated and whose evidence was saved.
++    if result.get("success") is not True:
++        _record_outcome(False, f"Replication did not succeed: {result.get('error') or 'unknown error'}")
++    elif checks_error:
++        _record_outcome(False, f"Replication checks could not be evaluated: {checks_error}")
++    elif not response_payload["evidence"].get("persisted"):
++        _record_outcome(False, "Replication ran but its evidence could not be saved to the validation log.")
++    else:
++        _record_outcome(True, None)
+     return response_payload
+ 
+ 
+@@ -4678,24 +5507,23 @@ async def validation_stage7_bias_check(
+     random_seed: int = Form(42),
+     cv_folds: int = Form(5),
+     registered_model_id: Optional[str] = Form(None),
++    expected_training_run_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     """Stage 7 Fair Lending Bias Check (Explainability & Fairness tab).
+ 
+-    `registered_model_id` (optional) is only recorded with the saved run, so
+-    history can be scoped to the registered model under validation.
+-
+-    Mirrors app.py's render_val_regulatory() Tab 2 bias-check button. The
+-    backend is stateless (no persisted Stage 4 session), so this reruns the
+-    train/split via `_fit_core` (shared with /validation/replication) rather
+-    than reusing a cached model ΓÇö same pattern /validation/performance
+-    already uses for "Stage 4" data.
++    With `registered_model_id`: the REGISTERED model is evaluated ΓÇö its
++    verified scoring bundle scores its recorded test rows (training dataset
++    only); nothing is refitted and `algorithm` is ignored. Unresolvable
++    models fail closed. Without it: an independent refit from `algorithm`,
++    recorded as such and never attributed to a registered model.
+ 
+     If `protected_col` is omitted, only detects candidate protected columns
+     (age/gender/region/etc.) so the frontend can populate its selector.
+     """
+     df = await _read_dataframe(file=file, csv_text=csv_text)
+     resolved_model_name = (algorithm or model_name or "").strip()
+-    if not resolved_model_name:
++    registered = bool((registered_model_id or "").strip())
++    if not registered and not resolved_model_name:
+         raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+ 
+     if not protected_col:
+@@ -4708,32 +5536,42 @@ async def validation_stage7_bias_check(
+             "check": None,
+         }
+ 
+-    result = run_bias_check(
+-        df=df,
+-        target_col=target_col,
+-        model_name=resolved_model_name,
+-        protected_col=protected_col,
+-        test_size=test_size,
+-        val_size=val_size,
+-        random_seed=random_seed,
+-        cv_folds=cv_folds,
+-    )
++    if registered:
++        ctx = _registered_evaluation_or_http(df, registered_model_id, expected_training_run_id)
++        identity = ctx["identity"]
++        result = bias_from_predictions(df, ctx["y_test"], ctx["y_proba"], protected_col)
++    else:
++        identity = independent_refit_identity(df, resolved_model_name)
++        result = run_bias_check(
++            df=df,
++            target_col=target_col,
++            model_name=resolved_model_name,
++            protected_col=protected_col,
++            test_size=test_size,
++            val_size=val_size,
++            random_seed=random_seed,
++            cv_folds=cv_folds,
++        )
+ 
++    run_id = str(uuid.uuid4())
++    result = {**result, "evidence": {"run_id": run_id, **identity}}
+     try:
+         persistence.log_event(
+             persistence.VALIDATION_PIPELINE_LOG,
+             stage="fair_lending_bias",
+             payload={
+-                **registered_run_identity(registered_model_id, df),
+-                "model_name": resolved_model_name,
++                **identity,
++                "model_name": resolved_model_name or None,
+                 "protected_col": protected_col,
+                 "success": result.get("success"),
+                 "check": result.get("check"),
+             },
+             full_payload=result,
++            run_id=run_id,
+         )
+     except Exception as e:
+         print(f"[persistence] failed to log fair_lending_bias: {e}")
++        result["evidence"] = {**result["evidence"], "run_id": None, "persisted": False}
+ 
+     return result
+ 
+@@ -4753,11 +5591,17 @@ async def validation_stress_run(
+     freq: Optional[str] = Form("quarterly"),
+     date_col: Optional[str] = Form(None),
+     registered_model_id: Optional[str] = Form(None),
++    expected_training_run_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     """Stage 6 ΓÇö Stress Testing & Backtesting.
+ 
+-    `registered_model_id` (optional) is only recorded with the saved run, so
+-    history can be scoped to the registered model under validation.
++    With `registered_model_id`: the REGISTERED model is stressed ΓÇö its
++    verified scoring bundle on its recorded train/test rows (training
++    dataset only). Nothing is refitted (6.1 sensitivity permutes the
++    registered model's inputs instead of removing-and-refitting) and
++    `algorithm` is ignored. Unresolvable models fail closed. Without it: an
++    independent refit from `algorithm`, recorded as such and never
++    attributed to a registered model.
+ 
+     Runs everything from validation_stress_core.run_stress_suite() in one call:
+     ablation-based sensitivity (6.1), macro stress scenarios (6.2), PSI score
+@@ -4778,39 +5622,53 @@ async def validation_stress_run(
+         seed_list = [random_seed]
+ 
+     resolved_model_name = (algorithm or model_name or "").strip()
+-    if not resolved_model_name:
++    registered = bool((registered_model_id or "").strip())
++    if not registered and not resolved_model_name:
+         raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+ 
+-    rep_result = run_replication(
+-        df=df,
+-        target_col=target_col,
+-        model_name=resolved_model_name,
+-        test_size=test_size,
+-        val_size=val_size,
+-        random_seed=random_seed,
+-        cv_folds=cv_folds,
+-        reported={},
+-        seeds=seed_list,
+-        compute_seed_stability=False,
+-        compute_split_integrity=False,
+-    )
++    if registered:
++        rep_result = _registered_evaluation_or_http(df, registered_model_id, expected_training_run_id, compute_sensitivity=True)
++        identity = rep_result["identity"]
++    else:
++        identity = independent_refit_identity(df, resolved_model_name)
++        rep_result = run_replication(
++            df=df,
++            target_col=target_col,
++            model_name=resolved_model_name,
++            test_size=test_size,
++            val_size=val_size,
++            random_seed=random_seed,
++            cv_folds=cv_folds,
++            reported={},
++            seeds=seed_list,
++            compute_seed_stability=False,
++            compute_split_integrity=False,
++        )
+ 
++    # H3: the dataset bytes as received, recorded with the run (evidence and
++    # log) so stage-done lookups can be scoped to the exact file loaded.
++    identity = {**identity, "dataset_file_sha256": source_fingerprint(file, csv_text)}
+     suite = run_stress_suite(rep_result, val_df=df, freq_key=freq or "quarterly", date_col=date_col)
+-    result = {"stage": "stress", "report": suite}
++    run_id = str(uuid.uuid4())
++    result = {"stage": "stress", "report": suite, "evidence": {"run_id": run_id, **identity}}
++    if registered:
++        result["shockable_features"] = registered_shockable_features(rep_result)
+ 
+     try:
+         persistence.log_event(
+             persistence.VALIDATION_PIPELINE_LOG,
+             stage="stress_testing",
+             payload={
+-                **registered_run_identity(registered_model_id, df),
+-                "model_name": resolved_model_name,
++                **identity,
++                "model_name": resolved_model_name or None,
+                 "scenarios": list(suite.keys()) if isinstance(suite, dict) else None,
+             },
+             full_payload=result,
++            run_id=run_id,
+         )
+     except Exception as e:
+         print(f"[persistence] failed to log stress_testing: {e}")
++        result["evidence"] = {**result["evidence"], "run_id": None, "persisted": False}
+ 
+     return result
+ 
+@@ -4830,12 +5688,22 @@ async def validation_stress_shock(
+     shock_feature: str = Form(...),
+     shock_direction: str = Form(...),
+     shock_magnitude_pct: float = Form(20),
++    registered_model_id: Optional[str] = Form(None),
++    expected_training_run_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     """Stage 6 ΓÇö manual single-feature shock (the interactive "Apply Shock"
+-    control). Separate from /validation/stress/run because it's re-run on
+-    demand with different feature/direction/magnitude each time, and there's
+-    no cached pipeline to reuse ΓÇö so, like /validation/stress/run, it
+-    retrains within the request.
++    control), re-run on demand with a different feature/direction/magnitude.
++
++    With `registered_model_id`: the REGISTERED model is shocked ΓÇö its verified
++    scoring bundle on its recorded test rows (training dataset only), the raw
++    feature shocked and re-scored through the bundle's full scoring chain.
++    Unresolvable models fail closed; there is never a refit fallback and
++    `algorithm` is ignored. Without it: an independent refit from `algorithm`,
++    labelled as such.
++
++    A shock is an interactive what-if, not validation evidence: it is never
++    logged and never read by the findings / verdict (which ignore any
++    `shock_result_json` the browser posts).
+     """
+     df = await _read_dataframe(file=file, csv_text=csv_text)
+ 
+@@ -4844,12 +5712,31 @@ async def validation_stress_shock(
+     except Exception:
+         seed_list = [random_seed]
+ 
++    if shock_direction not in ("increase", "decrease"):
++        raise HTTPException(status_code=400, detail="shock_direction must be 'increase' or 'decrease'.")
++    if not (0 < float(shock_magnitude_pct) <= 100):
++        raise HTTPException(status_code=400, detail="shock_magnitude_pct must be greater than 0 and at most 100.")
++    not_evidence = {"persisted": False, "verdict_evidence": False}
++
++    if (registered_model_id or "").strip():
++        ctx = _registered_evaluation_or_http(df, registered_model_id, expected_training_run_id)
++        allowed = registered_shockable_features(ctx)
++        if shock_feature not in allowed:
++            raise HTTPException(status_code=400, detail=(
++                f"'{shock_feature}' is not a numeric raw input of registered model {ctx['identity']['registered_model_id']}. "
++                f"Shockable features: {allowed}."))
++        pipeline, transform = ctx["pipeline"], ctx["transform"]
++
++        def score(X_raw: pd.DataFrame) -> np.ndarray:
++            return np.asarray(pipeline.predict_proba(transform(X_raw)))[:, 1]
++
++        shock_result = apply_manual_shock_through(score, ctx["X_test_raw"], shock_feature, shock_direction, shock_magnitude_pct)
++        return {"stage": "stress_shock", "result": shock_result, "evidence": {**ctx["identity"], **not_evidence}}
++
+     resolved_model_name = (algorithm or model_name or "").strip()
+     if not resolved_model_name:
+         raise HTTPException(status_code=400, detail="Model or algorithm is required.")
+-
+-    if shock_direction not in ("increase", "decrease"):
+-        raise HTTPException(status_code=400, detail="shock_direction must be 'increase' or 'decrease'.")
++    identity = independent_refit_identity(df, resolved_model_name)
+ 
+     rep_result = run_replication(
+         df=df,
+@@ -4869,8 +5756,10 @@ async def validation_stress_shock(
+         shock_result = run_manual_shock(rep_result, shock_feature, shock_direction, shock_magnitude_pct)
+     except ValueError as exc:
+         raise HTTPException(status_code=400, detail=str(exc))
++    if rep_result.get("X_test") is not None:
++        identity["test_index_sha256"] = model_lineage.index_fingerprint(rep_result["X_test"].index)
+ 
+-    return {"stage": "stress_shock", "result": shock_result}
++    return {"stage": "stress_shock", "result": shock_result, "evidence": {**identity, **not_evidence}}
+ 
+ 
+ @app.post("/validation/agent2")
+@@ -4927,9 +5816,40 @@ _FRAMEWORK_DISPLAY = {
+     "SS1/23": "SS1/23",
+     "SS11/13": "SS11/13",
+     "RBI": "RBI Model Risk Management",
++    "RBI Model Risk Management": "RBI Model Risk Management",
+ }
+ 
+ 
++def _sanitize_frameworks(frameworks: Any) -> List[str]:
++    """Remove IFRS 9 from submitted intake selections while normalising RBI/SS1/23 values."""
++    if frameworks is None:
++        return []
++    items = frameworks if isinstance(frameworks, list) else [frameworks]
++    clean: List[str] = []
++    seen = set()
++    for raw in items:
++        if raw is None:
++            continue
++        item = str(raw).strip()
++        if not item:
++            continue
++        lowered = item.lower()
++        if lowered in {"ifrs9", "ifrs 9", "ifrs-9"}:
++            continue
++        if lowered == "rbi":
++            item = "RBI Model Risk Management"
++        elif lowered == "rbi model risk management":
++            item = "RBI Model Risk Management"
++        elif lowered == "ss1/23":
++            item = "SS1/23"
++        elif lowered == "ss11/13":
++            item = "SS11/13"
++        if item not in seen:
++            clean.append(item)
++            seen.add(item)
++    return clean
++
++
+ def _display_framework_name(value: Optional[str]) -> str:
+     """Return a user-facing label for a regulatory framework source."""
+     if not value:
+@@ -4970,19 +5890,24 @@ def _derive_feature_importance_payload(report: dict, df=None, model_file: Option
+     replicated = report.get("replicated_importances", {}) or {}
+     importance_df = None
+     importance_source = "unavailable"
+-    importance_note = "No model artifact was supplied and no replication importances were produced, so feature relevance was not assessed."
++    importance_note = "No verified registered model and no replication importances were available, so feature relevance was not assessed."
+ 
+-    if model_file is not None:
++    # An uploaded `model_file` is never read or deserialized (it could execute
++    # code). The model's own importances come from the registered model chosen
++    # at Intake, loaded from its verified scoring bundle.
++    registered_id = (intake or {}).get("registered_model_id") if isinstance(intake, dict) else None
++    if registered_id:
+         try:
+-            model_bytes = model_file.file.read()
+-            _buf = io.BytesIO(model_bytes)
+-            pipeline = joblib.load(_buf)
+-            df_imp = extract_feature_importance(pipeline)
++            resolved = model_lineage.load_registered_scoring_bundle(registered_id)
++            df_imp = extract_feature_importance(resolved["bundle"]["pipeline"])
+             if df_imp is not None:
+                 importance_df = df_imp.to_dict(orient="records")
+-                importance_source, importance_note = "uploaded_model_artifact", "Importances of the uploaded model artifact."
+-        except Exception as exc:
+-            importance_note = f"The uploaded model artifact could not be read: {type(exc).__name__}: {exc}"
++                importance_source = "registered_scoring_bundle"
++                importance_note = f"Importances of registered model {registered_id} (verified scoring bundle)."
++        except model_lineage.ArtifactVerificationError as exc:
++            importance_note = f"Registered model {registered_id} could not be loaded ({exc.status}): {' '.join(exc.reasons)}"
++    elif model_file is not None:
++        importance_note = "An uploaded model file was ignored: uploaded artifacts are not deserialized. " + importance_note
+ 
+     if importance_df is None and replicated:
+         try:
+@@ -5418,6 +6343,9 @@ async def validation_stage3_run(
+                 # Registered model chosen at Intake (intake_json), so the
+                 # Data & Model Soundness resume can be scoped to it.
+                 **registered_run_identity((intake or {}).get("registered_model_id") if isinstance(intake, dict) else None, df),
++                # H2: the dataset bytes as received, so a restore can be scoped
++                # to the exact file the browser has loaded.
++                "dataset_file_sha256": source_fingerprint(file, csv_text) if df is not None else None,
+                 "summary": mapped.get("summary"),
+                 "verdict": mapped.get("regulatoryAlignment", {}).get("verdict"),
+             },
+@@ -5513,7 +6441,15 @@ async def validation_parse_mdd(
+ # this model, on this exact dataset, with every mandatory check executed.
+ # Metrics posted by the browser are never trusted for the verdict, and
+ # developer-reported values are only ever the comparator inside R4.2/R4.3.
+-VERDICT_POLICY_VERSION = 4  # 4: R4.5 / R4.6 redesigned (stability_checks.py)
++# 4: R4.5 / R4.6 redesigned (stability_checks.py)
++# 5: evidence completeness ΓÇö stress, fairness, data quality, independence and
++#    MDD evidence resolved server-side; missing mandatory evidence blocks any
++#    approval (assess_evidence_completeness).
++# 6: operating-threshold provenance (L10) and split methodology (L11) are
++#    blocking lineage checks; thresholds are never optimised on test rows.
++# 7: R4.5 / R4.6 count only with proof of independent seed executions
++#    (distinct test-row fingerprints); chronological splits are NOT_ASSESSED.
++VERDICT_POLICY_VERSION = 7
+ MANDATORY_REPLICATION_CHECKS: Dict[str, str] = {
+     "R4.1": "End-to-end training",
+     "R4.2": "Reproduced AUC vs original model",
+@@ -5547,6 +6483,226 @@ def _is_finite_number(value: Any) -> bool:
+         return False
+ 
+ 
++# ΓöÇΓöÇ Evidence completeness (verdict policy 5) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++# Which evidence the final verdict needs, besides Model Replication (assessed
++# separately by assess_replication_evidence). Mandatory and applicable
++# conditional evidence that is missing, unverified or incomplete is an
++# evidence GAP: it blocks APPROVED / CONDITIONALLY APPROVED and is reported as
++# NOT ASSESSED ΓÇö never counted as a model failure. Browser-posted results and
++# flags are never evidence.
++EVIDENCE_POLICY: Dict[str, Dict[str, str]] = {
++    "replication": {"requirement": "mandatory", "title": "Model Replication",
++                    "source": "verified replication run (assess_replication_evidence)"},
++    "data_quality": {"requirement": "mandatory", "title": "Data quality profile",
++                     "source": "computed by the server from the validation dataset fingerprinted for this verdict"},
++    "independence": {"requirement": "mandatory", "title": "Validation independence attestation",
++                     "source": "attestation recorded server-side (POST /validation/independence/attest) for this registered model and training"},
++    "mdd": {"requirement": "mandatory", "title": "Model Development Document",
++            "source": "MDD text submitted for review (document content, not a result)"},
++    "stress_testing": {"requirement": "mandatory", "title": "Stress testing & backtesting",
++                       "source": "persisted stress_testing run for this registered model, training and dataset"},
++    "fair_lending": {"requirement": "conditional", "title": "Fair lending bias check",
++                     "source": "persisted fair_lending_bias run for this registered model, training and dataset; "
++                               "applicable when the dataset has protected-characteristic columns"},
++    "benchmark": {"requirement": "optional", "title": "Benchmarking",
++                  "source": "verified Benchmarking run (assess_benchmark_evidence)"},
++}
++EVIDENCE_STATUSES = ("PASS", "FAIL", "WARN", "PENDING", "NOT_ASSESSED", "N/A")
++BLOCKING_EVIDENCE_STATUSES = {"PENDING", "NOT_ASSESSED"}
++
++
++def _evidence_item(key: str, status: str, detail: str, **extra) -> Dict[str, Any]:
++    assert status in EVIDENCE_STATUSES, status
++    policy = EVIDENCE_POLICY[key]
++    return {"evidence": key, "title": policy["title"], "requirement": policy["requirement"], "status": status,
++            "detail": detail, "source": policy["source"], **extra}
++
++
++_NOT_REGISTERED_EVALUATION = (
++    "it did not evaluate the registered model's scoring bundle (evaluation mode: {mode}); an independent refit "
++    "cannot serve as evidence for the registered model"
++)
++
++
++def _linked_stage_run(stage: str, explicit_run_id: Optional[str], claimed: Dict[str, Any],
++                      require_dataset: bool, require_registered_evaluation: bool = False
++                      ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
++    """A persisted run of `stage` that belongs to this validation: the same
++    registered model, the model's CURRENT training run and (when required)
++    the same dataset fingerprint. An explicit run ID is verified, never
++    trusted; without one, the newest matching current-format run is used.
++    Returns (run, None) or (None, reason)."""
++    reg_id = claimed.get("registered_model_id")
++    if not reg_id:
++        return None, "No registered model ID, so no run can be linked to the model under validation."
++    current_training = registered_run_identity(reg_id)["training_run_id"]
++    if not current_training:
++        return None, f"Registered model {reg_id} has no recorded training lineage, so no run can be linked to its current training."
++    sha = claimed.get("dataset_sha256")
++    if require_dataset and not sha:
++        return None, "The validation dataset was not identified, so no run can be linked to it."
++    if explicit_run_id:
++        run = persistence.get_run(persistence.VALIDATION_PIPELINE_LOG, explicit_run_id)
++        if run is None:
++            return None, f"Run {explicit_run_id} was not found in the validation log."
++        summary = run.get("summary") or {}
++        if run.get("stage") != stage:
++            return None, f"Run {explicit_run_id} is a '{run.get('stage')}' run, not a '{stage}' run."
++        if run.get("record_status") != "current":
++            return None, f"Run {explicit_run_id} is a legacy record: {run.get('record_status_reason')}"
++        if summary.get("registered_model_id") != reg_id:
++            return None, f"Run {explicit_run_id} was recorded for registered model '{summary.get('registered_model_id') or 'none'}', not '{reg_id}'."
++        if summary.get("training_run_id") != current_training:
++            return None, f"Run {explicit_run_id} used training {summary.get('training_run_id') or 'unrecorded'}, not the current training {current_training}."
++        if require_dataset and summary.get("dataset_sha256") != sha:
++            return None, f"Run {explicit_run_id} used a different dataset from this validation."
++        if require_registered_evaluation and summary.get("evaluation_mode") != model_lineage.EVALUATION_MODE_REGISTERED:
++            return None, f"Run {explicit_run_id} " + _NOT_REGISTERED_EVALUATION.format(mode=summary.get("evaluation_mode") or "unrecorded ΓÇö refit")
++        return run, None
++    lineage_check = _registered_lineage_validator()
++
++    def _validator(row: Dict[str, Any]) -> Optional[str]:
++        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
++        if require_registered_evaluation and summary.get("evaluation_mode") != model_lineage.EVALUATION_MODE_REGISTERED:
++            return "Run " + _NOT_REGISTERED_EVALUATION.format(mode=summary.get("evaluation_mode") or "unrecorded ΓÇö refit")
++        return lineage_check(row)
++
++    found = persistence.find_latest_run(
++        persistence.VALIDATION_PIPELINE_LOG, stage,
++        filters={"registered_model_id": reg_id, "dataset_sha256": sha if require_dataset else None},
++        include_legacy=False, validator=_validator,
++    )["latest"]
++    if found is None:
++        scope = " on this dataset" if require_dataset else ""
++        return None, f"No '{stage}' run is recorded for registered model {reg_id} (current training){scope}."
++    return found, None
++
++
++def _server_data_profile(df: pd.DataFrame) -> Dict[str, Any]:
++    """Missing-value and duplicate profile, same formulas as _build_data_profile."""
++    rows = int(df.shape[0])
++    missing_by_column = {str(c): {"count": int(df[c].isna().sum()),
++                                  "percentage": round((int(df[c].isna().sum()) / rows * 100) if rows else 0.0, 4)}
++                         for c in df.columns}
++    duplicate_rows = int(df.duplicated().sum())
++    return {"missing_by_column": missing_by_column, "duplicate_rows": duplicate_rows,
++            "duplicate_rate": round((duplicate_rows / rows * 100) if rows else 0.0, 4)}
++
++
++def assess_evidence_completeness(
++    *,
++    claimed: Dict[str, Any],
++    current_df: Optional[pd.DataFrame],
++    dataset_identity_source: str,
++    mdd_text: Optional[str],
++    stress_run_id: Optional[str] = None,
++    bias_run_id: Optional[str] = None,
++    independence_attestation_id: Optional[str] = None,
++    governance_attestation_id: Optional[str] = None,
++) -> Dict[str, Any]:
++    """Server-side status of every non-replication evidence item. Returns the
++    items plus the server-derived values the findings rules use."""
++    items: Dict[str, Dict[str, Any]] = {}
++    derived: Dict[str, Any] = {}
++
++    # Data quality ΓÇö computed here from the dataset this verdict fingerprinted.
++    if current_df is not None and dataset_identity_source == "server_fingerprint":
++        derived["profile"] = _server_data_profile(current_df)
++        items["data_quality"] = _evidence_item("data_quality", "PASS", "Profile computed from the fingerprinted validation dataset.",
++                                               dataset_sha256=claimed.get("dataset_sha256"))
++    else:
++        items["data_quality"] = _evidence_item("data_quality", "NOT_ASSESSED",
++                                               "The validation dataset was not supplied to the verdict, so its data quality could not be assessed.")
++
++    # Independence ΓÇö a server-recorded attestation for this model's current training.
++    run, reason = _linked_stage_run("independence_attestation", independence_attestation_id, claimed, require_dataset=False)
++    if run is None:
++        items["independence"] = _evidence_item("independence", "NOT_ASSESSED", reason)
++    else:
++        s = run.get("summary") or {}
++        independent = s.get("independent") is True
++        derived["independent"] = independent
++        items["independence"] = _evidence_item(
++            "independence", "PASS" if independent else "FAIL",
++            f"Attested by {s.get('attested_by')} on {run.get('timestamp')}: "
++            + ("validation team is independent." if independent else "independence NOT confirmed (conflict declared)."),
++            run_id=run.get("run_id"))
++
++    # MDD ΓÇö the document under review must be present.
++    if (mdd_text or "").strip():
++        items["mdd"] = _evidence_item("mdd", "PASS", "MDD text supplied; its required sections are checked by the documentation findings.")
++    else:
++        items["mdd"] = _evidence_item("mdd", "NOT_ASSESSED", "No Model Development Document text was supplied, so documentation could not be reviewed.")
++
++    # Stress testing ΓÇö a persisted stress suite run.
++    run, reason = _linked_stage_run("stress_testing", stress_run_id, claimed, require_dataset=True,
++                                    require_registered_evaluation=True)
++    if run is None:
++        items["stress_testing"] = _evidence_item("stress_testing", "NOT_ASSESSED", reason)
++    else:
++        suite = ((run.get("full_payload") or {}).get("report") or {})
++        summary = suite.get("summary") or {}
++        checks = [c for c in (summary.get("checks") or []) if isinstance(c, dict)]
++        directional = [d for d in (suite.get("directional") or []) if isinstance(d, dict)]
++        failed = [str(c.get("id")) for c in checks if c.get("status") == "FAIL"] + [str(d.get("id")) for d in directional if d.get("status") == "FAIL"]
++        if not suite.get("available"):
++            status, detail = "NOT_ASSESSED", f"Stress run {run.get('run_id')} did not produce results: {suite.get('reason') or 'unavailable'}."
++        elif summary.get("fail"):
++            status, detail = "FAIL", f"Stress run {run.get('run_id')}: failed check(s) {', '.join(failed) or summary.get('fail')}."
++        elif summary.get("pending"):
++            status, detail = "PENDING", f"Stress run {run.get('run_id')}: {summary.get('pending')} check(s) could not be completed."
++        elif summary.get("warn"):
++            status, detail = "WARN", f"Stress run {run.get('run_id')}: {summary.get('warn')} warning(s), no failures."
++        elif summary.get("pass"):
++            status, detail = "PASS", f"Stress run {run.get('run_id')}: {summary.get('pass')} check(s) passed."
++        else:
++            status, detail = "NOT_ASSESSED", f"Stress run {run.get('run_id')} produced no assessable check."
++        derived["stress_failed_checks"] = failed if status == "FAIL" else []
++        items["stress_testing"] = _evidence_item(
++            "stress_testing", status, detail, run_id=run.get("run_id"),
++            evaluation_mode=(run.get("summary") or {}).get("evaluation_mode"),
++            test_index_sha256=(run.get("summary") or {}).get("test_index_sha256"))
++
++    # Fair lending ΓÇö applicable only when protected-characteristic columns exist.
++    if current_df is None or dataset_identity_source != "server_fingerprint":
++        items["fair_lending"] = _evidence_item("fair_lending", "NOT_ASSESSED",
++                                               "Applicability unknown: the validation dataset was not supplied to the verdict.")
++    else:
++        protected = detect_protected_columns(current_df)
++        if not protected:
++            items["fair_lending"] = _evidence_item(
++                "fair_lending", "N/A",
++                "Not applicable: no protected-characteristic columns were detected in the validation dataset.",
++                na_reason=f"No column name contains a protected-characteristic keyword ({', '.join(sorted(PROTECTED_KEYWORDS))}).")
++        else:
++            run, reason = _linked_stage_run("fair_lending_bias", bias_run_id, claimed, require_dataset=True,
++                                            require_registered_evaluation=True)
++            if run is None:
++                items["fair_lending"] = _evidence_item("fair_lending", "NOT_ASSESSED",
++                                                       f"Protected columns present ({', '.join(protected)}). {reason}")
++            else:
++                payload = run.get("full_payload") or {}
++                check = payload.get("check") if isinstance(payload.get("check"), dict) else None
++                aucs = [r.get("AUC") for r in (payload.get("rows") or []) if isinstance(r, dict) and _is_finite_number(r.get("AUC"))]
++                if not payload.get("success") or check is None:
++                    items["fair_lending"] = _evidence_item("fair_lending", "NOT_ASSESSED",
++                                                           f"Bias run {run.get('run_id')} did not complete: {payload.get('error') or 'no result'}.",
++                                                           run_id=run.get("run_id"))
++                else:
++                    gap = round(float(max(aucs) - min(aucs)), 4) if len(aucs) >= 2 else None
++                    derived["bias_auc_gap"] = gap
++                    items["fair_lending"] = _evidence_item(
++                        "fair_lending", str(check.get("status")) if check.get("status") in EVIDENCE_STATUSES else "WARN",
++                        f"Bias run {run.get('run_id')} on '{payload.get('bias_col')}': {check.get('observed')}",
++                        run_id=run.get("run_id"), protected_columns=protected,
++                        evaluation_mode=(run.get("summary") or {}).get("evaluation_mode"),
++                        test_index_sha256=(run.get("summary") or {}).get("test_index_sha256"))
++
++    gaps = [i for i in items.values()
++            if i["requirement"] in ("mandatory", "conditional") and i["status"] in BLOCKING_EVIDENCE_STATUSES]
++    return {"policy_version": VERDICT_POLICY_VERSION, "items": items, "gaps": gaps, "complete": not gaps, "derived": derived}
++
++
+ def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any]) -> Dict[str, Any]:
+     """Status is one of:
+     PASS          ΓÇö verified run, all mandatory checks executed and passed
+@@ -5632,6 +6788,12 @@ def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any])
+     # The registered model must still exist and still be the same training
+     # (a retrained model has a new contract; earlier reproductions are stale).
+     reg_id = summary.get("registered_model_id")
++    if methodology.get("mode") == model_lineage.REPLICATION_MODE_REGISTERED and not methodology.get("training_run_id"):
++        # D5: without the training run it reproduced, the run cannot be
++        # matched to the model's current training, so it is never trusted.
++        identity_problems.append(
++            f"Replication run {run_id} did not record the training run it reproduced, so it cannot be verified "
++            "against the registered model's current training. Re-run replication.")
+     if reg_id and methodology.get("mode") == model_lineage.REPLICATION_MODE_REGISTERED:
+         reg_entry = next(
+             (m for m in persistence.load_model_inventory().get("development", [])
+@@ -5641,7 +6803,7 @@ def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any])
+         current_training_run = ((reg_entry or {}).get("lineage_contract") or {}).get("training_run_id")
+         if reg_entry is None:
+             identity_problems.append(f"Registered model {reg_id} is no longer in the Model Inventory.")
+-        elif methodology.get("training_run_id") and current_training_run != methodology.get("training_run_id"):
++        elif methodology.get("training_run_id") and current_training_run != methodology["training_run_id"]:
+             identity_problems.append(
+                 f"Registered model {reg_id} has been retrained since this replication "
+                 f"(replicated training run {methodology.get('training_run_id')}, current {current_training_run}). Re-run replication."
+@@ -5681,9 +6843,18 @@ def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any])
+ 
+     checks = {c.get("id"): c for c in (report.get("replication") or {}).get("checks") or [] if isinstance(c, dict)}
+     not_executed: List[str] = []
++    # G1: R4.5 / R4.6 rest on repeated runs; a PASS only counts when the
++    # saved run proves those runs were independent (distinct test sets).
++    # Runs saved before that evidence was recorded are not executed evidence.
++    seed_independence = (result.get("stability") or {}).get("independence") or {}
+     for check_id, title in MANDATORY_REPLICATION_CHECKS.items():
+         check = checks.get(check_id)
+         status = (check or {}).get("status") or "MISSING"
++        if check_id in ("R4.5", "R4.6") and status == "PASS" and not seed_independence.get("independent"):
++            check = {**check, "status": "NOT_ASSESSED", "observed": seed_independence.get("reason") or (
++                "The run does not prove its seed executions were independent (test-row fingerprints not recorded). "
++                "Re-run Model Replication.")}
++            status = "NOT_ASSESSED"
+         out["mandatory_checks"].append({"id": check_id, "title": title, "status": status, "observed": (check or {}).get("observed")})
+         if status == "FAIL":
+             out["failed_mandatory_checks"].append({"id": check_id, "title": title, "observed": check.get("observed")})
+@@ -5707,6 +6878,14 @@ def assess_replication_evidence(run_id: Optional[str], claimed: Dict[str, Any])
+                          "configuration; all mandatory replication checks executed and passed on the verified run.")
+ 
+ 
++def _current_lineage_contract(registered_model_id: Optional[str]) -> Optional[Dict[str, Any]]:
++    model_id = (registered_model_id or "").strip()
++    entry = next((m for m in persistence.load_model_inventory().get("development", [])
++                  if isinstance(m, dict) and str(m.get("model_id") or "").strip() == model_id), None) if model_id else None
++    contract = (entry or {}).get("lineage_contract")
++    return contract if isinstance(contract, dict) else None
++
++
+ def assess_benchmark_evidence(run_id: Optional[str], claimed: Dict[str, Any]) -> Dict[str, Any]:
+     """Benchmarking is optional for the verdict, but a supplied benchmark is
+     only used if it is a current-format Benchmarking run on the same data."""
+@@ -5732,12 +6911,29 @@ def assess_benchmark_evidence(run_id: Optional[str], claimed: Dict[str, Any]) ->
+     if not logged_sha or logged_sha != claimed.get("dataset_sha256"):
+         out["reasons"].append("Benchmark run used a different dataset from the verified replication run.")
+         return out
+-    logged_model = (run.get("summary") or {}).get("registered_model_id")
++    summary = run.get("summary") or {}
++    logged_model = summary.get("registered_model_id")
+     if claimed.get("registered_model_id") and logged_model != claimed.get("registered_model_id"):
+         out["reasons"].append(
+             f"Benchmark run was recorded for registered model '{logged_model or 'none'}', not '{claimed.get('registered_model_id')}'."
+         )
+         return out
++    # A matching ID label is not enough: the champion must have BEEN the
++    # registered model (its verified bundle), for its current training, on
++    # the registered test rows.
++    if claimed.get("registered_model_id"):
++        if summary.get("evaluation_mode") != model_lineage.EVALUATION_MODE_REGISTERED:
++            out["reasons"].append("Benchmark champion was not the registered model's scoring bundle "
++                                  f"(evaluation mode: {summary.get('evaluation_mode') or 'unrecorded ΓÇö refit'}).")
++            return out
++        contract = _current_lineage_contract(claimed["registered_model_id"])
++        if not contract or summary.get("training_run_id") != contract.get("training_run_id"):
++            out["reasons"].append(f"Benchmark run used training {summary.get('training_run_id') or 'unrecorded'}, "
++                                  f"not the registered model's current training.")
++            return out
++        if summary.get("test_index_sha256") != (contract.get("split") or {}).get("test_index_sha256"):
++            out["reasons"].append("Benchmark was not evaluated on the registered model's recorded test rows.")
++            return out
+     bench = report.get("benchmark") or {}
+     if bench.get("status") != "OK":
+         out["reasons"].append(f"Benchmark run did not complete (status {bench.get('status')}).")
+@@ -5748,6 +6944,87 @@ def assess_benchmark_evidence(run_id: Optional[str], claimed: Dict[str, Any]) ->
+     return out
+ 
+ 
++@app.post("/validation/independence/attest")
++async def record_independence_attestation(
++    registered_model_id: str = Form(...),
++    attested_by: str = Form(...),
++    independent: bool = Form(...),
++    statement: Optional[str] = Form(None),
++    dataset_sha256: Optional[str] = Form(None),
++    session_username: Optional[str] = Form(None),
++    declared_name: Optional[str] = Form(None),
++    control_state: Optional[str] = Form(None),
++) -> Dict[str, Any]:
++    """Record the validator's independence attestation for a registered model
++    (SS1/23 P4.1). Recorded server-side ΓÇö attributable, timestamped, scoped to
++    the model's current training ΓÇö and appended to the validation log; this,
++    not a flag in the intake payload, is what the final verdict accepts.
++    Unknown models are rejected. There is no user authentication in this
++    backend, so `attested_by` is the name the validator supplies."""
++    model_id = (registered_model_id or "").strip()
++    who = (attested_by or "").strip()
++    if not who:
++        raise HTTPException(status_code=400, detail="attested_by is required.")
++    if not attest_inventory_registration({}, model_id)["verified"]:
++        raise HTTPException(status_code=404, detail=f"Registered model '{model_id}' was not found in the Development Inventory.")
++    identity = registered_run_identity(model_id)
++    if not identity["training_run_id"]:
++        raise HTTPException(status_code=409, detail=f"Registered model '{model_id}' has no recorded training lineage to attest against.")
++    sha = (dataset_sha256 or "").strip() or identity.get("dataset_sha256")
++    record = {
++        **identity,
++        "registered_model_id": model_id,
++        "training_run_id": identity.get("training_run_id"),
++        "dataset_sha256": sha or None,
++        "attested_by": who,
++        "declared_name": (declared_name or who).strip() or who,
++        "session_username": (session_username or "self-declared").strip() or "self-declared",
++        "control_state": (control_state or "unknown").strip() or "unknown",
++        "identity_status": "unauthenticated/self-declared",
++        "independent": bool(independent),
++        "statement": (statement or "").strip() or None,
++        "demo_dataset": _server_demo_dataset_flag(dataset_sha256=sha),
++    }
++    run_id = persistence.log_event(persistence.VALIDATION_PIPELINE_LOG, stage="independence_attestation",
++                                   payload=record, full_payload=record)
++    return {"attestation_id": run_id, **record}
++
++
++@app.post("/validation/governance/attest")
++async def record_governance_attestation(
++    registered_model_id: Optional[str] = Form(None),
++    declared_name: Optional[str] = Form(None),
++    control_state: Optional[str] = Form(None),
++    session_username: Optional[str] = Form(None),
++    dataset_sha256: Optional[str] = Form(None),
++    training_run_id: Optional[str] = Form(None),
++    model_name: Optional[str] = Form(None),
++    statement: Optional[str] = Form(None),
++) -> Dict[str, Any]:
++    """Append-only governance audit event. It is logged for monitoring only and
++    is never treated as verdict evidence."""
++    if registered_model_id:
++        model_id = (registered_model_id or "").strip()
++    else:
++        model_id = None
++    sha = (dataset_sha256 or "").strip() or None
++    record = {
++        "timestamp": pd.Timestamp.now().isoformat(),
++        "control_state": (control_state or "unknown").strip() or "unknown",
++        "declared_name": (declared_name or model_name or session_username or "self-declared").strip() or "self-declared",
++        "session_username": (session_username or "self-declared").strip() or "self-declared",
++        "identity_status": "unauthenticated/self-declared",
++        "registered_model_id": model_id,
++        "training_run_id": (training_run_id or "").strip() or None,
++        "dataset_sha256": sha,
++        "demo_dataset": _server_demo_dataset_flag(dataset_sha256=sha),
++        "statement": (statement or "").strip() or None,
++    }
++    run_id = persistence.log_event(persistence.VALIDATION_PIPELINE_LOG, stage="governance_attestation",
++                                   payload=record, full_payload=record)
++    return {"governance_attestation_id": run_id, **record}
++
++
+ @app.post("/validation/stage8/findings")
+ async def validation_stage8_findings(
+     intake_json: Optional[str] = Form(None),
+@@ -5766,9 +7043,23 @@ async def validation_stage8_findings(
+     file: Optional[UploadFile] = File(None),
+     csv_text: Optional[str] = Form(None),
+     registered_model_id: Optional[str] = Form(None),
++    # Optional explicit evidence references (verified, never trusted). When
++    # omitted, the newest matching run for this model/training/dataset is used.
++    stress_run_id: Optional[str] = Form(None),
++    bias_run_id: Optional[str] = Form(None),
++    independence_attestation_id: Optional[str] = Form(None),
++    governance_attestation_id: Optional[str] = Form(None),
+ ) -> Dict[str, Any]:
+     """Compile the Stage 8 Findings Tracker + overall verdict.
+ 
++    Evidence completeness (verdict policy 5): stress testing, fair lending,
++    data quality, independence and the MDD are resolved server-side (see
++    EVIDENCE_POLICY / assess_evidence_completeness). Browser-posted
++    `validation_profile_json`, `shock_result_json`, `bias_auc_gap` and the
++    intake's `independence_confirmed` are accepted for compatibility but
++    ignored. Missing mandatory evidence is reported as a NOT ASSESSED gap
++    and blocks any approval; it is not counted as a model failure.
++
+     Direct port of app.py's render_val_findings() all_findings compilation
+     (app.py:7484-7617). The backend is stateless, so every piece that would
+     have been st.session_state on the Streamlit side is passed in from the
+@@ -5799,27 +7090,29 @@ async def validation_stage8_findings(
+             ij = json.loads(intake_json) or {}
+         except Exception:
+             ij = {}
++    if isinstance(ij, dict):
++        ij["frameworks"] = _sanitize_frameworks(ij.get("frameworks"))
+ 
+     mdd_lower = (mdd_text or "").lower()
+ 
+-    profile: Dict[str, Any] = {}
+-    if validation_profile_json:
+-        try:
+-            profile = json.loads(validation_profile_json) or {}
+-        except Exception:
+-            profile = {}
+-
+-    # Browser-posted metrics are never evidence. Recorded so the response is
+-    # explicit that they were received and not used.
++    # Browser-posted results and flags are never evidence. Recorded so the
++    # response is explicit that they were received and not used.
+     ignored_client_inputs = [
+-        name for name, value in (("rep_metrics_json", rep_metrics_json), ("benchmark_metrics_json", benchmark_metrics_json))
+-        if value
++        name for name, value in (("rep_metrics_json", rep_metrics_json), ("benchmark_metrics_json", benchmark_metrics_json),
++                                 ("validation_profile_json", validation_profile_json), ("shock_result_json", shock_result_json),
++                                 ("bias_auc_gap", bias_auc_gap))
++        if value not in (None, "")
+     ]
++    if "independence_confirmed" in ij:
++        ignored_client_inputs.append("intake independence_confirmed (only a recorded attestation counts)")
++    if governance_attestation_id:
++        ignored_client_inputs.append("governance_attestation_id (audit events are not verdict evidence)")
+ 
+     # Current dataset identity: fingerprinted here when the data is supplied,
+     # otherwise the client's claim (weaker; recorded as such).
+     dataset_identity_source = "client_claim"
+     current_sha = (dataset_sha256 or "").strip() or None
++    current_df: Optional[pd.DataFrame] = None
+     if file is not None or csv_text:
+         current_df = await _read_dataframe(file=file, csv_text=csv_text)
+         server_sha = dataset_fingerprint(current_df)
+@@ -5831,6 +7124,7 @@ async def validation_stage8_findings(
+ 
+     # The registered Model Inventory ID selected at Intake is the identity the
+     # whole validation refers to; the name is informational only.
++    demo_dataset = _server_demo_dataset_flag(dataset_sha256=current_sha, df=current_df)
+     claimed_identity = {
+         "registered_model_id": (registered_model_id or ij.get("registered_model_id") or "").strip() or None,
+         "business_model_name": (business_model_name or ij.get("model_name") or "").strip() or None,
+@@ -5838,6 +7132,7 @@ async def validation_stage8_findings(
+         "dataset_name": dataset_name,
+         "dataset_sha256": current_sha,
+         "dataset_identity_source": dataset_identity_source,
++        "demo_dataset": demo_dataset,
+     }
+     rep_evidence = assess_replication_evidence((replication_run_id or "").strip() or None, claimed_identity)
+     evidence_trusted = rep_evidence["status"] in ("PASS", "FAIL")
+@@ -5849,33 +7144,57 @@ async def validation_stage8_findings(
+     )
+     bm_metrics: Dict[str, Any] = bm_evidence["metrics"] if bm_evidence["status"] == "ACCEPTED" else {}
+ 
+-    shock_res: Dict[str, Any] = {}
+-    if shock_result_json:
+-        try:
+-            shock_res = json.loads(shock_result_json) or {}
+-        except Exception:
+-            shock_res = {}
++    completeness = assess_evidence_completeness(
++        claimed=claimed_identity, current_df=current_df, dataset_identity_source=dataset_identity_source,
++        mdd_text=mdd_text, stress_run_id=(stress_run_id or "").strip() or None,
++        bias_run_id=(bias_run_id or "").strip() or None,
++        independence_attestation_id=(independence_attestation_id or "").strip() or None,
++    )
++    ev = completeness["items"]
++    derived = completeness["derived"]
++    profile: Dict[str, Any] = derived.get("profile") or {}
+ 
+     all_findings: List[Dict[str, Any]] = []
+ 
+-    # Stage 1 findings
+-    if not ij.get("model_inventory_registered"):
++    def _gap_finding(stage: str, check: str, item: Dict[str, Any], recommendation: str, regulation: str) -> None:
++        # Missing / unverified evidence: blocks approval, is not a model failure.
++        all_findings.append({"stage": stage, "check": check, "severity": "HIGH",
++                             "status": "PENDING" if item["status"] == "PENDING" else "NOT ASSESSED",
++                             "finding": f"{item['title']} evidence {'incomplete' if item['status'] == 'PENDING' else 'missing or unverified'}: {item['detail']}",
++                             "recommendation": recommendation, "regulation": regulation, "evidence_gap": True})
++
++    # Stage 1 findings. Registration is the server's own attestation from the
++    # Development Inventory (same function as Stage 2 check 1.2); the client's
++    # model_inventory_registered flag is ignored.
++    registration = attest_inventory_registration(ij, claimed_identity["registered_model_id"])
++    if not registration["verified"]:
+         all_findings.append({"stage": "Stage 1", "check": "1.2 Model Inventory",
+             "severity": "HIGH", "status": "FAIL",
+             "finding": "Model not registered in model inventory",
++            "observed": registration["detail"],
+             "recommendation": "Register model with unique ID before deployment",
+             "regulation": "SS1/23 P1.2"})
+-    if not ij.get("independence_confirmed"):
++    # Independence: a recorded attestation only (the intake flag is ignored).
++    # Declared conflict = the existing HIGH FAIL; no attestation = evidence gap.
++    if ev["independence"]["status"] == "FAIL":
+         all_findings.append({"stage": "Stage 1", "check": "1.4 Independence",
+             "severity": "HIGH", "status": "FAIL",
+             "finding": "Validation independence not confirmed",
++            "observed": ev["independence"]["detail"],
+             "recommendation": "Confirm validation team has no conflict of interest",
+             "regulation": "SS1/23 P4.1"})
++    elif ev["independence"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++        _gap_finding("Stage 1", "1.4 Independence", ev["independence"],
++                     "Record the validator's independence attestation for this registered model.", "SS1/23 P4.1")
+ 
+-    # Stage 2 findings ΓÇö /data/profile's missing_by_column is
++    # Stage 2 findings ΓÇö computed by the server from the fingerprinted
++    # dataset (never the browser's profile). missing_by_column is
+     # {col: {"count": int, "percentage": float 0-100}} and duplicate_rate is
+-    # a 0-100 percentage (see main.py's build_profile ~line 916), so divide
+-    # by 100 to match the 0-1 fractions the legacy Streamlit thresholds use.
++    # a 0-100 percentage, so divide by 100 to match the 0-1 fractions the
++    # legacy Streamlit thresholds use.
++    if ev["data_quality"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++        _gap_finding("Stage 2", "2.0 Data Quality", ev["data_quality"],
++                     "Supply the validation dataset so its data quality can be profiled.", "SS1/23 P3.2")
+     missing_by_column = profile.get("missing_by_column") or {}
+     if missing_by_column:
+         def _pct(entry: Any) -> float:
+@@ -5916,11 +7235,18 @@ async def validation_stage8_findings(
+         (["macro", "gdp", "unemployment"], "2.4b Forward-Looking Documentation (MDD)",
+          "MDD does not reference macro/forward-looking variables", "Add macro overlay per IFRS 9 B5.5.49", "IFRS 9 B5.5.49", "MEDIUM", "Stage 2"),
+     ]:
++        # No MDD at all is missing evidence (one gap below), not five
++        # documentation failures; section checks run only on a supplied MDD.
++        if ev["mdd"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++            break
+         # Same word-start matching as ValidationAgent2 (no fragments inside words).
+         if not any(ValidationAgent2._keyword_in(k, mdd_lower) for k in kw):
+             all_findings.append({"stage": stage, "check": check,
+                 "severity": sev, "status": "FAIL",
+                 "finding": finding, "recommendation": rec, "regulation": reg})
++    if ev["mdd"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++        _gap_finding("Stage 2", "3.0 Model Documentation", ev["mdd"],
++                     "Supply the Model Development Document so its required sections can be reviewed.", "SS1/23 P3.1")
+ 
+     # Stage 3 (Model Replication) ΓÇö from the server-verified replication run
+     # only. Evidence-gap findings carry status NOT ASSESSED / INCONCLUSIVE
+@@ -5989,21 +7315,33 @@ async def validation_stage8_findings(
+             "recommendation": "Re-run Benchmarking on the same dataset as the replication run.",
+             "regulation": "SS1/23 P4.2"})
+ 
+-    # Stage 5 (Stress & Backtesting, was old Stage 6) ΓÇö sensitivity shock
+-    if shock_res and abs(shock_res.get("pd_change_pct", 0)) > 50:
+-        all_findings.append({"stage": "Stage 5", "check": "6.1 Sensitivity",
++    # Stage 5 (Stress & Backtesting) ΓÇö from the persisted stress suite run.
++    # (The former 6.1 rule read a browser-posted manual shock result, which is
++    # not persisted and is no longer evidence; the suite's own 6.1 sensitivity
++    # check is part of the stress run.) Failures keep the MEDIUM/WARN level the
++    # stress finding always had.
++    if ev["stress_testing"]["status"] == "FAIL":
++        all_findings.append({"stage": "Stage 5", "check": "6.0 Stress & Backtesting",
+             "severity": "MEDIUM", "status": "WARN",
+-            "finding": f"Shocking '{shock_res.get('feature')}' by {shock_res.get('magnitude_pct')}% changes avg PD by {shock_res.get('pd_change_pct', 0):.1f}%",
+-            "recommendation": "Model may be over-sensitive to this feature ΓÇö validate stability with wider test",
++            "finding": ev["stress_testing"]["detail"],
++            "recommendation": "Review the failed stress / backtesting checks and document their impact.",
+             "regulation": "SS1/23 P4.3"})
+-
+-    # Stage 6 (Explainability and Fairness, was old Stage 7) ΓÇö bias
+-    if bias_auc_gap is not None and bias_auc_gap > 0.10:
++    elif ev["stress_testing"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++        _gap_finding("Stage 5", "6.0 Stress & Backtesting", ev["stress_testing"],
++                     "Run Stress Testing (Stage 5) for this registered model on this dataset.", "SS1/23 P4.3")
++
++    # Stage 6 (Explainability and Fairness) ΓÇö bias, from the persisted bias run
++    # (the browser's bias_auc_gap is ignored). Same HIGH rule as before.
++    bias_gap = derived.get("bias_auc_gap")
++    if bias_gap is not None and bias_gap > 0.10:
+         all_findings.append({"stage": "Stage 6", "check": "8.2 Fair Lending",
+             "severity": "HIGH", "status": "FAIL",
+-            "finding": f"AUC gap of {bias_auc_gap:.4f} across protected groups",
++            "finding": f"AUC gap of {bias_gap:.4f} across protected groups",
+             "recommendation": "Investigate discriminatory bias ΓÇö model may treat protected groups unfairly",
+             "regulation": "SS1/23 P1.3"})
++    elif ev["fair_lending"]["status"] in BLOCKING_EVIDENCE_STATUSES:
++        _gap_finding("Stage 6", "8.2 Fair Lending", ev["fair_lending"],
++                     "Run the Fair Lending Bias Check for this registered model on this dataset.", "SS1/23 P1.3")
+ 
+     # ΓöÇΓöÇ Overall verdict ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+     high_count = sum(1 for f in all_findings if f["severity"] == "HIGH" and f["status"] == "FAIL")
+@@ -6022,7 +7360,14 @@ async def validation_stage8_findings(
+         findings_verdict = "REJECTED"
+         findings_desc = f"Model has {high_count} unresolved HIGH findings. Resubmission required after remediation."
+ 
+-    if rep_status == "FAIL":
++    # Demo validation is only recognized from server-side evidence.
++    # Browser-supplied demo markers are never authority and are ignored here;
++    # a real Demo A/B run must match the verified demo dataset fingerprint.
++    is_demo = bool(demo_dataset or _is_demo_dataset_fingerprint(claimed_identity.get("dataset_sha256")))
++    if is_demo:
++        verdict = "INCONCLUSIVE"
++        verdict_desc = "Demo data is not a registered model and cannot support a final approval or conditional approval verdict."
++    elif rep_status == "FAIL":
+         verdict = "REJECTED"
+         verdict_desc = "Independent replication failed one or more mandatory checks: " + " ".join(rep_evidence["reasons"])
+     elif findings_verdict == "REJECTED":
+@@ -6033,6 +7378,12 @@ async def validation_stage8_findings(
+     elif rep_status == "INCONCLUSIVE":
+         verdict = "INCONCLUSIVE"
+         verdict_desc = "No approval can be issued: " + " ".join(rep_evidence["reasons"])
++    elif completeness["gaps"]:
++        # A passing replication alone is not enough: approval of any kind
++        # needs every mandatory (and applicable conditional) evidence item.
++        verdict = "INCONCLUSIVE"
++        verdict_desc = "No approval can be issued: mandatory evidence is missing or unverified ΓÇö " + "; ".join(
++            f"{g['title']}: {g['detail']}" for g in completeness["gaps"])
+     else:
+         verdict, verdict_desc = findings_verdict, findings_desc
+ 
+@@ -6052,6 +7403,7 @@ async def validation_stage8_findings(
+         "findings": all_findings,
+         "verdict": verdict,
+         "verdict_desc": verdict_desc,
++        "demo_dataset": demo_dataset,
+         "high_count": high_count,
+         "medium_count": medium_count,
+         "low_count": max(total_count - high_count - medium_count, 0),
+@@ -6072,6 +7424,8 @@ async def validation_stage8_findings(
+             "excluded_replication_checks": EXCLUDED_REPLICATION_CHECKS,
+             "dataset_identity_source": dataset_identity_source,
+             "ignored_client_inputs": ignored_client_inputs,
++            "evidence_completeness": {k: v for k, v in completeness.items() if k != "derived"},
++            "evidence_policy": EVIDENCE_POLICY,
+         },
+     }
+ 
+@@ -6093,6 +7447,10 @@ async def validation_stage8_findings(
+                 "training_run_id": registered_run_identity(claimed_identity.get("registered_model_id"))["training_run_id"],
+                 "business_model_name": claimed_identity.get("business_model_name"),
+                 "dataset_sha256": claimed_identity.get("dataset_sha256"),
++                "demo_dataset": demo_dataset,
++                # The exact evidence runs this verdict rests on.
++                "evidence_run_ids": {k: v.get("run_id") for k, v in completeness["items"].items() if v.get("run_id")},
++                "evidence_complete": completeness["complete"],
+             },
+             full_payload=result,
+         )

@@ -3,6 +3,7 @@
 asserted unchanged) and real model training through /models/train."""
 import io
 import json
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,15 +33,23 @@ def isolated_backend(tmp_dir: Path):
             (persistence.VALIDATION_PIPELINE_LOG, persistence.DEV_PIPELINE_LOG, persistence.MODEL_INVENTORY_FILENAME)]
     before = [_fingerprint(p) for p in real]
     (tmp_dir / "app_data" / "artifacts").mkdir(parents=True, exist_ok=True)
-    mp = pytest.MonkeyPatch()
-    mp.setattr(persistence, "BACKEND_DIR", tmp_dir)
-    mp.setattr(persistence, "APP_DATA_DIR", tmp_dir / "app_data")
-    mp.setattr(persistence, "ARTIFACTS_DIR", tmp_dir / "app_data" / "artifacts")
-    mp.chdir(BACKEND_DIR)  # ValidationAgent2 reads rag_store/ relative to cwd
+
+    session_root = Path(os.environ.get("AEGIS_TEST_STORAGE_ROOT", persistence.REAL_BACKEND_DIR))
+    saved_intake_dir = main.INTAKE_DRAFTS_DIR
+    session_cwd = Path.cwd()
     try:
+        persistence.set_test_storage_root(tmp_dir)
+        main.INTAKE_DRAFTS_DIR = tmp_dir / "intake_drafts"
+        main.INTAKE_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+        os.chdir(BACKEND_DIR)  # ValidationAgent2 reads rag_store/ relative to cwd
         yield TestClient(main.app)
     finally:
-        mp.undo()
+        try:
+            persistence.set_test_storage_root(session_root)
+            main.INTAKE_DRAFTS_DIR = saved_intake_dir
+            main.INTAKE_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+        finally:
+            os.chdir(session_cwd)
         assert [_fingerprint(p) for p in real] == before, "test wrote to the real app_data logs or inventory"
 
 

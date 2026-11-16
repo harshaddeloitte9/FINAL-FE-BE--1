@@ -163,16 +163,23 @@ class ValidationAgent2:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _keyword_in(keyword: str, text: str) -> bool:
+        """Keyword must start at a word boundary, so stems still match
+        ('calibrat' → 'calibration') but fragments inside other words do
+        not ('ecl' no longer matches 'decline')."""
+        return re.search(r"\b" + re.escape(keyword.lower()), text) is not None
+
     def _mdd_contains(self, *keywords) -> bool:
-        """Return True if any keyword appears in the lowercased MDD text."""
-        return any(kw.lower() in self.mdd_text for kw in keywords)
+        """Return True if any keyword appears (at a word start) in the lowercased MDD text."""
+        return any(self._keyword_in(kw, self.mdd_text) for kw in keywords)
 
     def _mdd_quote(self, *keywords) -> Optional[str]:
         """Return first sentence in MDD containing any keyword (max 200 chars)."""
         if not self.mdd_text:
             return None
         for sentence in self.mdd_text.split("."):
-            if any(kw.lower() in sentence for kw in keywords):
+            if any(self._keyword_in(kw, sentence) for kw in keywords):
                 return sentence.strip()[:200]
         return None
 
@@ -336,17 +343,21 @@ class ValidationAgent2:
             "check_type": "doc",
         })
 
-        # 1.2 Model inventory registered
-        inventory = ij.get("model_inventory_registered", False)
+        # 1.2 Model inventory registered. Only the server's attestation from the
+        # Development Inventory counts (main.with_attested_registration); a
+        # bare model_inventory_registered boolean from the request does not.
+        attestation = ij.get("registration_attestation") if isinstance(ij.get("registration_attestation"), dict) else {}
+        inventory = attestation.get("source") == "development_inventory" and attestation.get("verified") is True
         findings.append({
             "check_id": "1.2",
             "stage": "Stage 1: Governance",
             "title": "Model Registered in Model Inventory",
             "source": "SS1/23", "principle": "P1.2", "severity": "HIGH",
             "status": "PASS" if inventory else "WARN",
-            "observed": ("Model inventory registration confirmed"
+            "observed": (f"Model inventory registration confirmed: {attestation.get('detail')}"
                          if inventory
-                         else "Model inventory registration not confirmed in submitted docs"),
+                         else "Model inventory registration not confirmed: "
+                              + (attestation.get("detail") or "registration was not verified against the Development Inventory.")),
             "threshold": "Model inventory entry present with all mandatory fields",
             "detail": "SS1/23 P1.2 requires all models to be registered in firm model inventory",
             "mdd_reference": None,
@@ -370,19 +381,25 @@ class ValidationAgent2:
             "check_type": "doc",
         })
 
-        # 1.4 Independence confirmed
-        independence = ij.get("independence_confirmed", False)
+        # 1.4 Independence confirmed. Only a server-recorded independence
+        # attestation counts; the browser's independence_confirmed flag is
+        # never used as evidence.
+        attestation = ij.get("independence_attestation") if isinstance(ij.get("independence_attestation"), dict) else {}
+        independence = bool(attestation.get("independent") is True)
+        observed = (
+            f"Independence attested by {attestation.get('attested_by') or attestation.get('declared_name') or 'validator'}: {attestation.get('detail') or 'server-recorded attestation'}"
+            if independence
+            else "No server-recorded independence attestation found for this model and current training."
+        )
         findings.append({
             "check_id": "1.4",
             "stage": "Stage 1: Governance",
             "title": "Validation Independence Confirmed",
             "source": "SS1/23", "principle": "P4.1", "severity": "HIGH",
             "status": "PASS" if independence else "FAIL",
-            "observed": ("Independence attested by validator"
-                         if independence
-                         else "Independence not confirmed"),
+            "observed": observed,
             "threshold": "Validation team independent of development team",
-            "detail": "SS1/23 P4.1 — independence is a non-negotiable requirement",
+            "detail": "SS1/23 P4.1 — independence is a non-negotiable requirement. A browser flag without a logged attestation is never accepted.",
             "mdd_reference": None,
             "check_type": "doc",
         })
@@ -1437,36 +1454,45 @@ class ValidationAgent2:
         ij = self.intake_json
 
         # 7.1 Calibrated PD output
-        calibration = ij.get("calibration_method", "Not specified")
-        cal_found   = (
-            calibration not in ("Not specified", "", None)
-            or self._mdd_contains("calibrat", "platt", "isotonic",
-                                  "through the cycle", "ttc")
-        )
+        calibration_raw = ij.get("calibration_method", "Not specified")
+        calibration = str(calibration_raw).strip() if calibration_raw is not None else ""
+        calibration_lower = calibration.lower()
+        invalid_placeholder = calibration_lower in {
+            "not specified", "", "none", "n/a", "na",
+            "not applicable", "not applicable for demonstration data",
+        }
+        cal_found = (
+            not invalid_placeholder and calibration_lower not in {"not specified", "", "none", "n/a", "na"}
+            and calibration_lower != "not applicable for demonstration data"
+        ) or self._mdd_contains("calibrat", "platt", "isotonic",
+                                 "through the cycle", "ttc")
         findings.append({
             "check_id": "7.1",
             "stage": "Stage 7: Regulatory Compliance",
             "title": "Calibrated PD Output Produced",
             "source": "IFRS 9", "principle": "5.5", "severity": "HIGH",
             "status": "PASS" if cal_found else "FAIL",
-            "observed": f"Calibration method: {calibration}",
+            "observed": f"Calibration method: {calibration or 'Not specified'}",
             "threshold": ("Calibrated PD ∈ [0,1] per borrower; "
                           "Platt scaling or isotonic regression applied"),
-            "detail": "IFRS 9 §5.5 requires calibrated PD output for ECL",
+            "detail": "IFRS 9 §5.5 requires calibrated PD output for ECL; placeholders such as 'Not applicable for demonstration data' are not evidence.",
             "mdd_reference": self._mdd_quote("calibrat", "platt",
                                               "through the cycle"),
             "check_type": "doc",
         })
 
-        # 7.2 IFRS 9 staging implemented
+        # 7.2 IFRS 9 staging documented. A keyword search can only show the
+        # MDD *documents* staging, not that it is implemented, hence the
+        # title. "12 month" was dropped: it describes the 12-month ECL
+        # horizon, not stage classification.
         staging_found = self._mdd_contains(
             "stage 1", "stage 2", "stage 3", "staging",
-            "sicr", "lifetime ecl", "12 month"
+            "sicr", "lifetime ecl"
         )
         findings.append({
             "check_id": "7.2",
             "stage": "Stage 7: Regulatory Compliance",
-            "title": "IFRS 9 Stage 1/2/3 Classification Implemented",
+            "title": "IFRS 9 Stage 1/2/3 Classification Documented in MDD",
             "source": "IFRS 9", "principle": "5.5.3", "severity": "HIGH",
             "status": "PASS" if staging_found else "FAIL",
             "observed": ("IFRS 9 staging logic found in MDD"
@@ -1481,9 +1507,10 @@ class ValidationAgent2:
             "check_type": "doc",
         })
 
-        # 7.3 SICR detection criteria
+        # 7.3 SICR detection criteria. "credit risk" was dropped: it appears
+        # in essentially every credit MDD and is not evidence of SICR criteria.
         sicr_found = self._mdd_contains(
-            "sicr", "significant increase", "credit risk",
+            "sicr", "significant increase",
             "30 dpd", "pd doubling", "backstop"
         )
         findings.append({
@@ -1511,7 +1538,7 @@ class ValidationAgent2:
         findings.append({
             "check_id": "7.4",
             "stage": "Stage 7: Regulatory Compliance",
-            "title": "Lifetime ECL for Stage 2/3 Computed",
+            "title": "Lifetime ECL for Stage 2/3 Documented in MDD",
             "source": "IFRS 9", "principle": "5.5.3", "severity": "HIGH",
             "status": "PASS" if ecl_found else "FAIL",
             "observed": ("Lifetime ECL methodology found in MDD"

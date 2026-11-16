@@ -1,0 +1,14 @@
+{
+  "dataset_name": "Independent Validation Study – Taiwan Credit Card Default",
+  "dataset_mode": "taiwan",
+  "algorithm": "LightGBM",
+  "target_col": "default",
+  "train_fraction": 0.7,
+  "validation_fraction": 0.15,
+  "test_fraction": 0.15,
+  "random_seed": 42,
+  "cv_folds": 5,
+  "cv_strategy": "stratified",
+  "reference_metric_status": "NOT AVAILABLE",
+  "reference_metric_note": "No original registered development model or independently documented developer-reported metrics were supplied for this validation study."
+}

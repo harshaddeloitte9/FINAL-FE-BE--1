@@ -6,6 +6,8 @@ import { formUpload } from "@/lib/api";
 import { ArrowRight, AlertTriangle, AlertCircle, Clock, Check, Database, Ruler, Bot, Gauge, ShieldCheck, Download, Droplet } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
+import { modelDatasetParams, runMatchesModelAndDataset } from "@/lib/history-record";
 import { StageHero, HeroChip, VCard, VEmptyState, StatusPill } from "@/components/validation-ui";
 
 export const Route = createFileRoute("/validation/data-quality")({
@@ -206,6 +208,13 @@ function DataQuality() {
   } = useDataset();
 
   const datasetLoaded = Boolean(file || profile?.csv_text || profile?.dataset_name);
+  // H2 — SHA-256 of the exact dataset bytes this page sends to
+  // /validation/stage3/run (the file, else the csv_text).
+  const soundnessDatasetBlob = useMemo<Blob | null>(
+    () => file ?? (typeof profile?.csv_text === "string" && profile.csv_text ? new Blob([profile.csv_text], { type: "text/csv" }) : null),
+    [file, profile?.csv_text],
+  );
+  const soundnessFileSha = useDatasetFileSha(soundnessDatasetBlob);
 
   // Tracks which sub-tab is active so the bottom button can tell whether
   // the reviewer is still on the first sub-tab (Data Validation — button
@@ -235,14 +244,33 @@ function DataQuality() {
   // loaded and the saved payload actually looks like this page's own
   // StageCheckResponse shape (has a `thresholdChecks` array) — otherwise
   // left untouched so a mismatched save never corrupts this page's state.
-  const { data: resumedStage3 } = useResumeState<StageCheckResponse>("validation_pipeline_log.csv", "conceptual_soundness");
+  // Scoped to the registered model chosen at Intake (recorded with each run
+  // via intake_json) and disabled without one, so another model's results
+  // never load here.
+  const soundnessRegisteredModelId =
+    ((validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
+  // H2: scoped to the registered model AND the exact dataset file loaded;
+  // older runs that never recorded the file fingerprint are never restored.
+  const soundnessResumeParams = modelDatasetParams(soundnessRegisteredModelId, soundnessFileSha);
+  const { data: resumedStage3, meta: soundnessResumeMeta } = useResumeState<StageCheckResponse>("validation_pipeline_log.csv", "conceptual_soundness", {
+    enabled: soundnessResumeParams !== null,
+    params: soundnessResumeParams ?? undefined,
+  });
   useEffect(() => {
-    if (!validationStage3Result && resumedStage3 && Array.isArray(resumedStage3.thresholdChecks)) {
+    if (
+      !validationStage3Result &&
+      resumedStage3 &&
+      Array.isArray(resumedStage3.thresholdChecks) &&
+      runMatchesModelAndDataset(soundnessResumeMeta?.summary as Record<string, any> | null, {
+        registeredModelId: soundnessRegisteredModelId,
+        datasetFileSha: soundnessFileSha,
+      })
+    ) {
       setValidationStage3Result(resumedStage3 as unknown as Record<string, any>);
       setConceptualData(resumedStage3);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumedStage3]);
+  }, [resumedStage3, soundnessResumeMeta, soundnessFileSha]);
 
   const runDataProfile = async () => {
     if (!datasetLoaded) return;
@@ -647,7 +675,8 @@ const STATUS_STYLES: Record<string, { border: string; bg: string; tone: "pass" |
 
 const CHECK_SOURCE_LABELS: Record<string, { label: string; classes: string }> = {
   llm: { label: "🤖 LLM", classes: "bg-violet-500 text-violet-950" },
-  llm_error: { label: "⚠️ LLM (call failed)", classes: "bg-amber-500 text-amber-950" },
+  llm_error: { label: "⚠️ LLM (call failed — not assessed)", classes: "bg-amber-500 text-amber-950" },
+  llm_skipped: { label: "⏸ LLM (not run yet)", classes: "bg-slate-300 text-slate-900" },
   quantitative: { label: "📐 Rule-based", classes: "bg-sky-500 text-sky-950" },
   keyword_search: { label: "🔤 Keyword search", classes: "bg-slate-400 text-slate-950" },
 };

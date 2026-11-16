@@ -1,0 +1,47 @@
+Independent Validation Study – Taiwan Credit Card Default Dataset
+
+Official source
+- UCI Machine Learning Repository: https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients
+- Dataset: Default of Credit Card Clients
+- Retrieval date: 2026-11-15
+- Original file: default of credit card clients.xls
+- Original dimensions: 30,000 observations x 25 columns (including the target and the identifier)
+- Target definition: default payment next month; 1 = default, 0 = non-default
+- Default rate in the full source dataset: approximately 22.1%
+- License / attribution: Creative Commons Attribution 4.0 (CC BY 4.0). Citation: Yeh, I.-C. (2009). Default of Credit Card Clients [Dataset]. UCI Machine Learning Repository.
+
+Sample design
+- The study uses a reproducible, no-replacement random sample of 700 observations drawn from the original dataset.
+- Fixed sampling seed: 42.
+- Sample file: demo_data/taiwan_portfolio.csv
+- Sample dimensions: 700 rows x 24 feature columns + target column
+- Sample target counts: 156 defaults, 544 non-defaults.
+- Sample default rate: 0.222857 (22.29%).
+- The sample preserves the original applicant and repayment behavior variables and does not alter labels or fabricate default events.
+
+Identifier and target mapping
+- Identifier column: customer_id (mapped from original ID)
+- Excluded identifier: customer_id
+- Target column used for model validation: default
+- Original target mapping: default payment next month = 1, non-default = 0
+- Target leakage review: the identifier field was excluded from predictors. No post-outcome or target-derived field was included in the validation feature matrix.
+
+Data quality and processing
+- Missing values are preserved in the raw source sample and handled by the validation pipeline using training-only imputation and encoding.
+- Categorical variables are encoded within the training folds only.
+- Numeric variables are imputed and scaled in a leakage-safe manner.
+- The validation study uses the existing model validation workflow and does not alter the established validation thresholds or stability criteria.
+
+Independent validation study status
+No original registered Development model or independently documented developer-reported reference metrics were supplied for this study. Results represent an independent Validation refit and must not be interpreted as registered-model reproduction.
+
+Metric provenance
+A. Dataset facts: downloaded directly from the official UCI source and preserved in demo_data/taiwan_provenance/.
+B. Independent validation metrics: computed only from the actual Validation execution on the sampled dataset.
+C. Original developer-reported metrics: unavailable / not supplied for this study.
+D. Reference comparisons: marked NOT ASSESSED when no legitimate independent reference is available.
+
+Evidence limitations
+- This is an independent validation study on a sampled subset of a real public dataset.
+- The sample is intentionally not the full original dataset and is not presented as the complete development dataset.
+- The validation result is not final approval evidence for a registered model.

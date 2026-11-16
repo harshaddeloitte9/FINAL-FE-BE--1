@@ -38,6 +38,16 @@ type TrainingResult = {
   evaluation_data?: Record<string, any> | null;
   preprocessing_contract?: Record<string, any> | null;
   model_artifact?: string;
+  // Development Inventory ID assigned by /models/train, and whether its
+  // lineage (contract + scoring bundle) was recorded — as returned, never inferred.
+  model_id?: string | null;
+  lineage?: { captured: boolean; reason?: string | null; training_run_id?: string; contract_version?: number } | null;
+  // How this training was split and how its operating threshold was chosen,
+  // and the exact dataset it used (E3/E11/E13/E14), as recorded by the backend.
+  training_run_id?: string | null;
+  split_report?: Record<string, any> | null;
+  threshold_provenance?: Record<string, any> | null;
+  dataset_identity?: Record<string, any> | null;
 };
 
 type DatasetState = {

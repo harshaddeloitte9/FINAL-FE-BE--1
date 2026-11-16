@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+
+export interface ExcludedRun {
+  run_id: string;
+  timestamp: string;
+  reason: string;
+}
 
 interface LatestRunResponse<T> {
   latest: {
@@ -7,13 +13,20 @@ interface LatestRunResponse<T> {
     timestamp: string;
     summary: unknown;
     full_payload: T | null;
+    record_status?: "current" | "legacy";
+    record_status_reason?: string | null;
   } | null;
+  // Newer runs of this stage that were passed over (legacy format, another
+  // model/dataset, model retrained since, …) and why. Nothing is deleted.
+  excluded?: ExcludedRun[];
+  excluded_counts?: Record<string, number>;
 }
 
 export interface ResumeMeta {
   runId: string;
   timestamp: string;
   summary: unknown;
+  recordStatus?: "current" | "legacy";
 }
 
 interface UseResumeStateOptions {
@@ -45,19 +58,33 @@ export function useResumeState<T = unknown>(logFile: string, stage: string, opti
   const { params, enabled = true } = options ?? {};
   const [data, setData] = useState<T | null>(null);
   const [meta, setMeta] = useState<ResumeMeta | null>(null);
+  const [excluded, setExcluded] = useState<{ runs: ExcludedRun[]; counts: Record<string, number> }>({ runs: [], counts: {} });
   const [loading, setLoading] = useState(true);
-  const fetchedRef = useRef(false);
   // Stable key so an inline `{ business_model_name }` object literal at the
   // call site doesn't retrigger the effect every render.
   const paramsKey = params ? JSON.stringify(params) : "";
+  // The query whose lookup has finished (found or not). `settled` is true
+  // only when that is the CURRENT query, so a caller never mistakes the gap
+  // before a new lookup starts for "nothing was found".
+  const queryKey = `${logFile}|${stage}|${enabled}|${paramsKey}`;
+  const [settledKey, setSettledKey] = useState<string | null>(null);
 
+  // Fetches once per scope (log file + stage + identity params). When the
+  // scope changes — e.g. a different registered model or replication run —
+  // the previous scope's result is cleared first so it can never be shown
+  // under the new identity. Cancellation (not a "fetched once" flag) guards
+  // against stale responses, which also keeps React StrictMode's dev double
+  // invoke from cancelling the only request.
   useEffect(() => {
+    setData(null);
+    setMeta(null);
+    setExcluded({ runs: [], counts: {} });
     if (!enabled) {
       setLoading(false);
+      setSettledKey(queryKey);
       return;
     }
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
+    setLoading(true);
 
     let cancelled = false;
 
@@ -65,14 +92,24 @@ export function useResumeState<T = unknown>(logFile: string, stage: string, opti
       try {
         const query = new URLSearchParams({ log_file: logFile, stage, ...(params ?? {}) });
         const res = await api<LatestRunResponse<T>>(`/history/latest?${query.toString()}`);
-        if (!cancelled && res?.latest?.full_payload) {
+        if (cancelled) return;
+        setExcluded({ runs: res?.excluded ?? [], counts: res?.excluded_counts ?? {} });
+        if (res?.latest?.full_payload) {
           setData(res.latest.full_payload);
-          setMeta({ runId: res.latest.run_id, timestamp: res.latest.timestamp, summary: res.latest.summary });
+          setMeta({
+            runId: res.latest.run_id,
+            timestamp: res.latest.timestamp,
+            summary: res.latest.summary,
+            recordStatus: res.latest.record_status,
+          });
         }
       } catch {
         // Silent — resume is a convenience, never blocks the page.
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setSettledKey(queryKey);
+        }
       }
     })();
 
@@ -82,5 +119,5 @@ export function useResumeState<T = unknown>(logFile: string, stage: string, opti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logFile, stage, enabled, paramsKey]);
 
-  return { data, loading, meta };
+  return { data, loading, meta, excluded, settled: settledKey === queryKey };
 }

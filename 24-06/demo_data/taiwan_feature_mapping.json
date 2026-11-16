@@ -1,0 +1,127 @@
+{
+  "customer_id": {
+    "source": "ID",
+    "excluded_from_predictors": true,
+    "reason": "Unique account identifier; not a model feature."
+  },
+  "credit_limit_ntd": {
+    "source": "LIMIT_BAL",
+    "type": "numeric",
+    "note": "Credit limit in NT dollars."
+  },
+  "sex": {
+    "source": "SEX",
+    "type": "categorical",
+    "note": "1 = male; 2 = female."
+  },
+  "education": {
+    "source": "EDUCATION",
+    "type": "categorical",
+    "note": "1 = graduate school; 2 = university; 3 = high school; 4 = others."
+  },
+  "marriage": {
+    "source": "MARRIAGE",
+    "type": "categorical",
+    "note": "1 = married; 2 = single; 3 = others."
+  },
+  "age": {
+    "source": "AGE",
+    "type": "numeric",
+    "note": "Age in years."
+  },
+  "pay_0": {
+    "source": "PAY_0",
+    "type": "ordinal",
+    "note": "Repayment status in September 2005; -1 = pay duly, 1 = delay 1 month, ... 9 = delay 9+ months."
+  },
+  "pay_2": {
+    "source": "PAY_2",
+    "type": "ordinal",
+    "note": "Repayment status in August 2005."
+  },
+  "pay_3": {
+    "source": "PAY_3",
+    "type": "ordinal",
+    "note": "Repayment status in July 2005."
+  },
+  "pay_4": {
+    "source": "PAY_4",
+    "type": "ordinal",
+    "note": "Repayment status in June 2005."
+  },
+  "pay_5": {
+    "source": "PAY_5",
+    "type": "ordinal",
+    "note": "Repayment status in May 2005."
+  },
+  "pay_6": {
+    "source": "PAY_6",
+    "type": "ordinal",
+    "note": "Repayment status in April 2005."
+  },
+  "bill_amt_1": {
+    "source": "BILL_AMT1",
+    "type": "numeric",
+    "note": "Bill statement amount in September 2005 (NT$)."
+  },
+  "bill_amt_2": {
+    "source": "BILL_AMT2",
+    "type": "numeric",
+    "note": "Bill statement amount in August 2005 (NT$)."
+  },
+  "bill_amt_3": {
+    "source": "BILL_AMT3",
+    "type": "numeric",
+    "note": "Bill statement amount in July 2005 (NT$)."
+  },
+  "bill_amt_4": {
+    "source": "BILL_AMT4",
+    "type": "numeric",
+    "note": "Bill statement amount in June 2005 (NT$)."
+  },
+  "bill_amt_5": {
+    "source": "BILL_AMT5",
+    "type": "numeric",
+    "note": "Bill statement amount in May 2005 (NT$)."
+  },
+  "bill_amt_6": {
+    "source": "BILL_AMT6",
+    "type": "numeric",
+    "note": "Bill statement amount in April 2005 (NT$)."
+  },
+  "pay_amt_1": {
+    "source": "PAY_AMT1",
+    "type": "numeric",
+    "note": "Payment amount in September 2005 (NT$)."
+  },
+  "pay_amt_2": {
+    "source": "PAY_AMT2",
+    "type": "numeric",
+    "note": "Payment amount in August 2005 (NT$)."
+  },
+  "pay_amt_3": {
+    "source": "PAY_AMT3",
+    "type": "numeric",
+    "note": "Payment amount in July 2005 (NT$)."
+  },
+  "pay_amt_4": {
+    "source": "PAY_AMT4",
+    "type": "numeric",
+    "note": "Payment amount in June 2005 (NT$)."
+  },
+  "pay_amt_5": {
+    "source": "PAY_AMT5",
+    "type": "numeric",
+    "note": "Payment amount in May 2005 (NT$)."
+  },
+  "pay_amt_6": {
+    "source": "PAY_AMT6",
+    "type": "numeric",
+    "note": "Payment amount in April 2005 (NT$)."
+  },
+  "default": {
+    "source": "default payment next month",
+    "type": "binary",
+    "note": "1 = default payment next month; 0 = non-default."
+  }
+}

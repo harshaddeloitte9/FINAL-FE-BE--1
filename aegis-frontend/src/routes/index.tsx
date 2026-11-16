@@ -4,6 +4,8 @@ import { ArrowRight, Boxes, ShieldCheck, Sparkles, Database, Clock3, CheckCircle
 import { useDataset } from "@/lib/app-context";
 import { api } from "@/lib/api";
 import { useResumeState } from "@/hooks/use-resume-state";
+import { useDatasetFileSha } from "@/hooks/use-dataset-file-sha";
+import { modelDatasetParams, runMatchesModelAndDataset } from "@/lib/history-record";
 import AnimatedNumber from "@/components/animated-number";
 import { cn } from "@/lib/utils";
 
@@ -206,10 +208,27 @@ function WorkspaceCard({ ws }: { ws: Workspace }) {
 // how the Validation workspace's own dashboard chooses to compute progress.
 function useValidationProgress() {
   const {
+    file, profile,
     validationIntakeData, validationStage3Result, validationStage4Result,
     validationStage5Result, validationStage7Result, validationStage8Result,
   } = useDataset();
-  const { data: resumedStress } = useResumeState<{ stage: string; report: any }>("validation_pipeline_log.csv", "stress_testing");
+  // Scoped to the registered model under validation AND the exact dataset
+  // bytes the Stress page sends (H3; see validation.index.tsx).
+  const registeredModelId = ((validationIntakeData as Record<string, any> | null | undefined)?.registered_model_id as string | undefined) || null;
+  const datasetBlob = useMemo<Blob | null>(
+    () => file ?? (typeof profile?.csv_text === "string" && profile.csv_text ? new Blob([profile.csv_text], { type: "text/csv" }) : null),
+    [file, profile?.csv_text],
+  );
+  const datasetFileSha = useDatasetFileSha(datasetBlob);
+  const stressParams = modelDatasetParams(registeredModelId, datasetFileSha);
+  const { data: resumedStressRaw, meta: stressMeta } = useResumeState<{ stage: string; report: any }>("validation_pipeline_log.csv", "stress_testing", {
+    enabled: stressParams !== null,
+    params: stressParams ?? undefined,
+  });
+  const resumedStress = runMatchesModelAndDataset(stressMeta?.summary as Record<string, any> | null, {
+    registeredModelId,
+    datasetFileSha,
+  }) ? resumedStressRaw : null;
 
   const flags = [
     Boolean(validationIntakeData),
