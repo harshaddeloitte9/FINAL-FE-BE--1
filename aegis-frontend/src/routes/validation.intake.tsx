@@ -547,7 +547,6 @@ function Intake() {
 
   const demoOptions = [
     { key: "Demo A — Original Demo", mode: "clean" },
-    { key: "Demo A — Taiwan Benchmark", mode: "taiwan" },
     { key: "Demo B — Flawed Submission", mode: "flawed" },
   ];
 

@@ -852,19 +852,11 @@ function ModelReplicationPanel({
     () => String(profile?.demo_mode ?? validationIntakeData?.demo_mode ?? "").trim().toLowerCase(),
     [profile?.demo_mode, validationIntakeData?.demo_mode],
   );
-  const hasReferenceMetrics = React.useMemo(() => {
-    const values = validationMddMetrics ?? {};
-    const hasNonEmptyMetric = Object.values(values).some(
-      (value) => value !== null && value !== undefined && String(value).trim() !== "",
-    );
-    return hasNonEmptyMetric || Boolean(mddFile && mddFile.name);
-  }, [validationMddMetrics, mddFile]);
   const referenceMetricsProvenanceLabel = React.useMemo(() => {
     if (demoMode === "clean" || demoMode === "flawed") return "Demo MDD reference metrics – illustrative";
-    if (demoMode === "taiwan" && !hasReferenceMetrics) return "No developer-reported reference metrics available";
     if (mddFile) return "Uploaded MDD reference metrics";
     return "Reference metrics";
-  }, [demoMode, hasReferenceMetrics, mddFile]);
+  }, [demoMode, mddFile]);
   const isDemoPrefill = demoMode === "clean" || demoMode === "flawed";
   React.useEffect(() => {
     const normalizedModelIdentity = (modelIdentity || selectedModelName || validationIntakeData?.model_name || "")
@@ -1795,9 +1787,7 @@ function ModelReplicationPanel({
                   "inline-flex w-fit items-center rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em]",
                   isDemoPrefill
                     ? "border-amber-200 bg-amber-50 text-amber-800"
-                    : demoMode === "taiwan"
-                      ? "border-slate-200 bg-slate-100 text-slate-600"
-                      : "border-blue-200 bg-blue-50 text-blue-800",
+                    : "border-blue-200 bg-blue-50 text-blue-800",
                 )}
               >
                 {referenceMetricsProvenanceLabel}
@@ -1805,9 +1795,7 @@ function ModelReplicationPanel({
               <p className="text-xs text-slate-600">
                 {isDemoPrefill
                   ? "These values are demo-prefilled for illustration only and are not a developer-submitted model record."
-                  : demoMode === "taiwan" && !hasReferenceMetrics
-                    ? "There are no developer-reported reference metrics for this Taiwan dataset. Manual entry remains available."
-                    : "For checks R4.2 / R4.3 / R4.4 / R4.8 — auto-filled from this dataset's training run where available. Edit any value, or leave blank to skip that check. Values extracted from an uploaded MDD override these on run."}
+                  : "For checks R4.2 / R4.3 / R4.4 / R4.8 — auto-filled from this dataset's training run where available. Edit any value, or leave blank to skip that check. Values extracted from an uploaded MDD override these on run."}
               </p>
             </div>
             <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-xs text-primary underline underline-offset-2">
